@@ -11,14 +11,14 @@ interface Drink {
   serveTimeMs: number;
 }
 
-type SofaFacing = 'se' | 'sw' | 'ne' | 'nw';
+type IsoFacing = 'se' | 'sw' | 'ne' | 'nw';
 
 interface FurnitureDef {
   id: string;
   type: string;
   sprite: string;
-  facing?: SofaFacing;
-  sprites?: Partial<Record<SofaFacing, string>>;
+  facing?: IsoFacing;
+  sprites?: Partial<Record<IsoFacing, string>>;
   tile: [number, number];
   footprint: [number, number];
   interact?: [number, number];
@@ -49,14 +49,14 @@ interface CharactersFile {
 interface SavedLayoutItem {
   id: string;
   tile: [number, number];
-  facing?: SofaFacing;
+  facing?: IsoFacing;
 }
 
 interface SavedLayout {
   furniture: SavedLayoutItem[];
 }
 
-const SOFA_FACINGS: SofaFacing[] = ['se', 'sw', 'nw', 'ne'];
+const FACINGS: IsoFacing[] = ['se', 'sw', 'nw', 'ne'];
 const LAYOUT_KEY = 'night-club-layout-v1';
 const TAP_THRESH = 10;
 const HUD_TOP = 56;
@@ -88,7 +88,8 @@ export class ClubScene extends Phaser.Scene {
 
   private sofaDef!: FurnitureDef;
   private barDef!: FurnitureDef;
-  private sofaFacing: SofaFacing = 'se';
+  private sofaFacing: IsoFacing = 'se';
+  private barFacing: IsoFacing = 'se';
   private sofaImage!: Phaser.GameObjects.Image;
   private barImage!: Phaser.GameObjects.Image;
   private barGlow!: Phaser.GameObjects.Arc;
@@ -195,9 +196,9 @@ export class ClubScene extends Phaser.Scene {
     this.applySavedLayout();
 
     this.requireTexture('room_floor');
-    this.requireTexture('furn_bar');
-    for (const facing of SOFA_FACINGS) {
+    for (const facing of FACINGS) {
       this.requireTexture(`furn_sofa_${facing}`);
+      this.requireTexture(`furn_bar_${facing}`);
     }
     this.requireTexture(this.chars.bartender.sprite || 'bartender');
 
@@ -286,7 +287,7 @@ export class ClubScene extends Phaser.Scene {
         ) {
           def.tile = [item.tile[0], item.tile[1]];
         }
-        if (def.type === 'sofa' && item.facing && SOFA_FACINGS.includes(item.facing)) {
+        if (item.facing && FACINGS.includes(item.facing)) {
           def.facing = item.facing;
         }
       }
@@ -320,7 +321,7 @@ export class ClubScene extends Phaser.Scene {
       furniture: this.scenario.furniture.map((f) => ({
         id: f.id,
         tile: [...f.tile] as [number, number],
-        facing: f.type === 'sofa' ? (f.facing as SofaFacing) : undefined,
+        facing: f.facing as IsoFacing | undefined,
       })),
     };
     try {
@@ -500,11 +501,15 @@ export class ClubScene extends Phaser.Scene {
     return false;
   }
 
-  private sofaTextureKey(facing: SofaFacing, def?: FurnitureDef): string {
-    const src = def ?? this.sofaDef;
+  private furnitureTextureKey(kind: 'sofa' | 'bar', facing: IsoFacing, def?: FurnitureDef): string {
+    const src = def ?? (kind === 'sofa' ? this.sofaDef : this.barDef);
     const fromScenario = src?.sprites?.[facing];
     if (fromScenario) return fromScenario;
-    return `furn_sofa_${facing}`;
+    return kind === 'sofa' ? `furn_sofa_${facing}` : `furn_bar_${facing}`;
+  }
+
+  private applyBarDisplaySize(): void {
+    this.barImage.setDisplaySize(168, 124);
   }
 
   private placeFurniture(): void {
@@ -512,10 +517,14 @@ export class ClubScene extends Phaser.Scene {
       const { x, y } = tileToScreen(f.tile[0], f.tile[1], this.iso);
       if (f.type === 'bar') {
         this.barDef = f;
-        this.requireTexture('furn_bar');
-        this.barImage = this.add.image(x, y - 10, 'furn_bar');
+        this.barFacing = (f.facing as IsoFacing) || 'se';
+        if (!FACINGS.includes(this.barFacing)) this.barFacing = 'se';
+        const bkey = this.furnitureTextureKey('bar', this.barFacing, f);
+        this.requireTexture(bkey);
+        this.barImage = this.add.image(x, y - 16, bkey);
+        this.applyBarDisplaySize();
         this.barImage.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
-        this.barGlow = this.add.circle(x, y - 20, 40, 0xffaa44, 0.12);
+        this.barGlow = this.add.circle(x, y - 20, 36, 0xaa44ff, 0.08);
         this.barGlow.setDepth(depthForTile(f.tile[0], f.tile[1], 2));
         this.barImage.setInteractive({ useHandCursor: true, draggable: false });
         this.barImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
@@ -533,9 +542,9 @@ export class ClubScene extends Phaser.Scene {
         });
       } else if (f.type === 'sofa') {
         this.sofaDef = f;
-        this.sofaFacing = (f.facing as SofaFacing) || 'se';
-        if (!SOFA_FACINGS.includes(this.sofaFacing)) this.sofaFacing = 'se';
-        const key = this.sofaTextureKey(this.sofaFacing, f);
+        this.sofaFacing = (f.facing as IsoFacing) || 'se';
+        if (!FACINGS.includes(this.sofaFacing)) this.sofaFacing = 'se';
+        const key = this.furnitureTextureKey('sofa', this.sofaFacing, f);
         this.requireTexture(key);
         this.sofaImage = this.add.image(x, y - 6, key);
         this.sofaImage.setDisplaySize(110, 84);
@@ -554,9 +563,11 @@ export class ClubScene extends Phaser.Scene {
             this.selectFurniture('sofa');
           }
         });
-        this.buildRotateUi(x, y);
       }
     }
+    const anchor = this.sofaDef || this.barDef;
+    const pos = tileToScreen(anchor.tile[0], anchor.tile[1], this.iso);
+    this.buildRotateUi(pos.x, pos.y);
   }
 
   private beginFurniturePointer(p: Phaser.Input.Pointer, id: SelectedFurniture): void {
@@ -623,10 +634,13 @@ export class ClubScene extends Phaser.Scene {
       }
     } else if (id === 'bar') {
       const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
-      this.barImage.setPosition(x, y - 10);
+      this.barImage.setPosition(x, y - 16);
       this.barImage.setDepth(depthForTile(this.barDef.tile[0], this.barDef.tile[1], 3));
       this.barGlow.setPosition(x, y - 20);
       this.barGlow.setDepth(depthForTile(this.barDef.tile[0], this.barDef.tile[1], 2));
+      if (this.selectedFurniture === 'bar') {
+        this.rotateUi.setPosition(x, y - 86);
+      }
     }
   }
 
@@ -650,7 +664,7 @@ export class ClubScene extends Phaser.Scene {
         p.event.stopPropagation();
         this.blockPanGesture = true;
         this.panActive = false;
-        this.rotateSofa(dir);
+        this.rotateSelected(dir);
       });
       c.add([b, t]);
       return c;
@@ -673,8 +687,10 @@ export class ClubScene extends Phaser.Scene {
       this.buildHint.setText('Arrastra el sofá · Girar ⟲ ⟳').setVisible(true);
     } else {
       this.barImage.setTint(0xffe0a0);
-      this.rotateUi.setVisible(false);
-      this.buildHint.setText('Arrastra la barra (sin girar)').setVisible(true);
+      this.rotateUi.setVisible(true);
+      const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
+      this.rotateUi.setPosition(x, y - 86);
+      this.buildHint.setText('Arrastra la barra · Girar ⟲ ⟳').setVisible(true);
     }
   }
 
@@ -712,14 +728,31 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.emit('build-mode-changed', this.buildMode);
   };
 
+  private rotateSelected(dir: number): void {
+    if (!this.buildMode) return;
+    if (this.selectedFurniture === 'bar') this.rotateBar(dir);
+    else this.rotateSofa(dir);
+  }
+
   private rotateSofa(dir: number): void {
     if (!this.buildMode) return;
-    const idx = SOFA_FACINGS.indexOf(this.sofaFacing);
-    const next = SOFA_FACINGS[(idx + dir + SOFA_FACINGS.length) % SOFA_FACINGS.length];
+    const idx = FACINGS.indexOf(this.sofaFacing);
+    const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
     this.sofaFacing = next;
     this.sofaDef.facing = next;
-    this.sofaImage.setTexture(this.sofaTextureKey(next));
+    this.sofaImage.setTexture(this.furnitureTextureKey('sofa', next));
     this.sofaImage.setDisplaySize(110, 84);
+    this.persistLayout();
+  }
+
+  private rotateBar(dir: number): void {
+    if (!this.buildMode) return;
+    const idx = FACINGS.indexOf(this.barFacing);
+    const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
+    this.barFacing = next;
+    this.barDef.facing = next;
+    this.barImage.setTexture(this.furnitureTextureKey('bar', next));
+    this.applyBarDisplaySize();
     this.persistLayout();
   }
 

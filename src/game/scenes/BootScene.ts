@@ -83,7 +83,11 @@ export class BootScene extends Phaser.Scene {
     this.load.image('furn_sofa_sw', 'assets/furniture/sofa_sw.png');
     this.load.image('furn_sofa_ne', 'assets/furniture/sofa_ne.png');
     this.load.image('furn_sofa_nw', 'assets/furniture/sofa_nw.png');
-    this.load.image('furn_bar', 'assets/furniture/bar.png');
+    this.load.image('furn_bar_se', 'assets/furniture/bar_se.png');
+    this.load.image('furn_bar_sw', 'assets/furniture/bar_sw.png');
+    this.load.image('furn_bar_ne', 'assets/furniture/bar_ne.png');
+    this.load.image('furn_bar_nw', 'assets/furniture/bar_nw.png');
+    this.load.image('furn_bar', 'assets/furniture/bar_se.png');
 
     // Optional legacy tiles
     this.load.image('tile_floor', 'assets/tiles/floor.png');

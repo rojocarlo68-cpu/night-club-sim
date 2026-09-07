@@ -29,6 +29,13 @@
       "id": "bar",
       "type": "bar",
       "sprite": "bar",
+      "facing": "se",
+      "sprites": {
+        "se": "furn_bar_se",
+        "sw": "furn_bar_sw",
+        "ne": "furn_bar_ne",
+        "nw": "furn_bar_nw"
+      },
       "tile": [6, 2],
       "footprint": [2, 1],
       "interact": [5, 2],

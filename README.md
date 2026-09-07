@@ -14,7 +14,7 @@ Vite + TypeScript + Phaser 3. UI en espanol.
    - Cerrar noche: resumen de la sesion
    - Clientes van a barra o sofa; Luna atiende sola
    - Arrastra / desliza la pantalla para mover la camara (un dedo o mouse). Toque corto = seleccionar.
-   - Construir: coloca sofa (mover + girar 4 caras) y barra (solo mover). Listo vuelve al juego.
+   - Construir: coloca sofa y barra (mover + girar 4 caras). Listo vuelve al juego.
    - En juego, toca Luna para su panel. El sofa no gira fuera de Construir.
 
 Meta: gana dinero sin dejar a Luna sin energia.
@@ -38,7 +38,12 @@ Sofa 4 angulos PNG transparente:
 - public/assets/furniture/sofa_nw.png (frente arriba-izquierda)
 
 Reemplazar: sobrescribe esos archivos con los mismos nombres. Si cambias nombres, actualiza BootScene y scenario.json sprites.
-Barra, personajes y tiles: PNG (sin load.svg). Paleta oscura + neon magenta/cyan.
+Barra 4 angulos PNG transparente (mismo pipeline que el sofa):
+- public/assets/furniture/bar_se.png (frente clientes abajo-derecha)
+- public/assets/furniture/bar_sw.png (frente clientes abajo-izquierda)
+- public/assets/furniture/bar_ne.png (frente clientes arriba-derecha)
+- public/assets/furniture/bar_nw.png (frente clientes arriba-izquierda)
+Personajes y tiles: PNG (sin load.svg). Paleta oscura + neon magenta/cyan.
 Sofas max ~512px ancho; room_floor.jpeg max ~1280 en el lado largo.
 
 ## Stack
@@ -49,7 +54,7 @@ Sofas max ~512px ancho; room_floor.jpeg max ~1280 en el lado largo.
 ## Sprint hooks
 - Mas personal, bebidas, cola visual
 - Musica, neon, VIP
-- Arte final de barra y bartender (placeholders SVG/PNG por ahora)
+- Arte final del bartender (placeholder PNG por ahora)
 
 ## GitHub Pages
 
