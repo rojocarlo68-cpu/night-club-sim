@@ -25,11 +25,20 @@ export class BootScene extends Phaser.Scene {
       fill.width = 4 + 232 * v;
     });
 
-    // SVG assets (placeholders — replace with PNGs later)
+    // Room backdrop (Carlo art)
+    this.load.image('room_floor', 'assets/tiles/room_floor.jpeg');
+
+    // Furniture — sofa has 4 isometric angles (PNG); bar stays SVG for now
+    this.load.image('furn_sofa_se', 'assets/furniture/sofa_se.png');
+    this.load.image('furn_sofa_sw', 'assets/furniture/sofa_sw.png');
+    this.load.image('furn_sofa_ne', 'assets/furniture/sofa_ne.png');
+    this.load.image('furn_sofa_nw', 'assets/furniture/sofa_nw.png');
+    this.load.svg('furn_bar', 'assets/furniture/bar.svg', { width: 96, height: 80 });
+
+    // Optional legacy tiles (unused when room art is shown)
     this.load.svg('tile_floor', 'assets/tiles/floor.svg', { width: 64, height: 32 });
     this.load.svg('tile_wall', 'assets/tiles/wall.svg', { width: 64, height: 48 });
-    this.load.svg('furn_bar', 'assets/furniture/bar.svg', { width: 96, height: 80 });
-    this.load.svg('furn_sofa', 'assets/furniture/sofa.svg', { width: 96, height: 64 });
+
     this.load.svg('bartender', 'assets/characters/bartender.svg', { width: 64, height: 64 });
     this.load.svg('patron_a', 'assets/characters/patron_a.svg', { width: 64, height: 64 });
     this.load.svg('patron_b', 'assets/characters/patron_b.svg', { width: 64, height: 64 });

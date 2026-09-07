@@ -13,6 +13,7 @@ Vite + TypeScript + Phaser 3. UI en espanol.
    - Descansar: Luna al sofa recupera energia
    - Cerrar noche: resumen de la sesion
    - Clientes van a barra o sofa; Luna atiende sola
+   - Sofa: clic para seleccionar; botones Girar / tecla R / clic derecho (SE/SW/NE/NW)
 
 Meta: gana dinero sin dejar a Luna sin energia.
 
@@ -23,19 +24,19 @@ Instalar, luego build. Salida en carpeta dist. Preview disponible.
 ## Datos
 
 - public/data/characters.json — bartender y clientes
-- public/data/scenario.json — mapa, muebles, bebidas, duracion
+- public/data/scenario.json — mapa, muebles (sofa.facing), bebidas, duracion
 
-## Arte — reemplazar placeholders
+## Arte — room + sofa (Carlo)
 
-SVG anime/chibi en public/assets/.
+Room: public/assets/tiles/room_floor.jpeg (tambien .png)
+Sofa 4 angulos PNG transparente:
+- public/assets/furniture/sofa_se.png (frente abajo-derecha)
+- public/assets/furniture/sofa_sw.png (frente abajo-izquierda)
+- public/assets/furniture/sofa_ne.png (frente arriba-derecha)
+- public/assets/furniture/sofa_nw.png (frente arriba-izquierda)
 
-Tamanos sugeridos PNG:
-- tiles/floor 64x32, wall 64x48
-- furniture/bar 96x80, sofa 96x64
-- characters/* 64x64 (pie abajo)
-- ui/favicon 64x64
-
-Pasos Carlo: mismos nombres de archivo; si PNG, cambia load.svg a load.image en BootScene; paleta oscura + neon rosa/cyan + luz calida.
+Reemplazar: sobrescribe esos archivos con los mismos nombres. Si cambias nombres, actualiza BootScene y scenario.json sprites.
+Barra/personajes siguen SVG. Paleta oscura + neon magenta/cyan.
 
 ## Stack
 - Vite 5 + TypeScript + Phaser 3
@@ -48,14 +49,9 @@ Pasos Carlo: mismos nombres de archivo; si PNG, cambia load.svg a load.image en 
 
 ## GitHub Pages
 
-Workflow: .github/workflows/pages.yml
 URL esperada: https://rojocarlo68-cpu.github.io/night-club-sim/
-Repos privados suelen requerir GitHub Pro para Pages. Activa Source=GitHub Actions.
+Workflow pendiente en _pages_workflow_pending/pages.yml (scope workflow).
+Deploy manual: dist/ + .nojekyll a rama gh-pages.
 
 ## Licencia
 Proyecto privado de Carlo Guayaba — MVP interno.
-
-## Pages workflow (pendiente de scope)
-
-El archivo Actions esta en `_pages_workflow_pending/pages.yml` porque el token OAuth no tiene scope `workflow`.
-Para activar: mueve ese archivo a `.github/workflows/pages.yml` desde la web de GitHub o con un token que incluya scope workflow, luego Settings > Pages > Source = GitHub Actions.

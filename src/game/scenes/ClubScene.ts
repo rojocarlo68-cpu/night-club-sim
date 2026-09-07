@@ -11,10 +11,14 @@ interface Drink {
   serveTimeMs: number;
 }
 
+type SofaFacing = 'se' | 'sw' | 'ne' | 'nw';
+
 interface FurnitureDef {
   id: string;
   type: string;
   sprite: string;
+  facing?: SofaFacing;
+  sprites?: Partial<Record<SofaFacing, string>>;
   tile: [number, number];
   footprint: [number, number];
   interact?: [number, number];
@@ -42,6 +46,8 @@ interface CharactersFile {
   patrons: PatronData[];
 }
 
+const SOFA_FACINGS: SofaFacing[] = ['se', 'sw', 'nw', 'ne'];
+
 export type NightPhase = 'prep' | 'open' | 'summary';
 
 export class ClubScene extends Phaser.Scene {
@@ -63,6 +69,12 @@ export class ClubScene extends Phaser.Scene {
   private staffSpot!: { col: number; row: number };
   private drinks: Drink[] = [];
 
+  private sofaDef!: FurnitureDef;
+  private sofaFacing: SofaFacing = 'se';
+  private sofaImage!: Phaser.GameObjects.Image;
+  private sofaSelected = false;
+  private rotateUi!: Phaser.GameObjects.Container;
+
   constructor() {
     super('ClubScene');
   }
@@ -76,10 +88,11 @@ export class ClubScene extends Phaser.Scene {
     this.phase = 'prep';
     this.patrons = [];
     this.drinks = this.scenario.drinks;
+    this.sofaSelected = false;
 
     const { cols, rows, tileWidth, tileHeight } = this.scenario.map;
     const originX = this.cameras.main.width / 2;
-    const originY = 90;
+    const originY = 70;
     this.iso = { tileWidth, tileHeight, originX, originY };
 
     const blocked = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
@@ -96,10 +109,10 @@ export class ClubScene extends Phaser.Scene {
     this.placeFurniture();
 
     const bar = this.scenario.furniture.find((f) => f.type === 'bar')!;
-    const sofa = this.scenario.furniture.find((f) => f.type === 'sofa')!;
+    this.sofaDef = this.scenario.furniture.find((f) => f.type === 'sofa')!;
     this.barInteract = { col: bar.interact![0], row: bar.interact![1] };
     this.staffSpot = { col: bar.staffSpot![0], row: bar.staffSpot![1] };
-    this.sofaRest = { col: sofa.restSpot![0], row: sofa.restSpot![1] };
+    this.sofaRest = { col: this.sofaDef.restSpot![0], row: this.sofaDef.restSpot![1] };
 
     const bd = this.chars.bartender;
     this.bartender = new Bartender(
@@ -111,20 +124,26 @@ export class ClubScene extends Phaser.Scene {
       bd
     );
     this.bartender.sprite.on('pointerdown', () => {
+      this.deselectSofa();
       this.bartender.setSelected(true);
       this.game.events.emit('select-bartender', this.bartender);
     });
 
+    this.input.mouse?.disableContextMenu();
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
-      if (p.rightButtonDown()) return;
-      // deselect if clicking empty
+      if (p.rightButtonDown()) {
+        if (this.sofaSelected) {
+          this.rotateSofa(1);
+        }
+        return;
+      }
     });
 
-    this.cameras.main.setBackgroundColor('#0a0612');
-    // Ambient neon glow
-    this.add
-      .rectangle(originX, originY + 180, 520, 360, 0xff3ca0, 0.04)
-      .setDepth(0);
+    this.input.keyboard?.on('keydown-R', () => {
+      if (this.sofaSelected) this.rotateSofa(1);
+    });
+
+    this.cameras.main.setBackgroundColor('#05030a');
 
     this.game.events.emit('club-ready', this.getHudState());
     this.game.events.on('cmd-open-night', this.openNight, this);
@@ -136,38 +155,121 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private drawRoom(cols: number, rows: number): void {
+    const { originX, originY, tileWidth, tileHeight } = this.iso;
+    // Center of the logical iso diamond
+    const midCol = (cols - 1) / 2;
+    const midRow = (rows - 1) / 2;
+    const center = tileToScreen(midCol, midRow, this.iso);
+
+    // Scale room art so the glossy platform covers the playable grid
+    const gridW = cols * tileWidth * 0.92;
+    const gridH = rows * tileHeight * 1.35;
+    const room = this.add.image(center.x, center.y + 8, 'room_floor');
+    room.setDisplaySize(gridW * 1.55, gridH * 1.55);
+    room.setDepth(0);
+    room.setAlpha(1);
+
+    // Lightweight logical floor markers (very subtle) for pathfinding feel
     const blockedWall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
+        if (blockedWall.has(`${col},${row}`)) continue;
         const { x, y } = tileToScreen(col, row, this.iso);
-        const isWall = blockedWall.has(`${col},${row}`);
-        const edge =
-          col === 0 || row === 0 || col === cols - 1 || row === rows - 1;
-        if (isWall && edge) {
-          const wall = this.add.image(x, y - 8, 'tile_wall');
-          wall.setDepth(depthForTile(col, row, 1));
-        } else if (!isWall) {
-          const tile = this.add.image(x, y, 'tile_floor');
-          tile.setDepth(depthForTile(col, row, 0));
-          // warm bar light tint near bar
-          if (col >= 5 && row <= 5) tile.setTint(0xffe0cc);
-        }
+        const dot = this.add.circle(x, y, 1.5, 0x2ad6ff, 0.08);
+        dot.setDepth(1);
       }
     }
+
+    // Soft vignette so characters pop a bit
+    this.add
+      .rectangle(originX, originY + 200, 640, 420, 0x000000, 0.12)
+      .setDepth(1);
+  }
+
+  private sofaTextureKey(facing: SofaFacing): string {
+    const fromScenario = this.sofaDef.sprites?.[facing];
+    if (fromScenario) return fromScenario;
+    return `furn_sofa_${facing}`;
   }
 
   private placeFurniture(): void {
     for (const f of this.scenario.furniture) {
       const { x, y } = tileToScreen(f.tile[0], f.tile[1], this.iso);
-      const key = f.type === 'bar' ? 'furn_bar' : 'furn_sofa';
-      const img = this.add.image(x, y - 10, key);
-      img.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
       if (f.type === 'bar') {
-        // warm light
+        const img = this.add.image(x, y - 10, 'furn_bar');
+        img.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
         const glow = this.add.circle(x, y - 20, 40, 0xffaa44, 0.12);
         glow.setDepth(depthForTile(f.tile[0], f.tile[1], 2));
+      } else if (f.type === 'sofa') {
+        this.sofaFacing = (f.facing as SofaFacing) || 'se';
+        if (!SOFA_FACINGS.includes(this.sofaFacing)) this.sofaFacing = 'se';
+        const key = this.sofaTextureKey(this.sofaFacing);
+        this.sofaImage = this.add.image(x, y - 6, key);
+        // Art sofas are large; scale down to footprint
+        this.sofaImage.setDisplaySize(110, 84);
+        this.sofaImage.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
+        this.sofaImage.setInteractive({ useHandCursor: true });
+        this.sofaImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
+          if (p.rightButtonDown()) return;
+          this.selectSofa();
+        });
+        this.buildRotateUi(x, y);
       }
     }
+  }
+
+  private buildRotateUi(x: number, y: number): void {
+    this.rotateUi = this.add.container(x, y - 70).setDepth(9000).setVisible(false);
+
+    const bg = this.add.rectangle(0, 0, 168, 40, 0x1a0e28, 0.92);
+    bg.setStrokeStyle(1, 0xff3ca0);
+
+    const mk = (ox: number, label: string, dir: number) => {
+      const c = this.add.container(ox, 0);
+      const b = this.add.rectangle(0, 0, 72, 28, 0xb43282, 1);
+      b.setStrokeStyle(1, 0xff7ac8);
+      b.setInteractive({ useHandCursor: true });
+      const t = this.add
+        .text(0, 0, label, { fontSize: '12px', color: '#ffffff', fontStyle: 'bold' })
+        .setOrigin(0.5);
+      b.on('pointerover', () => b.setFillStyle(0xd44a9a));
+      b.on('pointerout', () => b.setFillStyle(0xb43282));
+      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
+        p.event.stopPropagation();
+        this.rotateSofa(dir);
+      });
+      c.add([b, t]);
+      return c;
+    };
+
+    this.rotateUi.add([bg, mk(-40, 'Girar ⟲', -1), mk(40, 'Girar ⟳', 1)]);
+  }
+
+  private selectSofa(): void {
+    this.sofaSelected = true;
+    this.bartender.setSelected(false);
+    this.game.events.emit('cmd-deselect-bartender');
+    this.sofaImage.setTint(0xffc0e8);
+    this.rotateUi.setVisible(true);
+    const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
+    this.rotateUi.setPosition(x, y - 72);
+  }
+
+  private deselectSofa(): void {
+    if (!this.sofaSelected) return;
+    this.sofaSelected = false;
+    this.sofaImage.clearTint();
+    this.rotateUi.setVisible(false);
+  }
+
+  private rotateSofa(dir: number): void {
+    const idx = SOFA_FACINGS.indexOf(this.sofaFacing);
+    const next = SOFA_FACINGS[(idx + dir + SOFA_FACINGS.length) % SOFA_FACINGS.length];
+    this.sofaFacing = next;
+    this.sofaDef.facing = next;
+    // Persist default facing into cached scenario (session); source file is the template
+    this.sofaImage.setTexture(this.sofaTextureKey(next));
+    this.sofaImage.setDisplaySize(110, 84);
   }
 
   openNight = (): void => {
@@ -175,6 +277,7 @@ export class ClubScene extends Phaser.Scene {
     if (this.phase === 'summary') {
       this.resetForNewNight();
     }
+    this.deselectSofa();
     this.phase = 'open';
     this.nightEarned = 0;
     this.servedCount = 0;
@@ -273,7 +376,6 @@ export class ClubScene extends Phaser.Scene {
   private tryServe(patron: Patron, drink: Drink): void {
     if (this.phase !== 'open' || !patron.active) return;
     if (!this.bartender.canServe()) {
-      // wait and retry
       this.time.delayedCall(800, () => {
         if (patron.active && patron.waiting && !patron.served) this.tryServe(patron, drink);
       });
@@ -340,6 +442,7 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
     if (this.bartender.state === 'resting') return;
+    this.deselectSofa();
     this.bartender.setSelected(true);
     this.game.events.emit('select-bartender', this.bartender);
     this.bartender.state = 'busy';
@@ -367,6 +470,7 @@ export class ClubScene extends Phaser.Scene {
 
   private finishNight(): void {
     this.phase = 'summary';
+    this.deselectSofa();
     this.patrons.forEach((p) => {
       this.releaseTile(p.grid);
       p.destroy();
@@ -420,4 +524,3 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-rest', this.orderRest, this);
   }
 }
-

@@ -29,19 +29,26 @@
       "id": "bar",
       "type": "bar",
       "sprite": "bar",
-      "tile": [7, 3],
+      "tile": [6, 2],
       "footprint": [2, 1],
-      "interact": [6, 3],
-      "staffSpot": [7, 4]
+      "interact": [5, 2],
+      "staffSpot": [6, 3]
     },
     {
       "id": "sofa",
       "type": "sofa",
       "sprite": "sofa",
-      "tile": [3, 6],
+      "facing": "se",
+      "sprites": {
+        "se": "furn_sofa_se",
+        "sw": "furn_sofa_sw",
+        "ne": "furn_sofa_ne",
+        "nw": "furn_sofa_nw"
+      },
+      "tile": [2, 5],
       "footprint": [2, 1],
-      "interact": [3, 5],
-      "restSpot": [3, 6]
+      "interact": [2, 4],
+      "restSpot": [2, 5]
     }
   ],
   "spawnTile": [5, 8],
