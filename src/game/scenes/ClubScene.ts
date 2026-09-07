@@ -393,10 +393,13 @@ export class ClubScene extends Phaser.Scene {
     const midRow = (rows - 1) / 2;
     const center = tileToScreen(midCol, midRow, this.iso);
 
-    const gridW = cols * tileWidth * 0.92;
-    const gridH = rows * tileHeight * 1.35;
-    this.roomImage = this.add.image(center.x, center.y + 8, 'room_floor');
-    this.roomImage.setDisplaySize(gridW * 1.55, gridH * 1.55);
+    // Size room art so the neon platform border hugs the outer placeable tiles
+    // (art neon bbox covers ~87% of the image; match that to the iso diamond).
+    const diamondW = (cols + rows - 2) * (tileWidth / 2);
+    const diamondH = (cols + rows - 2) * (tileHeight / 2);
+    const neonFrac = 0.87;
+    this.roomImage = this.add.image(center.x, center.y + 6, 'room_floor');
+    this.roomImage.setDisplaySize(diamondW / neonFrac, diamondH / neonFrac);
     this.roomImage.setDepth(0);
     this.roomImage.setAlpha(1);
 
@@ -738,22 +741,73 @@ export class ClubScene extends Phaser.Scene {
     if (!this.buildMode) return;
     const idx = FACINGS.indexOf(this.sofaFacing);
     const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
+    const prevFacing = this.sofaFacing;
+    const prevFp: [number, number] = [...this.sofaDef.footprint] as [number, number];
+    const prevRest = [...this.sofaRestOff] as [number, number];
+    const prevInteract = [...this.sofaInteractOff] as [number, number];
+
+    // 90° grid rotate: footprint swaps; offsets rotate with facing
+    this.sofaDef.footprint = [prevFp[1], prevFp[0]];
+    if (dir > 0) {
+      this.sofaRestOff = [-prevRest[1], prevRest[0]];
+      this.sofaInteractOff = [-prevInteract[1], prevInteract[0]];
+    } else {
+      this.sofaRestOff = [prevRest[1], -prevRest[0]];
+      this.sofaInteractOff = [prevInteract[1], -prevInteract[0]];
+    }
+
+    if (!this.canPlaceFurniture(this.sofaDef, this.sofaDef.tile[0], this.sofaDef.tile[1])) {
+      // revert if rotated footprint no longer fits
+      this.sofaDef.footprint = prevFp;
+      this.sofaRestOff = prevRest;
+      this.sofaInteractOff = prevInteract;
+      return;
+    }
+
     this.sofaFacing = next;
     this.sofaDef.facing = next;
     this.sofaImage.setTexture(this.furnitureTextureKey('sofa', next));
     this.sofaImage.setDisplaySize(110, 84);
+    this.syncSpotsFromFurniture();
     this.persistLayout();
+    this.rebuildPathfinder();
+    void prevFacing;
   }
 
   private rotateBar(dir: number): void {
     if (!this.buildMode) return;
     const idx = FACINGS.indexOf(this.barFacing);
     const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
+    const prevFp: [number, number] = [...this.barDef.footprint] as [number, number];
+    const prevStaff = [...this.barStaffOff] as [number, number];
+    const prevInteract = [...this.barInteractOff] as [number, number];
+
+    this.barDef.footprint = [prevFp[1], prevFp[0]];
+    if (dir > 0) {
+      this.barStaffOff = [-prevStaff[1], prevStaff[0]];
+      this.barInteractOff = [-prevInteract[1], prevInteract[0]];
+    } else {
+      this.barStaffOff = [prevStaff[1], -prevStaff[0]];
+      this.barInteractOff = [prevInteract[1], -prevInteract[0]];
+    }
+
+    if (!this.canPlaceFurniture(this.barDef, this.barDef.tile[0], this.barDef.tile[1])) {
+      this.barDef.footprint = prevFp;
+      this.barStaffOff = prevStaff;
+      this.barInteractOff = prevInteract;
+      return;
+    }
+
     this.barFacing = next;
     this.barDef.facing = next;
     this.barImage.setTexture(this.furnitureTextureKey('bar', next));
     this.applyBarDisplaySize();
+    this.syncSpotsFromFurniture();
+    if (this.bartender && this.phase !== 'open') {
+      this.bartender.snapTo(this.staffSpot);
+    }
     this.persistLayout();
+    this.rebuildPathfinder();
   }
 
   openNight = (): void => {

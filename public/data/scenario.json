@@ -4,7 +4,10 @@
   "subtitle": "Pista principal",
   "startingMoney": 40,
   "nightDurationSec": 75,
-  "patronSpawnCount": [3, 5],
+  "patronSpawnCount": [
+    3,
+    5
+  ],
   "spawnIntervalMs": 2200,
   "map": {
     "cols": 10,
@@ -12,18 +15,7 @@
     "tileWidth": 64,
     "tileHeight": 32
   },
-  "blocked": [
-    [0, 0], [1, 0], [2, 0], [3, 0], [4, 0], [5, 0], [6, 0], [7, 0], [8, 0], [9, 0],
-    [0, 1], [9, 1],
-    [0, 2], [9, 2],
-    [0, 3], [9, 3],
-    [0, 4], [9, 4],
-    [0, 5], [9, 5],
-    [0, 6], [9, 6],
-    [0, 7], [9, 7],
-    [0, 8], [9, 8],
-    [0, 9], [1, 9], [2, 9], [3, 9], [4, 9], [5, 9], [6, 9], [7, 9], [8, 9], [9, 9]
-  ],
+  "blocked": [],
   "furniture": [
     {
       "id": "bar",
@@ -36,10 +28,22 @@
         "ne": "furn_bar_ne",
         "nw": "furn_bar_nw"
       },
-      "tile": [6, 2],
-      "footprint": [2, 1],
-      "interact": [5, 2],
-      "staffSpot": [6, 3]
+      "tile": [
+        6,
+        2
+      ],
+      "footprint": [
+        2,
+        1
+      ],
+      "interact": [
+        5,
+        2
+      ],
+      "staffSpot": [
+        6,
+        3
+      ]
     },
     {
       "id": "sofa",
@@ -52,17 +56,50 @@
         "ne": "furn_sofa_ne",
         "nw": "furn_sofa_nw"
       },
-      "tile": [2, 5],
-      "footprint": [2, 1],
-      "interact": [2, 4],
-      "restSpot": [2, 5]
+      "tile": [
+        2,
+        5
+      ],
+      "footprint": [
+        2,
+        1
+      ],
+      "interact": [
+        2,
+        4
+      ],
+      "restSpot": [
+        2,
+        5
+      ]
     }
   ],
-  "spawnTile": [5, 8],
-  "exitTile": [5, 8],
+  "spawnTile": [
+    5,
+    8
+  ],
+  "exitTile": [
+    5,
+    8
+  ],
   "drinks": [
-    { "id": "cerveza", "name": "Cerveza", "price": 8, "serveTimeMs": 1600 },
-    { "id": "refresco", "name": "Refresco", "price": 5, "serveTimeMs": 1200 },
-    { "id": "shot_barato", "name": "Shot barato", "price": 6, "serveTimeMs": 1000 }
+    {
+      "id": "cerveza",
+      "name": "Cerveza",
+      "price": 8,
+      "serveTimeMs": 1600
+    },
+    {
+      "id": "refresco",
+      "name": "Refresco",
+      "price": 5,
+      "serveTimeMs": 1200
+    },
+    {
+      "id": "shot_barato",
+      "name": "Shot barato",
+      "price": 6,
+      "serveTimeMs": 1000
+    }
   ]
 }
