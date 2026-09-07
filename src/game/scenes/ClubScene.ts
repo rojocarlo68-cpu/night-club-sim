@@ -152,9 +152,7 @@ export class ClubScene extends Phaser.Scene {
     }
     this.requireTexture(this.chars.bartender.sprite || 'bartender');
 
-    this.drawRoom(cols, rows);
-    this.placeFurniture();
-
+    // Resolve furniture defs BEFORE placeFurniture (sofaTextureKey needs sofaDef)
     const bar = this.scenario.furniture.find((f) => f.type === 'bar');
     const sofa = this.scenario.furniture.find((f) => f.type === 'sofa');
     if (!bar) throw new Error('Furniture bar missing in scenario');
@@ -167,6 +165,9 @@ export class ClubScene extends Phaser.Scene {
     this.barInteract = { col: bar.interact[0], row: bar.interact[1] };
     this.staffSpot = { col: bar.staffSpot[0], row: bar.staffSpot[1] };
     this.sofaRest = { col: sofa.restSpot[0], row: sofa.restSpot[1] };
+
+    this.drawRoom(cols, rows);
+    this.placeFurniture();
 
     const bd = this.chars.bartender;
     this.bartender = new Bartender(
@@ -240,8 +241,9 @@ export class ClubScene extends Phaser.Scene {
       .setDepth(1);
   }
 
-  private sofaTextureKey(facing: SofaFacing): string {
-    const fromScenario = this.sofaDef.sprites?.[facing];
+  private sofaTextureKey(facing: SofaFacing, def?: FurnitureDef): string {
+    const src = def ?? this.sofaDef;
+    const fromScenario = src?.sprites?.[facing];
     if (fromScenario) return fromScenario;
     return `furn_sofa_${facing}`;
   }
@@ -259,7 +261,7 @@ export class ClubScene extends Phaser.Scene {
         this.sofaDef = f;
         this.sofaFacing = (f.facing as SofaFacing) || 'se';
         if (!SOFA_FACINGS.includes(this.sofaFacing)) this.sofaFacing = 'se';
-        const key = this.sofaTextureKey(this.sofaFacing);
+        const key = this.sofaTextureKey(this.sofaFacing, f);
         this.requireTexture(key);
         this.sofaImage = this.add.image(x, y - 6, key);
         // Art sofas are large; scale down to footprint
