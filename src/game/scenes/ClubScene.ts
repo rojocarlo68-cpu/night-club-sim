@@ -1,5 +1,11 @@
 import Phaser from 'phaser';
 import { IsoConfig, tileToScreen, screenToTile, depthForTile } from '../systems/IsoUtils';
+import {
+  Point,
+  ROOM_NEON_MATCH_FRAC,
+  computePlayableFloorPolygon,
+  canPlaceVisual,
+} from '../systems/FloorBounds';
 import { Pathfinder } from '../systems/Pathfinding';
 import { Bartender, BartenderData } from '../entities/Bartender';
 import { Patron, PatronData } from '../entities/Patron';
@@ -120,6 +126,10 @@ export class ClubScene extends Phaser.Scene {
   private furnDragging = false;
   private furnDragId: SelectedFurniture = null;
   private blockPanGesture = false;
+  private dragPoseValid = true;
+
+  /** Glossy floor inside neon rim (world/screen space). Authority for sprite-vs-neon. */
+  private floorPoly: Point[] = [];
 
   constructor() {
     super('ClubScene');
@@ -209,6 +219,7 @@ export class ClubScene extends Phaser.Scene {
 
     this.drawRoom(cols, rows);
     this.placeFurniture();
+    this.ensureAllFurnitureInsideFloor();
     this.setupCamera();
 
     const bd = this.chars.bartender;
@@ -399,6 +410,129 @@ export class ClubScene extends Phaser.Scene {
     return true;
   }
 
+  /** Display size for any furniture type (extend when adding shop items). */
+  private furnitureDisplaySize(kind: string): { w: number; h: number } {
+    if (kind === 'bar') return { w: 168, h: 124 };
+    if (kind === 'sofa') return { w: 110, h: 84 };
+    return { w: 96, h: 72 };
+  }
+
+  /** World draw position (tile center + per-type vertical bias). */
+  private furnitureWorldPos(
+    kind: string,
+    col: number,
+    row: number
+  ): { x: number; y: number } {
+    const { x, y } = tileToScreen(col, row, this.iso);
+    if (kind === 'bar') return { x, y: y - 16 };
+    if (kind === 'sofa') return { x, y: y - 6 };
+    return { x, y: y - 8 };
+  }
+
+  private furnitureTextureFor(
+    kind: string,
+    facing: IsoFacing,
+    def?: FurnitureDef
+  ): string {
+    return this.furnitureTextureKey(kind, facing, def);
+  }
+
+  /**
+   * Sprite-vs-neon authority: opaque visual AABB must stay inside floorPoly.
+   * Used by all furniture types (present and future purchasable decorations).
+   */
+  private canPlaceVisualAt(
+    kind: string,
+    col: number,
+    row: number,
+    facing: IsoFacing,
+    def?: FurnitureDef
+  ): boolean {
+    const size = this.furnitureDisplaySize(kind);
+    const pos = this.furnitureWorldPos(kind, col, row);
+    const key = this.furnitureTextureFor(kind, facing, def);
+    return canPlaceVisual(
+      this.textures,
+      this.floorPoly,
+      key,
+      pos.x,
+      pos.y,
+      size.w,
+      size.h
+    );
+  }
+
+  private poseAllowed(
+    def: FurnitureDef,
+    col: number,
+    row: number,
+    facing: IsoFacing
+  ): boolean {
+    if (!this.canPlaceFurniture(def, col, row)) return false;
+    return this.canPlaceVisualAt(def.type, col, row, facing, def);
+  }
+
+  private setFurnitureDragTint(id: SelectedFurniture, valid: boolean): void {
+    if (!id) return;
+    const img = id === 'sofa' ? this.sofaImage : this.barImage;
+    if (!img) return;
+    if (!valid) {
+      img.setTint(0xff4466);
+      return;
+    }
+    // Restore selection tint while dragging/selected
+    if (id === 'sofa') img.setTint(0xffc0e8);
+    else img.setTint(0xffe0a0);
+  }
+
+  /**
+   * If a saved/default pose fails sprite-vs-neon, spiral-search a nearby valid tile.
+   * Keeps old localStorage layouts from spawning already overflowing.
+   */
+  private ensureAllFurnitureInsideFloor(): void {
+    for (const def of this.scenario.furniture) {
+      const facing = (def.facing as IsoFacing) || 'se';
+      if (this.poseAllowed(def, def.tile[0], def.tile[1], facing)) continue;
+      const found = this.findNearestValidTile(def, facing);
+      if (!found) continue;
+      def.tile = found;
+      if (def.type === 'sofa') {
+        this.sofaDef = def;
+        this.sofaFacing = facing;
+        this.syncSpotsFromFurniture();
+        this.repositionFurnitureVisual('sofa');
+      } else if (def.type === 'bar') {
+        this.barDef = def;
+        this.barFacing = facing;
+        this.syncSpotsFromFurniture();
+        this.repositionFurnitureVisual('bar');
+        if (this.bartender && this.phase !== 'open') {
+          this.bartender.snapTo(this.staffSpot);
+        }
+      }
+    }
+    this.rebuildPathfinder();
+  }
+
+  private findNearestValidTile(
+    def: FurnitureDef,
+    facing: IsoFacing
+  ): [number, number] | null {
+    const { cols, rows } = this.scenario.map;
+    const [sc, sr] = def.tile;
+    for (let rad = 0; rad < Math.max(cols, rows); rad++) {
+      for (let dc = -rad; dc <= rad; dc++) {
+        for (let dr = -rad; dr <= rad; dr++) {
+          if (rad > 0 && Math.max(Math.abs(dc), Math.abs(dr)) !== rad) continue;
+          const c = sc + dc;
+          const r = sr + dr;
+          if (this.poseAllowed(def, c, r, facing)) return [c, r];
+        }
+      }
+    }
+    return null;
+  }
+
   private drawRoom(cols: number, rows: number): void {
     const { originX, originY, tileWidth, tileHeight } = this.iso;
     const midCol = (cols - 1) / 2;
@@ -409,13 +543,21 @@ export class ClubScene extends Phaser.Scene {
     // (art neon bbox covers ~87% of the image; match that to the iso diamond).
     const diamondW = (cols + rows - 2) * (tileWidth / 2);
     const diamondH = (cols + rows - 2) * (tileHeight / 2);
-    // neon bbox ~87% of art; 0.84 pushes wall slightly outward so BUILD_MARGIN rim
-    // sits on/under neon blocks while placeable tiles hug glossy floor inside.
-    const neonFrac = 0.84;
+    // neon bbox ~87% of art; ROOM_NEON_MATCH_FRAC pushes wall slightly outward so
+    // BUILD_MARGIN rim sits on/under neon while placeable tiles hug glossy floor.
+    const neonFrac = ROOM_NEON_MATCH_FRAC;
     this.roomImage = this.add.image(center.x, center.y + 6, 'room_floor');
     this.roomImage.setDisplaySize(diamondW / neonFrac, diamondH / neonFrac);
     this.roomImage.setDepth(0);
     this.roomImage.setAlpha(1);
+
+    // Playable floor = neon diamond inset ~6% (sprite-vs-neon authority).
+    this.floorPoly = computePlayableFloorPolygon(
+      this.roomImage.x,
+      this.roomImage.y,
+      this.roomImage.displayWidth,
+      this.roomImage.displayHeight
+    );
 
     const blockedWall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
     for (let row = 0; row < rows; row++) {
@@ -518,15 +660,18 @@ export class ClubScene extends Phaser.Scene {
     return false;
   }
 
-  private furnitureTextureKey(kind: 'sofa' | 'bar', facing: IsoFacing, def?: FurnitureDef): string {
-    const src = def ?? (kind === 'sofa' ? this.sofaDef : this.barDef);
+  private furnitureTextureKey(kind: string, facing: IsoFacing, def?: FurnitureDef): string {
+    const src =
+      def ??
+      (kind === 'sofa' ? this.sofaDef : kind === 'bar' ? this.barDef : undefined);
     const fromScenario = src?.sprites?.[facing];
     if (fromScenario) return fromScenario;
-    return kind === 'sofa' ? `furn_sofa_${facing}` : `furn_bar_${facing}`;
+    return `furn_${kind}_${facing}`;
   }
 
   private applyBarDisplaySize(): void {
-    this.barImage.setDisplaySize(168, 124);
+    const size = this.furnitureDisplaySize('bar');
+    this.barImage.setDisplaySize(size.w, size.h);
     this.barImage.setAlpha(1);
     this.barImage.setBlendMode(Phaser.BlendModes.NORMAL);
   }
@@ -605,11 +750,20 @@ export class ClubScene extends Phaser.Scene {
     if (!this.furnDragId) return;
     const world = this.cameras.main.getWorldPoint(p.x, p.y);
     const tile = screenToTile(world.x, world.y, this.iso);
-    this.moveFurnitureTo(this.furnDragId, tile.col, tile.row, false);
+    const id = this.furnDragId;
+    const def = id === 'sofa' ? this.sofaDef : this.barDef;
+    const facing = id === 'sofa' ? this.sofaFacing : this.barFacing;
+    const ok = this.poseAllowed(def, tile.col, tile.row, facing);
+    this.dragPoseValid = ok;
+    this.setFurnitureDragTint(id, ok);
+    if (!ok) return; // keep last valid tile (snap-back authority)
+    this.moveFurnitureTo(id, tile.col, tile.row, false);
   }
 
   private endFurnitureDrag(): void {
     if (this.furnDragId) {
+      // Ensure selection tint (not red) after a rejected edge drag
+      this.setFurnitureDragTint(this.furnDragId, true);
       this.persistLayout();
       this.rebuildPathfinder();
       this.syncSpotsFromFurniture();
@@ -619,6 +773,7 @@ export class ClubScene extends Phaser.Scene {
     }
     this.furnDragging = false;
     this.furnDragId = null;
+    this.dragPoseValid = true;
   }
 
   private moveFurnitureTo(
@@ -629,7 +784,9 @@ export class ClubScene extends Phaser.Scene {
   ): void {
     if (!id) return;
     const def = id === 'sofa' ? this.sofaDef : this.barDef;
-    if (!this.canPlaceFurniture(def, col, row)) return;
+    const facing = id === 'sofa' ? this.sofaFacing : this.barFacing;
+    // Tile/rim first filter; sprite-vs-neon is the authority for looking inside
+    if (!this.poseAllowed(def, col, row, facing)) return;
     if (def.tile[0] === col && def.tile[1] === row) return;
     def.tile = [col, row];
     this.syncSpotsFromFurniture();
@@ -645,20 +802,20 @@ export class ClubScene extends Phaser.Scene {
 
   private repositionFurnitureVisual(id: SelectedFurniture): void {
     if (id === 'sofa') {
-      const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
-      this.sofaImage.setPosition(x, y - 6);
+      const pos = this.furnitureWorldPos('sofa', this.sofaDef.tile[0], this.sofaDef.tile[1]);
+      this.sofaImage.setPosition(pos.x, pos.y);
       this.sofaImage.setDepth(depthForTile(this.sofaDef.tile[0], this.sofaDef.tile[1], 3));
       if (this.selectedFurniture === 'sofa') {
-        this.rotateUi.setPosition(x, y - 72);
+        this.rotateUi.setPosition(pos.x, pos.y - 66);
       }
     } else if (id === 'bar') {
-      const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
-      this.barImage.setPosition(x, y - 16);
+      const pos = this.furnitureWorldPos('bar', this.barDef.tile[0], this.barDef.tile[1]);
+      this.barImage.setPosition(pos.x, pos.y);
       this.barImage.setDepth(depthForTile(this.barDef.tile[0], this.barDef.tile[1], 3));
-      this.barGlow.setPosition(x, y - 20);
+      this.barGlow.setPosition(pos.x, pos.y - 4);
       this.barGlow.setDepth(depthForTile(this.barDef.tile[0], this.barDef.tile[1], 2));
       if (this.selectedFurniture === 'bar') {
-        this.rotateUi.setPosition(x, y - 86);
+        this.rotateUi.setPosition(pos.x, pos.y - 70);
       }
     }
   }
@@ -772,8 +929,22 @@ export class ClubScene extends Phaser.Scene {
       this.sofaInteractOff = [prevInteract[1], -prevInteract[0]];
     }
 
-    if (!this.canPlaceFurniture(this.sofaDef, this.sofaDef.tile[0], this.sofaDef.tile[1])) {
-      // revert if rotated footprint no longer fits
+    const tileOk = this.canPlaceFurniture(
+      this.sofaDef,
+      this.sofaDef.tile[0],
+      this.sofaDef.tile[1]
+    );
+    const visualOk =
+      tileOk &&
+      this.canPlaceVisualAt(
+        'sofa',
+        this.sofaDef.tile[0],
+        this.sofaDef.tile[1],
+        next,
+        this.sofaDef
+      );
+    if (!visualOk) {
+      // Keep previous facing — rotated sprite would cross neon
       this.sofaDef.footprint = prevFp;
       this.sofaRestOff = prevRest;
       this.sofaInteractOff = prevInteract;
@@ -782,8 +953,9 @@ export class ClubScene extends Phaser.Scene {
 
     this.sofaFacing = next;
     this.sofaDef.facing = next;
+    const size = this.furnitureDisplaySize('sofa');
     this.sofaImage.setTexture(this.furnitureTextureKey('sofa', next));
-    this.sofaImage.setDisplaySize(110, 84);
+    this.sofaImage.setDisplaySize(size.w, size.h);
     this.syncSpotsFromFurniture();
     this.persistLayout();
     this.rebuildPathfinder();
@@ -807,7 +979,22 @@ export class ClubScene extends Phaser.Scene {
       this.barInteractOff = [prevInteract[1], -prevInteract[0]];
     }
 
-    if (!this.canPlaceFurniture(this.barDef, this.barDef.tile[0], this.barDef.tile[1])) {
+    const tileOk = this.canPlaceFurniture(
+      this.barDef,
+      this.barDef.tile[0],
+      this.barDef.tile[1]
+    );
+    const visualOk =
+      tileOk &&
+      this.canPlaceVisualAt(
+        'bar',
+        this.barDef.tile[0],
+        this.barDef.tile[1],
+        next,
+        this.barDef
+      );
+    if (!visualOk) {
+      // Keep previous facing — rotated sprite would cross neon
       this.barDef.footprint = prevFp;
       this.barStaffOff = prevStaff;
       this.barInteractOff = prevInteract;

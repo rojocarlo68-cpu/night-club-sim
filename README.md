@@ -23,6 +23,12 @@ Meta: gana dinero sin dejar a Luna sin energia.
 
 Instalar, luego build. Salida en carpeta dist. Preview disponible.
 
+## Placement (Construir)
+
+Playable floor = iso diamond from `room_floor` neon rim, inset ~4% (`FloorBounds.ts`).
+Move/rotate reject if the furniture **visual footprint** (opaque-pixel floor-contact box) leaves that polygon.
+Tile snap + rim stay as a first filter; sprite-vs-neon is the authority. New decorations reuse `canPlaceVisual`.
+
 ## Datos
 
 - public/data/characters.json — bartender y clientes
