@@ -54,3 +54,8 @@ Repos privados suelen requerir GitHub Pro para Pages. Activa Source=GitHub Actio
 
 ## Licencia
 Proyecto privado de Carlo Guayaba — MVP interno.
+
+## Pages workflow (pendiente de scope)
+
+El archivo Actions esta en `_pages_workflow_pending/pages.yml` porque el token OAuth no tiene scope `workflow`.
+Para activar: mueve ese archivo a `.github/workflows/pages.yml` desde la web de GitHub o con un token que incluya scope workflow, luego Settings > Pages > Source = GitHub Actions.
