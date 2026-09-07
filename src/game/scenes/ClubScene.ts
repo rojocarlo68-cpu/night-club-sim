@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { IsoConfig, tileToScreen, depthForTile } from '../systems/IsoUtils';
+import { IsoConfig, tileToScreen, screenToTile, depthForTile } from '../systems/IsoUtils';
 import { Pathfinder } from '../systems/Pathfinding';
 import { Bartender, BartenderData } from '../entities/Bartender';
 import { Patron, PatronData } from '../entities/Patron';
@@ -46,9 +46,24 @@ interface CharactersFile {
   patrons: PatronData[];
 }
 
+interface SavedLayoutItem {
+  id: string;
+  tile: [number, number];
+  facing?: SofaFacing;
+}
+
+interface SavedLayout {
+  furniture: SavedLayoutItem[];
+}
+
 const SOFA_FACINGS: SofaFacing[] = ['se', 'sw', 'nw', 'ne'];
+const LAYOUT_KEY = 'night-club-layout-v1';
+const TAP_THRESH = 10;
+const HUD_TOP = 56;
 
 export type NightPhase = 'prep' | 'open' | 'summary';
+
+type SelectedFurniture = 'sofa' | 'bar' | null;
 
 export class ClubScene extends Phaser.Scene {
   iso!: IsoConfig;
@@ -62,6 +77,8 @@ export class ClubScene extends Phaser.Scene {
   servedCount = 0;
   phase: NightPhase = 'prep';
   nightTimer = 0;
+  buildMode = false;
+
   private spawnLeft = 0;
   private queueTiles: Set<string> = new Set();
   private barInteract!: { col: number; row: number };
@@ -70,10 +87,36 @@ export class ClubScene extends Phaser.Scene {
   private drinks: Drink[] = [];
 
   private sofaDef!: FurnitureDef;
+  private barDef!: FurnitureDef;
   private sofaFacing: SofaFacing = 'se';
   private sofaImage!: Phaser.GameObjects.Image;
-  private sofaSelected = false;
+  private barImage!: Phaser.GameObjects.Image;
+  private barGlow!: Phaser.GameObjects.Arc;
+  private roomImage!: Phaser.GameObjects.Image;
+
+  private selectedFurniture: SelectedFurniture = null;
   private rotateUi!: Phaser.GameObjects.Container;
+  private buildHint!: Phaser.GameObjects.Text;
+
+  // Relative offsets from furniture tile (computed on load / after layout apply)
+  private sofaRestOff: [number, number] = [0, 0];
+  private sofaInteractOff: [number, number] = [0, -1];
+  private barInteractOff: [number, number] = [-1, 0];
+  private barStaffOff: [number, number] = [0, 1];
+
+  // Camera pan
+  private panActive = false;
+  private panDragging = false;
+  private panStartX = 0;
+  private panStartY = 0;
+  private panScrollX = 0;
+  private panScrollY = 0;
+  private skipNextTap = false;
+
+  // Furniture drag in build mode
+  private furnDragging = false;
+  private furnDragId: SelectedFurniture = null;
+  private blockPanGesture = false;
 
   constructor() {
     super('ClubScene');
@@ -128,31 +171,15 @@ export class ClubScene extends Phaser.Scene {
     this.phase = 'prep';
     this.patrons = [];
     this.drinks = this.scenario.drinks;
-    this.sofaSelected = false;
+    this.buildMode = false;
+    this.selectedFurniture = null;
 
     const { cols, rows, tileWidth, tileHeight } = this.scenario.map;
     const originX = this.cameras.main.width / 2;
     const originY = 70;
     this.iso = { tileWidth, tileHeight, originX, originY };
 
-    const blocked = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
-    this.scenario.furniture.forEach((f) => {
-      for (let dc = 0; dc < f.footprint[0]; dc++) {
-        for (let dr = 0; dr < f.footprint[1]; dr++) {
-          blocked.add(`${f.tile[0] + dc},${f.tile[1] + dr}`);
-        }
-      }
-    });
-    this.pathfinder = new Pathfinder(cols, rows, blocked);
-
-    this.requireTexture('room_floor');
-    this.requireTexture('furn_bar');
-    for (const facing of SOFA_FACINGS) {
-      this.requireTexture(`furn_sofa_${facing}`);
-    }
-    this.requireTexture(this.chars.bartender.sprite || 'bartender');
-
-    // Resolve furniture defs BEFORE placeFurniture (sofaTextureKey needs sofaDef)
+    // Resolve furniture defs
     const bar = this.scenario.furniture.find((f) => f.type === 'bar');
     const sofa = this.scenario.furniture.find((f) => f.type === 'sofa');
     if (!bar) throw new Error('Furniture bar missing in scenario');
@@ -161,13 +188,25 @@ export class ClubScene extends Phaser.Scene {
     if (!bar.staffSpot) throw new Error('bar.staffSpot missing');
     if (!sofa.restSpot) throw new Error('sofa.restSpot missing');
 
+    this.barDef = bar;
     this.sofaDef = sofa;
-    this.barInteract = { col: bar.interact[0], row: bar.interact[1] };
-    this.staffSpot = { col: bar.staffSpot[0], row: bar.staffSpot[1] };
-    this.sofaRest = { col: sofa.restSpot[0], row: sofa.restSpot[1] };
+    this.captureOffsets();
+
+    this.applySavedLayout();
+
+    this.requireTexture('room_floor');
+    this.requireTexture('furn_bar');
+    for (const facing of SOFA_FACINGS) {
+      this.requireTexture(`furn_sofa_${facing}`);
+    }
+    this.requireTexture(this.chars.bartender.sprite || 'bartender');
+
+    this.rebuildPathfinder();
+    this.syncSpotsFromFurniture();
 
     this.drawRoom(cols, rows);
     this.placeFurniture();
+    this.setupCamera();
 
     const bd = this.chars.bartender;
     this.bartender = new Bartender(
@@ -178,25 +217,29 @@ export class ClubScene extends Phaser.Scene {
       this.pathfinder,
       bd
     );
-    this.bartender.sprite.on('pointerdown', () => {
-      this.deselectSofa();
+    this.bartender.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (this.panDragging || this.furnDragging || this.skipNextTap) return;
+      if (p.getDistance() > TAP_THRESH) return;
+      if (this.buildMode) return;
+      this.clearFurnitureSelection();
       this.bartender.setSelected(true);
       this.game.events.emit('select-bartender', this.bartender);
     });
 
+    this.setupPointerPan();
     this.input.mouse?.disableContextMenu();
-    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
-      if (p.rightButtonDown()) {
-        if (this.sofaSelected) {
-          this.rotateSofa(1);
-        }
-        return;
-      }
-    });
 
-    this.input.keyboard?.on('keydown-R', () => {
-      if (this.sofaSelected) this.rotateSofa(1);
-    });
+    this.buildHint = this.add
+      .text(this.cameras.main.width / 2, this.cameras.main.height - 28, '', {
+        fontSize: '13px',
+        color: '#c8a0e0',
+        backgroundColor: '#12081ecc',
+        padding: { x: 10, y: 4 },
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(9500)
+      .setVisible(false);
 
     this.cameras.main.setBackgroundColor('#05030a');
 
@@ -204,27 +247,158 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-open-night', this.openNight, this);
     this.game.events.on('cmd-close-night', this.closeNight, this);
     this.game.events.on('cmd-rest', this.orderRest, this);
+    this.game.events.on('cmd-set-build-mode', this.setBuildMode, this);
     this.game.events.on('cmd-deselect-bartender', () => {
       this.bartender.setSelected(false);
     }, this);
   }
 
+  private captureOffsets(): void {
+    const s = this.sofaDef;
+    const b = this.barDef;
+    if (s.restSpot) {
+      this.sofaRestOff = [s.restSpot[0] - s.tile[0], s.restSpot[1] - s.tile[1]];
+    }
+    if (s.interact) {
+      this.sofaInteractOff = [s.interact[0] - s.tile[0], s.interact[1] - s.tile[1]];
+    }
+    if (b.interact) {
+      this.barInteractOff = [b.interact[0] - b.tile[0], b.interact[1] - b.tile[1]];
+    }
+    if (b.staffSpot) {
+      this.barStaffOff = [b.staffSpot[0] - b.tile[0], b.staffSpot[1] - b.tile[1]];
+    }
+  }
+
+  private applySavedLayout(): void {
+    try {
+      const raw = localStorage.getItem(LAYOUT_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw) as SavedLayout;
+      if (!saved?.furniture?.length) return;
+      for (const item of saved.furniture) {
+        const def = this.scenario.furniture.find((f) => f.id === item.id);
+        if (!def) continue;
+        if (
+          Array.isArray(item.tile) &&
+          item.tile.length === 2 &&
+          this.tileInBounds(item.tile[0], item.tile[1], def.footprint)
+        ) {
+          def.tile = [item.tile[0], item.tile[1]];
+        }
+        if (def.type === 'sofa' && item.facing && SOFA_FACINGS.includes(item.facing)) {
+          def.facing = item.facing;
+        }
+      }
+      // Re-apply relative spots from offsets
+      this.sofaDef = this.scenario.furniture.find((f) => f.type === 'sofa')!;
+      this.barDef = this.scenario.furniture.find((f) => f.type === 'bar')!;
+      this.applyOffsetsToDef(this.sofaDef, this.sofaRestOff, this.sofaInteractOff, 'sofa');
+      this.applyOffsetsToDef(this.barDef, this.barStaffOff, this.barInteractOff, 'bar');
+    } catch {
+      // ignore corrupt layout
+    }
+  }
+
+  private applyOffsetsToDef(
+    def: FurnitureDef,
+    primaryOff: [number, number],
+    interactOff: [number, number],
+    kind: 'sofa' | 'bar'
+  ): void {
+    if (kind === 'sofa') {
+      def.restSpot = [def.tile[0] + primaryOff[0], def.tile[1] + primaryOff[1]];
+      def.interact = [def.tile[0] + interactOff[0], def.tile[1] + interactOff[1]];
+    } else {
+      def.staffSpot = [def.tile[0] + primaryOff[0], def.tile[1] + primaryOff[1]];
+      def.interact = [def.tile[0] + interactOff[0], def.tile[1] + interactOff[1]];
+    }
+  }
+
+  private persistLayout(): void {
+    const payload: SavedLayout = {
+      furniture: this.scenario.furniture.map((f) => ({
+        id: f.id,
+        tile: [...f.tile] as [number, number],
+        facing: f.type === 'sofa' ? (f.facing as SofaFacing) : undefined,
+      })),
+    };
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
+    } catch {
+      // private mode / quota
+    }
+  }
+
+  private syncSpotsFromFurniture(): void {
+    this.applyOffsetsToDef(this.sofaDef, this.sofaRestOff, this.sofaInteractOff, 'sofa');
+    this.applyOffsetsToDef(this.barDef, this.barStaffOff, this.barInteractOff, 'bar');
+    this.barInteract = { col: this.barDef.interact![0], row: this.barDef.interact![1] };
+    this.staffSpot = { col: this.barDef.staffSpot![0], row: this.barDef.staffSpot![1] };
+    this.sofaRest = { col: this.sofaDef.restSpot![0], row: this.sofaDef.restSpot![1] };
+  }
+
+  private rebuildPathfinder(): void {
+    const { cols, rows } = this.scenario.map;
+    const blocked = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
+    this.scenario.furniture.forEach((f) => {
+      for (let dc = 0; dc < f.footprint[0]; dc++) {
+        for (let dr = 0; dr < f.footprint[1]; dr++) {
+          blocked.add(`${f.tile[0] + dc},${f.tile[1] + dr}`);
+        }
+      }
+    });
+    this.pathfinder = new Pathfinder(cols, rows, blocked);
+    if (this.bartender) {
+      this.bartender.setPathfinder(this.pathfinder);
+    }
+  }
+
+  private tileInBounds(col: number, row: number, footprint: [number, number]): boolean {
+    const { cols, rows } = this.scenario.map;
+    return (
+      col >= 0 &&
+      row >= 0 &&
+      col + footprint[0] - 1 < cols &&
+      row + footprint[1] - 1 < rows
+    );
+  }
+
+  private canPlaceFurniture(def: FurnitureDef, col: number, row: number): boolean {
+    if (!this.tileInBounds(col, row, def.footprint)) return false;
+    const wall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
+    for (let dc = 0; dc < def.footprint[0]; dc++) {
+      for (let dr = 0; dr < def.footprint[1]; dr++) {
+        const c = col + dc;
+        const r = row + dr;
+        if (wall.has(`${c},${r}`)) return false;
+        // collide with other furniture
+        for (const other of this.scenario.furniture) {
+          if (other.id === def.id) continue;
+          for (let oc = 0; oc < other.footprint[0]; oc++) {
+            for (let or_ = 0; or_ < other.footprint[1]; or_++) {
+              if (other.tile[0] + oc === c && other.tile[1] + or_ === r) return false;
+            }
+          }
+        }
+      }
+    }
+    return true;
+  }
+
   private drawRoom(cols: number, rows: number): void {
     const { originX, originY, tileWidth, tileHeight } = this.iso;
-    // Center of the logical iso diamond
     const midCol = (cols - 1) / 2;
     const midRow = (rows - 1) / 2;
     const center = tileToScreen(midCol, midRow, this.iso);
 
-    // Scale room art so the glossy platform covers the playable grid
     const gridW = cols * tileWidth * 0.92;
     const gridH = rows * tileHeight * 1.35;
-    const room = this.add.image(center.x, center.y + 8, 'room_floor');
-    room.setDisplaySize(gridW * 1.55, gridH * 1.55);
-    room.setDepth(0);
-    room.setAlpha(1);
+    this.roomImage = this.add.image(center.x, center.y + 8, 'room_floor');
+    this.roomImage.setDisplaySize(gridW * 1.55, gridH * 1.55);
+    this.roomImage.setDepth(0);
+    this.roomImage.setAlpha(1);
 
-    // Lightweight logical floor markers (very subtle) for pathfinding feel
     const blockedWall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
@@ -235,10 +409,95 @@ export class ClubScene extends Phaser.Scene {
       }
     }
 
-    // Soft vignette so characters pop a bit
     this.add
       .rectangle(originX, originY + 200, 640, 420, 0x000000, 0.12)
       .setDepth(1);
+  }
+
+  private setupCamera(): void {
+    const cam = this.cameras.main;
+    const room = this.roomImage;
+    const pad = 100;
+    const bw = room.displayWidth + pad * 2;
+    const bh = room.displayHeight + pad * 2;
+    cam.setBounds(
+      room.x - room.displayWidth / 2 - pad,
+      room.y - room.displayHeight / 2 - pad,
+      bw,
+      bh
+    );
+
+    // Slight zoom-out on narrow / mobile viewports
+    const w = cam.width;
+    let zoom = 1;
+    if (w < 420) zoom = 0.72;
+    else if (w < 560) zoom = 0.8;
+    else if (w < 720) zoom = 0.9;
+    cam.setZoom(zoom);
+    cam.centerOn(room.x, room.y + 20);
+  }
+
+  private setupPointerPan(): void {
+    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (p.rightButtonDown()) return;
+      if (this.isPointerOverHud(p)) return;
+      if (this.furnDragging || this.blockPanGesture) return;
+      this.panActive = true;
+      this.panDragging = false;
+      this.panStartX = p.x;
+      this.panStartY = p.y;
+      this.panScrollX = this.cameras.main.scrollX;
+      this.panScrollY = this.cameras.main.scrollY;
+    });
+
+    this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (this.furnDragging && this.furnDragId) {
+        this.dragFurnitureToPointer(p);
+        return;
+      }
+      if (!this.panActive || !p.isDown) return;
+      const dx = p.x - this.panStartX;
+      const dy = p.y - this.panStartY;
+      if (!this.panDragging) {
+        if (Math.hypot(dx, dy) < TAP_THRESH) return;
+        this.panDragging = true;
+      }
+      // Drag moves the world with the finger (scroll opposite to delta)
+      const cam = this.cameras.main;
+      cam.setScroll(this.panScrollX - dx / cam.zoom, this.panScrollY - dy / cam.zoom);
+    });
+
+    this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (this.furnDragging) {
+        this.endFurnitureDrag();
+      }
+      if (this.panDragging) {
+        this.skipNextTap = true;
+        this.time.delayedCall(0, () => {
+          this.skipNextTap = false;
+        });
+      }
+      this.panActive = false;
+      this.panDragging = false;
+      this.blockPanGesture = false;
+      void p;
+    });
+
+    this.input.on('pointerupoutside', () => {
+      if (this.furnDragging) this.endFurnitureDrag();
+      this.panActive = false;
+      this.panDragging = false;
+      this.blockPanGesture = false;
+    });
+  }
+
+  private isPointerOverHud(p: Phaser.Input.Pointer): boolean {
+    if (p.y < HUD_TOP) return true;
+    const ui = this.scene.get('UIScene') as Phaser.Scene & {
+      isPointerOnUi?: (p: Phaser.Input.Pointer) => boolean;
+    };
+    if (ui?.isPointerOnUi?.(p)) return true;
+    return false;
   }
 
   private sofaTextureKey(facing: SofaFacing, def?: FurnitureDef): string {
@@ -252,11 +511,26 @@ export class ClubScene extends Phaser.Scene {
     for (const f of this.scenario.furniture) {
       const { x, y } = tileToScreen(f.tile[0], f.tile[1], this.iso);
       if (f.type === 'bar') {
+        this.barDef = f;
         this.requireTexture('furn_bar');
-        const img = this.add.image(x, y - 10, 'furn_bar');
-        img.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
-        const glow = this.add.circle(x, y - 20, 40, 0xffaa44, 0.12);
-        glow.setDepth(depthForTile(f.tile[0], f.tile[1], 2));
+        this.barImage = this.add.image(x, y - 10, 'furn_bar');
+        this.barImage.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
+        this.barGlow = this.add.circle(x, y - 20, 40, 0xffaa44, 0.12);
+        this.barGlow.setDepth(depthForTile(f.tile[0], f.tile[1], 2));
+        this.barImage.setInteractive({ useHandCursor: true, draggable: false });
+        this.barImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
+          if (p.rightButtonDown()) return;
+          if (!this.buildMode) return;
+          this.beginFurniturePointer(p, 'bar');
+        });
+        this.barImage.on('pointerup', (p: Phaser.Input.Pointer) => {
+          if (this.panDragging || this.skipNextTap) return;
+          if (!this.buildMode) return;
+          if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;
+          if (!this.furnDragging || this.furnDragId !== 'bar') {
+            this.selectFurniture('bar');
+          }
+        });
       } else if (f.type === 'sofa') {
         this.sofaDef = f;
         this.sofaFacing = (f.facing as SofaFacing) || 'se';
@@ -264,16 +538,95 @@ export class ClubScene extends Phaser.Scene {
         const key = this.sofaTextureKey(this.sofaFacing, f);
         this.requireTexture(key);
         this.sofaImage = this.add.image(x, y - 6, key);
-        // Art sofas are large; scale down to footprint
         this.sofaImage.setDisplaySize(110, 84);
         this.sofaImage.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
         this.sofaImage.setInteractive({ useHandCursor: true });
         this.sofaImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
           if (p.rightButtonDown()) return;
-          this.selectSofa();
+          if (!this.buildMode) return;
+          this.beginFurniturePointer(p, 'sofa');
+        });
+        this.sofaImage.on('pointerup', (p: Phaser.Input.Pointer) => {
+          if (this.panDragging || this.skipNextTap) return;
+          if (!this.buildMode) return;
+          if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;
+          if (!this.furnDragging || this.furnDragId !== 'sofa') {
+            this.selectFurniture('sofa');
+          }
         });
         this.buildRotateUi(x, y);
       }
+    }
+  }
+
+  private beginFurniturePointer(p: Phaser.Input.Pointer, id: SelectedFurniture): void {
+    if (!this.buildMode || !id) return;
+    this.selectFurniture(id);
+    this.furnDragging = true;
+    this.furnDragId = id;
+    // Prevent camera pan from starting on the same gesture
+    this.blockPanGesture = true;
+    this.panActive = false;
+    this.panDragging = false;
+    void p;
+  }
+
+  private dragFurnitureToPointer(p: Phaser.Input.Pointer): void {
+    if (!this.furnDragId) return;
+    const world = this.cameras.main.getWorldPoint(p.x, p.y);
+    const tile = screenToTile(world.x, world.y, this.iso);
+    this.moveFurnitureTo(this.furnDragId, tile.col, tile.row, false);
+  }
+
+  private endFurnitureDrag(): void {
+    if (this.furnDragId) {
+      this.persistLayout();
+      this.rebuildPathfinder();
+      this.syncSpotsFromFurniture();
+      if (this.bartender && this.phase !== 'open') {
+        this.bartender.snapTo(this.staffSpot);
+      }
+    }
+    this.furnDragging = false;
+    this.furnDragId = null;
+  }
+
+  private moveFurnitureTo(
+    id: SelectedFurniture,
+    col: number,
+    row: number,
+    persist: boolean
+  ): void {
+    if (!id) return;
+    const def = id === 'sofa' ? this.sofaDef : this.barDef;
+    if (!this.canPlaceFurniture(def, col, row)) return;
+    if (def.tile[0] === col && def.tile[1] === row) return;
+    def.tile = [col, row];
+    this.syncSpotsFromFurniture();
+    this.repositionFurnitureVisual(id);
+    if (persist) {
+      this.persistLayout();
+      this.rebuildPathfinder();
+      if (this.bartender && this.phase !== 'open') {
+        this.bartender.snapTo(this.staffSpot);
+      }
+    }
+  }
+
+  private repositionFurnitureVisual(id: SelectedFurniture): void {
+    if (id === 'sofa') {
+      const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
+      this.sofaImage.setPosition(x, y - 6);
+      this.sofaImage.setDepth(depthForTile(this.sofaDef.tile[0], this.sofaDef.tile[1], 3));
+      if (this.selectedFurniture === 'sofa') {
+        this.rotateUi.setPosition(x, y - 72);
+      }
+    } else if (id === 'bar') {
+      const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
+      this.barImage.setPosition(x, y - 10);
+      this.barImage.setDepth(depthForTile(this.barDef.tile[0], this.barDef.tile[1], 3));
+      this.barGlow.setPosition(x, y - 20);
+      this.barGlow.setDepth(depthForTile(this.barDef.tile[0], this.barDef.tile[1], 2));
     }
   }
 
@@ -295,6 +648,8 @@ export class ClubScene extends Phaser.Scene {
       b.on('pointerout', () => b.setFillStyle(0xb43282));
       b.on('pointerdown', (p: Phaser.Input.Pointer) => {
         p.event.stopPropagation();
+        this.blockPanGesture = true;
+        this.panActive = false;
         this.rotateSofa(dir);
       });
       c.add([b, t]);
@@ -304,39 +659,79 @@ export class ClubScene extends Phaser.Scene {
     this.rotateUi.add([bg, mk(-40, 'Girar ⟲', -1), mk(40, 'Girar ⟳', 1)]);
   }
 
-  private selectSofa(): void {
-    this.sofaSelected = true;
+  private selectFurniture(id: SelectedFurniture): void {
+    if (!this.buildMode || !id) return;
     this.bartender.setSelected(false);
     this.game.events.emit('cmd-deselect-bartender');
-    this.sofaImage.setTint(0xffc0e8);
-    this.rotateUi.setVisible(true);
-    const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
-    this.rotateUi.setPosition(x, y - 72);
+    this.clearFurnitureSelection();
+    this.selectedFurniture = id;
+    if (id === 'sofa') {
+      this.sofaImage.setTint(0xffc0e8);
+      this.rotateUi.setVisible(true);
+      const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
+      this.rotateUi.setPosition(x, y - 72);
+      this.buildHint.setText('Arrastra el sofá · Girar ⟲ ⟳').setVisible(true);
+    } else {
+      this.barImage.setTint(0xffe0a0);
+      this.rotateUi.setVisible(false);
+      this.buildHint.setText('Arrastra la barra (sin girar)').setVisible(true);
+    }
   }
 
-  private deselectSofa(): void {
-    if (!this.sofaSelected) return;
-    this.sofaSelected = false;
-    this.sofaImage.clearTint();
-    this.rotateUi.setVisible(false);
+  private clearFurnitureSelection(): void {
+    if (this.selectedFurniture === 'sofa' && this.sofaImage) {
+      this.sofaImage.clearTint();
+    }
+    if (this.selectedFurniture === 'bar' && this.barImage) {
+      this.barImage.clearTint();
+    }
+    this.selectedFurniture = null;
+    if (this.rotateUi) this.rotateUi.setVisible(false);
   }
+
+  setBuildMode = (on: boolean): void => {
+    if (on && this.phase === 'open') {
+      this.game.events.emit('build-mode-changed', false);
+      return;
+    }
+    this.buildMode = on;
+    this.clearFurnitureSelection();
+    this.bartender.setSelected(false);
+    this.game.events.emit('cmd-deselect-bartender');
+    if (on) {
+      this.buildHint
+        .setText('Modo Construir: toca y arrastra muebles')
+        .setVisible(true);
+    } else {
+      this.buildHint.setVisible(false);
+      this.persistLayout();
+      this.rebuildPathfinder();
+      this.syncSpotsFromFurniture();
+      if (this.bartender) this.bartender.snapTo(this.staffSpot);
+    }
+    this.game.events.emit('build-mode-changed', this.buildMode);
+  };
 
   private rotateSofa(dir: number): void {
+    if (!this.buildMode) return;
     const idx = SOFA_FACINGS.indexOf(this.sofaFacing);
     const next = SOFA_FACINGS[(idx + dir + SOFA_FACINGS.length) % SOFA_FACINGS.length];
     this.sofaFacing = next;
     this.sofaDef.facing = next;
-    // Persist default facing into cached scenario (session); source file is the template
     this.sofaImage.setTexture(this.sofaTextureKey(next));
     this.sofaImage.setDisplaySize(110, 84);
+    this.persistLayout();
   }
 
   openNight = (): void => {
+    if (this.buildMode) return;
     if (this.phase !== 'prep' && this.phase !== 'summary') return;
     if (this.phase === 'summary') {
       this.resetForNewNight();
     }
-    this.deselectSofa();
+    this.clearFurnitureSelection();
+    this.rebuildPathfinder();
+    this.syncSpotsFromFurniture();
     this.phase = 'open';
     this.nightEarned = 0;
     this.servedCount = 0;
@@ -497,11 +892,12 @@ export class ClubScene extends Phaser.Scene {
   }
 
   orderRest = (): void => {
+    if (this.buildMode) return;
     if (!this.bartender || this.bartender.state === 'walking' || this.bartender.state === 'busy') {
       return;
     }
     if (this.bartender.state === 'resting') return;
-    this.deselectSofa();
+    this.clearFurnitureSelection();
     this.bartender.setSelected(true);
     this.game.events.emit('select-bartender', this.bartender);
     this.bartender.state = 'busy';
@@ -529,7 +925,7 @@ export class ClubScene extends Phaser.Scene {
 
   private finishNight(): void {
     this.phase = 'summary';
-    this.deselectSofa();
+    this.clearFurnitureSelection();
     this.patrons.forEach((p) => {
       this.releaseTile(p.grid);
       p.destroy();
@@ -562,6 +958,7 @@ export class ClubScene extends Phaser.Scene {
         : null,
       nightEarned: this.nightEarned,
       servedCount: this.servedCount,
+      buildMode: this.buildMode,
     };
   }
 
@@ -581,5 +978,6 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-open-night', this.openNight, this);
     this.game.events.off('cmd-close-night', this.closeNight, this);
     this.game.events.off('cmd-rest', this.orderRest, this);
+    this.game.events.off('cmd-set-build-mode', this.setBuildMode, this);
   }
 }

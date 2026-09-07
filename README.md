@@ -13,7 +13,9 @@ Vite + TypeScript + Phaser 3. UI en espanol.
    - Descansar: Luna al sofa recupera energia
    - Cerrar noche: resumen de la sesion
    - Clientes van a barra o sofa; Luna atiende sola
-   - Sofa: clic para seleccionar; botones Girar / tecla R / clic derecho (SE/SW/NE/NW)
+   - Arrastra / desliza la pantalla para mover la camara (un dedo o mouse). Toque corto = seleccionar.
+   - Construir: coloca sofa (mover + girar 4 caras) y barra (solo mover). Listo vuelve al juego.
+   - En juego, toca Luna para su panel. El sofa no gira fuera de Construir.
 
 Meta: gana dinero sin dejar a Luna sin energia.
 
@@ -46,7 +48,8 @@ Sofas max ~512px ancho; room_floor.jpeg max ~1280 en el lado largo.
 
 ## Sprint hooks
 - Mas personal, bebidas, cola visual
-- Musica, neon, VIP, guardado local
+- Musica, neon, VIP
+- Arte final de barra y bartender (placeholders SVG/PNG por ahora)
 
 ## GitHub Pages
 

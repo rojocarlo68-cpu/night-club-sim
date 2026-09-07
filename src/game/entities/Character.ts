@@ -99,6 +99,10 @@ export class Character extends Phaser.GameObjects.Container {
     });
   }
 
+  setPathfinder(pf: Pathfinder): void {
+    this.pathfinder = pf;
+  }
+
   snapTo(grid: GridPos): void {
     this.grid = { ...grid };
     const p = tileToScreen(grid.col, grid.row, this.iso);

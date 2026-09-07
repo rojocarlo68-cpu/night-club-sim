@@ -15,6 +15,7 @@ interface HudState {
   bartender: HudBartender | null;
   nightEarned?: number;
   servedCount?: number;
+  buildMode?: boolean;
 }
 
 export class UIScene extends Phaser.Scene {
@@ -22,6 +23,8 @@ export class UIScene extends Phaser.Scene {
   private timerText!: Phaser.GameObjects.Text;
   private openBtn!: Phaser.GameObjects.Container;
   private closeBtn!: Phaser.GameObjects.Container;
+  private buildBtn!: Phaser.GameObjects.Container;
+  private doneBuildBtn!: Phaser.GameObjects.Container;
   private restBtn!: Phaser.GameObjects.Container;
   private panel!: Phaser.GameObjects.Container;
   private panelVisible = false;
@@ -32,6 +35,7 @@ export class UIScene extends Phaser.Scene {
   private panelName!: Phaser.GameObjects.Text;
   private panelStats!: Phaser.GameObjects.Text;
   private phase: string = 'prep';
+  private buildMode = false;
 
   constructor() {
     super({ key: 'UIScene', active: false });
@@ -43,6 +47,8 @@ export class UIScene extends Phaser.Scene {
     // Top HUD
     const hudBg = this.add.rectangle(0, 0, cam.width, 52, 0x12081e, 0.85).setOrigin(0);
     hudBg.setScrollFactor(0);
+    // Block world pan from "hitting through" the HUD
+    hudBg.setInteractive();
 
     this.moneyText = this.add
       .text(16, 14, 'Dinero: $40', {
@@ -61,6 +67,7 @@ export class UIScene extends Phaser.Scene {
       .setScrollFactor(0);
 
     this.openBtn = this.makeButton(cam.width - 150, 8, 130, 36, 'Abrir noche', () => {
+      if (this.buildMode) return;
       this.game.events.emit('cmd-open-night');
     });
     this.closeBtn = this.makeButton(cam.width - 150, 8, 130, 36, 'Cerrar noche', () => {
@@ -68,10 +75,22 @@ export class UIScene extends Phaser.Scene {
     });
     this.closeBtn.setVisible(false);
 
+    this.buildBtn = this.makeButton(16, cam.height - 48, 110, 36, 'Construir', () => {
+      if (this.phase === 'open') return;
+      this.game.events.emit('cmd-set-build-mode', true);
+    });
+    this.doneBuildBtn = this.makeButton(16, cam.height - 48, 110, 36, 'Listo', () => {
+      this.game.events.emit('cmd-set-build-mode', false);
+    });
+    this.doneBuildBtn.setVisible(false);
+
     // Side panel
     this.panel = this.add.container(cam.width - 20, 70).setScrollFactor(0).setVisible(false);
     const panelBg = this.add.rectangle(0, 0, 260, 300, 0x1a0e28, 0.92).setOrigin(1, 0);
     panelBg.setStrokeStyle(2, 0xff3ca0);
+    // Absorb pointer so ClubScene pan doesn't steal panel drags
+    panelBg.setInteractive();
+
     this.panelName = this.add
       .text(-250, 12, 'Luna', { fontSize: '20px', color: '#ff9ad5', fontStyle: 'bold' })
       .setOrigin(0, 0);
@@ -79,36 +98,6 @@ export class UIScene extends Phaser.Scene {
       .text(-250, 48, '', { fontSize: '14px', color: '#e8d0ff', lineSpacing: 8 })
       .setOrigin(0, 0);
 
-    this.add
-      .text(-250, 130, 'Energía', { fontSize: '12px', color: '#a080c0' })
-      .setOrigin(0, 0);
-    this.add.rectangle(-250, 150, 220, 12, 0x2a1838).setOrigin(0, 0.5);
-    this.energyBar = this.add.rectangle(-250, 150, 220, 12, 0x3cff9a).setOrigin(0, 0.5);
-
-    this.add
-      .text(-250, 170, 'Ánimo', { fontSize: '12px', color: '#a080c0' })
-      .setOrigin(0, 0);
-    this.add.rectangle(-250, 190, 220, 12, 0x2a1838).setOrigin(0, 0.5);
-    this.moodBar = this.add.rectangle(-250, 190, 220, 12, 0xffb84d).setOrigin(0, 0.5);
-
-    this.restBtn = this.makeButton(-250, 220, 160, 36, 'Descansar', () => {
-      this.game.events.emit('cmd-rest');
-    });
-    this.restBtn.setPosition(-170, 238);
-
-    this.panel.add([
-      panelBg,
-      this.panelName,
-      this.panelStats,
-      this.energyBar,
-      this.moodBar,
-      this.restBtn,
-    ]);
-    // also add labels that were created as scene children — reparent
-    // Simpler: keep labels as panel children by recreating structure in container
-    // For MVP the absolute texts above work because panel is right-aligned.
-
-    // Fix: move stray texts into panel by creating them in container
     this.panel.removeAll(false);
     const eLabel = this.add.text(-250, 130, 'Energía', { fontSize: '12px', color: '#a080c0' });
     const mLabel = this.add.text(-250, 170, 'Ánimo', { fontSize: '12px', color: '#a080c0' });
@@ -116,11 +105,6 @@ export class UIScene extends Phaser.Scene {
     const mBg = this.add.rectangle(-250, 190, 220, 12, 0x2a1838).setOrigin(0, 0.5);
     this.energyBar = this.add.rectangle(-250, 150, 220, 12, 0x3cff9a).setOrigin(0, 0.5);
     this.moodBar = this.add.rectangle(-250, 190, 220, 12, 0xffb84d).setOrigin(0, 0.5);
-    this.restBtn = this.makeButton(-250, 220, 200, 36, 'Descansar', () => {
-      this.game.events.emit('cmd-rest');
-    });
-    // makeButton returns container at world pos — rebuild rest as local
-    this.restBtn.destroy();
     this.restBtn = this.makeLocalButton(-250, 220, 200, 36, 'Descansar', () => {
       this.game.events.emit('cmd-rest');
     });
@@ -143,11 +127,11 @@ export class UIScene extends Phaser.Scene {
       this.panelDismissBtn,
     ]);
 
-    // Guard: keyboard plugin may be missing on mobile / touch-only
     const kb = this.input.keyboard;
     if (kb) {
       kb.on('keydown-ESC', () => {
         if (this.panelVisible) this.hidePanel();
+        else if (this.buildMode) this.game.events.emit('cmd-set-build-mode', false);
       });
     }
 
@@ -155,6 +139,7 @@ export class UIScene extends Phaser.Scene {
     this.summary = this.add.container(cam.width / 2, cam.height / 2).setScrollFactor(0).setVisible(false);
     const sumBg = this.add.rectangle(0, 0, 380, 260, 0x140a22, 0.95);
     sumBg.setStrokeStyle(2, 0x2ad6ff);
+    sumBg.setInteractive();
     const sumTitle = this.add
       .text(0, -100, 'Fin de la noche', {
         fontSize: '24px',
@@ -173,6 +158,7 @@ export class UIScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setName('body');
     const again = this.makeLocalButton(-100, 80, 200, 40, 'Abrir noche', () => {
+      if (this.buildMode) return;
       this.summary.setVisible(false);
       this.game.events.emit('cmd-open-night');
     });
@@ -183,8 +169,10 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('night-started', this.onNightStarted, this);
     this.game.events.on('night-summary', this.onSummary, this);
     this.game.events.on('select-bartender', this.onSelectBartender, this);
+    this.game.events.on('build-mode-changed', this.onBuildModeChanged, this);
 
     this.scale.on('resize', this.onResize, this);
+    this.refreshBuildButtons();
   }
 
   private makeButton(
@@ -201,10 +189,14 @@ export class UIScene extends Phaser.Scene {
     bg.setInteractive({ useHandCursor: true });
     const t = this.add
       .text(w / 2, h / 2, label, { fontSize: '14px', color: '#ffffff', fontStyle: 'bold' })
-      .setOrigin(0.5);
+      .setOrigin(0.5)
+      .setName('label');
     bg.on('pointerover', () => bg.setFillStyle(0xd44a9a));
     bg.on('pointerout', () => bg.setFillStyle(0xb43282));
-    bg.on('pointerdown', cb);
+    bg.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      p.event.stopPropagation();
+      cb();
+    });
     c.add([bg, t]);
     return c;
   }
@@ -226,9 +218,28 @@ export class UIScene extends Phaser.Scene {
       .setOrigin(0.5);
     bg.on('pointerover', () => bg.setFillStyle(0xd44a9a));
     bg.on('pointerout', () => bg.setFillStyle(0xb43282));
-    bg.on('pointerdown', cb);
+    bg.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      p.event.stopPropagation();
+      cb();
+    });
     c.add([bg, t]);
     return c;
+  }
+
+
+  isPointerOnUi(p: Phaser.Input.Pointer): boolean {
+    const w = this.cameras.main.width;
+    const h = this.cameras.main.height;
+    if (p.y < 56) return true;
+    // Construir / Listo
+    if (p.x < 140 && p.y > h - 60) return true;
+    if (this.panelVisible && p.x > w - 280 && p.y > 60 && p.y < 380) return true;
+    if (this.summary.visible) {
+      const cx = w / 2;
+      const cy = h / 2;
+      if (Math.abs(p.x - cx) < 200 && Math.abs(p.y - cy) < 140) return true;
+    }
+    return false;
   }
 
   private hidePanel(): void {
@@ -239,6 +250,7 @@ export class UIScene extends Phaser.Scene {
   }
 
   private onSelectBartender = (b: any): void => {
+    if (this.buildMode) return;
     this.panelVisible = true;
     this.panel.setVisible(true);
     const hud: HudBartender = {
@@ -267,6 +279,23 @@ export class UIScene extends Phaser.Scene {
     this.energyBar.setFillStyle(b.energy < 30 ? 0xff4466 : 0x3cff9a);
   }
 
+  private onBuildModeChanged = (on: boolean): void => {
+    this.buildMode = on;
+    if (on) this.hidePanel();
+    this.refreshBuildButtons();
+  };
+
+  private refreshBuildButtons(): void {
+    const canBuild = this.phase !== 'open';
+    this.buildBtn.setVisible(canBuild && !this.buildMode);
+    this.doneBuildBtn.setVisible(canBuild && this.buildMode);
+    // Dim / hide Abrir noche while building
+    this.openBtn.setAlpha(this.buildMode ? 0.35 : 1);
+    if (this.buildMode) {
+      this.openBtn.setVisible(this.phase !== 'open');
+    }
+  }
+
   private onStats = (s: HudState): void => {
     this.phase = s.phase;
     this.moneyText.setText(`Dinero: $${s.money}`);
@@ -278,12 +307,17 @@ export class UIScene extends Phaser.Scene {
     if (s.bartender && this.panelVisible) {
       this.refreshPanel(s.bartender);
     }
+    this.refreshBuildButtons();
   };
 
   private onNightStarted = (s: HudState): void => {
     this.summary.setVisible(false);
     this.openBtn.setVisible(false);
     this.closeBtn.setVisible(true);
+    // Force exit build if somehow still on
+    if (this.buildMode) {
+      this.game.events.emit('cmd-set-build-mode', false);
+    }
     this.onStats(s);
   };
 
@@ -300,14 +334,18 @@ export class UIScene extends Phaser.Scene {
     );
     this.summary.setVisible(true);
     if (s.bartender) this.refreshPanel(s.bartender);
+    this.refreshBuildButtons();
   };
 
   private onResize = (gameSize: Phaser.Structs.Size): void => {
     const w = gameSize.width;
+    const h = gameSize.height;
     this.openBtn.setX(w - 150);
     this.closeBtn.setX(w - 150);
+    this.buildBtn.setPosition(16, h - 48);
+    this.doneBuildBtn.setPosition(16, h - 48);
     this.panel.setX(w - 20);
     this.timerText.setX(w / 2);
-    this.summary.setPosition(w / 2, gameSize.height / 2);
+    this.summary.setPosition(w / 2, h / 2);
   };
 }
