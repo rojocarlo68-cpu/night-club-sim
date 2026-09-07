@@ -58,6 +58,8 @@ interface SavedLayout {
 
 const FACINGS: IsoFacing[] = ['se', 'sw', 'nw', 'ne'];
 const LAYOUT_KEY = 'night-club-layout-v1';
+/** Soft wall rim: outermost tile ring sits under neon wall geometry. */
+const BUILD_MARGIN = 1;
 const TAP_THRESH = 10;
 const HUD_TOP = 56;
 
@@ -367,11 +369,21 @@ export class ClubScene extends Phaser.Scene {
 
   private canPlaceFurniture(def: FurnitureDef, col: number, row: number): boolean {
     if (!this.tileInBounds(col, row, def.footprint)) return false;
+    const { cols, rows } = this.scenario.map;
     const wall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
     for (let dc = 0; dc < def.footprint[0]; dc++) {
       for (let dr = 0; dr < def.footprint[1]; dr++) {
         const c = col + dc;
         const r = row + dr;
+        // 1-tile outer rim = neon wall (reject even if scenario.blocked empty)
+        if (
+          c < BUILD_MARGIN ||
+          r < BUILD_MARGIN ||
+          c >= cols - BUILD_MARGIN ||
+          r >= rows - BUILD_MARGIN
+        ) {
+          return false;
+        }
         if (wall.has(`${c},${r}`)) return false;
         // collide with other furniture
         for (const other of this.scenario.furniture) {
@@ -397,7 +409,9 @@ export class ClubScene extends Phaser.Scene {
     // (art neon bbox covers ~87% of the image; match that to the iso diamond).
     const diamondW = (cols + rows - 2) * (tileWidth / 2);
     const diamondH = (cols + rows - 2) * (tileHeight / 2);
-    const neonFrac = 0.87;
+    // neon bbox ~87% of art; 0.84 pushes wall slightly outward so BUILD_MARGIN rim
+    // sits on/under neon blocks while placeable tiles hug glossy floor inside.
+    const neonFrac = 0.84;
     this.roomImage = this.add.image(center.x, center.y + 6, 'room_floor');
     this.roomImage.setDisplaySize(diamondW / neonFrac, diamondH / neonFrac);
     this.roomImage.setDepth(0);
@@ -513,6 +527,8 @@ export class ClubScene extends Phaser.Scene {
 
   private applyBarDisplaySize(): void {
     this.barImage.setDisplaySize(168, 124);
+    this.barImage.setAlpha(1);
+    this.barImage.setBlendMode(Phaser.BlendModes.NORMAL);
   }
 
   private placeFurniture(): void {
