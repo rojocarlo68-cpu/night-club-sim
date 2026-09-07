@@ -36,7 +36,8 @@ Sofa 4 angulos PNG transparente:
 - public/assets/furniture/sofa_nw.png (frente arriba-izquierda)
 
 Reemplazar: sobrescribe esos archivos con los mismos nombres. Si cambias nombres, actualiza BootScene y scenario.json sprites.
-Barra/personajes siguen SVG. Paleta oscura + neon magenta/cyan.
+Barra, personajes y tiles: PNG (sin load.svg). Paleta oscura + neon magenta/cyan.
+Sofas max ~512px ancho; room_floor.jpeg max ~1280 en el lado largo.
 
 ## Stack
 - Vite 5 + TypeScript + Phaser 3

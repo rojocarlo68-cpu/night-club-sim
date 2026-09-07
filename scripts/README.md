@@ -1,2 +1,4 @@
-# Asset placeholders are SVG under public/assets.
-# Replace with PNG of same basename; see README.
+# Assets
+
+Runtime art is PNG under public/assets.
+SVGs may remain as source; BootScene loads PNG via this.load.image only.

@@ -80,8 +80,48 @@ export class ClubScene extends Phaser.Scene {
   }
 
   create(): void {
+    try {
+      this.bootstrapClub();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[ClubScene] create failed:', err);
+      this.showFatalError(`Error en ClubScene: ${msg}`);
+    }
+  }
+
+  private showFatalError(message: string): void {
+    const w = this.cameras.main.width;
+    const h = this.cameras.main.height;
+    this.cameras.main.setBackgroundColor('#05030a');
+    this.add
+      .text(w / 2, h / 2 - 20, 'Night Club — error', {
+        fontSize: '22px',
+        color: '#ff3ca0',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5);
+    this.add
+      .text(w / 2, h / 2 + 24, message, {
+        fontSize: '14px',
+        color: '#ff99aa',
+        align: 'center',
+        wordWrap: { width: w - 48 },
+      })
+      .setOrigin(0.5);
+  }
+
+  private requireTexture(key: string): void {
+    if (!this.textures.exists(key)) {
+      throw new Error(`Falta textura: ${key}`);
+    }
+  }
+
+  private bootstrapClub(): void {
     this.scenario = this.cache.json.get('scenario') as Scenario;
     this.chars = this.cache.json.get('characters') as CharactersFile;
+    if (!this.scenario) throw new Error('Falta JSON scenario');
+    if (!this.chars) throw new Error('Falta JSON characters');
+
     this.money = this.scenario.startingMoney;
     this.nightEarned = 0;
     this.servedCount = 0;
@@ -105,14 +145,28 @@ export class ClubScene extends Phaser.Scene {
     });
     this.pathfinder = new Pathfinder(cols, rows, blocked);
 
+    this.requireTexture('room_floor');
+    this.requireTexture('furn_bar');
+    for (const facing of SOFA_FACINGS) {
+      this.requireTexture(`furn_sofa_${facing}`);
+    }
+    this.requireTexture(this.chars.bartender.sprite || 'bartender');
+
     this.drawRoom(cols, rows);
     this.placeFurniture();
 
-    const bar = this.scenario.furniture.find((f) => f.type === 'bar')!;
-    this.sofaDef = this.scenario.furniture.find((f) => f.type === 'sofa')!;
-    this.barInteract = { col: bar.interact![0], row: bar.interact![1] };
-    this.staffSpot = { col: bar.staffSpot![0], row: bar.staffSpot![1] };
-    this.sofaRest = { col: this.sofaDef.restSpot![0], row: this.sofaDef.restSpot![1] };
+    const bar = this.scenario.furniture.find((f) => f.type === 'bar');
+    const sofa = this.scenario.furniture.find((f) => f.type === 'sofa');
+    if (!bar) throw new Error('Furniture bar missing in scenario');
+    if (!sofa) throw new Error('Furniture sofa missing in scenario');
+    if (!bar.interact) throw new Error('bar.interact missing');
+    if (!bar.staffSpot) throw new Error('bar.staffSpot missing');
+    if (!sofa.restSpot) throw new Error('sofa.restSpot missing');
+
+    this.sofaDef = sofa;
+    this.barInteract = { col: bar.interact[0], row: bar.interact[1] };
+    this.staffSpot = { col: bar.staffSpot[0], row: bar.staffSpot[1] };
+    this.sofaRest = { col: sofa.restSpot[0], row: sofa.restSpot[1] };
 
     const bd = this.chars.bartender;
     this.bartender = new Bartender(
@@ -196,14 +250,17 @@ export class ClubScene extends Phaser.Scene {
     for (const f of this.scenario.furniture) {
       const { x, y } = tileToScreen(f.tile[0], f.tile[1], this.iso);
       if (f.type === 'bar') {
+        this.requireTexture('furn_bar');
         const img = this.add.image(x, y - 10, 'furn_bar');
         img.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
         const glow = this.add.circle(x, y - 20, 40, 0xffaa44, 0.12);
         glow.setDepth(depthForTile(f.tile[0], f.tile[1], 2));
       } else if (f.type === 'sofa') {
+        this.sofaDef = f;
         this.sofaFacing = (f.facing as SofaFacing) || 'se';
         if (!SOFA_FACINGS.includes(this.sofaFacing)) this.sofaFacing = 'se';
         const key = this.sofaTextureKey(this.sofaFacing);
+        this.requireTexture(key);
         this.sofaImage = this.add.image(x, y - 6, key);
         // Art sofas are large; scale down to footprint
         this.sofaImage.setDisplaySize(110, 84);

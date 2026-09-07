@@ -143,9 +143,13 @@ export class UIScene extends Phaser.Scene {
       this.panelDismissBtn,
     ]);
 
-    this.input.keyboard?.on('keydown-ESC', () => {
-      if (this.panelVisible) this.hidePanel();
-    });
+    // Guard: keyboard plugin may be missing on mobile / touch-only
+    const kb = this.input.keyboard;
+    if (kb) {
+      kb.on('keydown-ESC', () => {
+        if (this.panelVisible) this.hidePanel();
+      });
+    }
 
     // Summary overlay
     this.summary = this.add.container(cam.width / 2, cam.height / 2).setScrollFactor(0).setVisible(false);
