@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { NpcInfo } from '../types/Npc';
 
 interface HudBartender {
   name: string;
@@ -13,10 +14,22 @@ interface HudState {
   phase: string;
   nightTimer: number;
   bartender: HudBartender | null;
+  selectedNpc?: NpcInfo | null;
   nightEarned?: number;
   servedCount?: number;
   buildMode?: boolean;
 }
+
+const STATE_ES: Record<string, string> = {
+  idle: 'Libre',
+  walking: 'Caminando',
+  busy: 'Ocupada',
+  resting: 'Descansando',
+  waiting: 'Esperando',
+  drinking: 'Bebiendo',
+  leaving: 'Saliendo',
+  relaxing: 'Relajándose',
+};
 
 export class UIScene extends Phaser.Scene {
   private moneyText!: Phaser.GameObjects.Text;
@@ -32,10 +45,14 @@ export class UIScene extends Phaser.Scene {
   private summary!: Phaser.GameObjects.Container;
   private energyBar!: Phaser.GameObjects.Rectangle;
   private moodBar!: Phaser.GameObjects.Rectangle;
+  private energyLabel!: Phaser.GameObjects.Text;
+  private moodLabel!: Phaser.GameObjects.Text;
   private panelName!: Phaser.GameObjects.Text;
+  private panelRole!: Phaser.GameObjects.Text;
   private panelStats!: Phaser.GameObjects.Text;
   private phase: string = 'prep';
   private buildMode = false;
+  private selectedNpc: NpcInfo | null = null;
 
   constructor() {
     super({ key: 'UIScene', active: false });
@@ -47,7 +64,6 @@ export class UIScene extends Phaser.Scene {
     // Top HUD
     const hudBg = this.add.rectangle(0, 0, cam.width, 52, 0x12081e, 0.85).setOrigin(0);
     hudBg.setScrollFactor(0);
-    // Block world pan from "hitting through" the HUD
     hudBg.setInteractive();
 
     this.moneyText = this.add
@@ -84,28 +100,29 @@ export class UIScene extends Phaser.Scene {
     });
     this.doneBuildBtn.setVisible(false);
 
-    // Side panel
+    // Side panel (unified NPC)
     this.panel = this.add.container(cam.width - 20, 70).setScrollFactor(0).setVisible(false);
-    const panelBg = this.add.rectangle(0, 0, 260, 300, 0x1a0e28, 0.92).setOrigin(1, 0);
+    const panelBg = this.add.rectangle(0, 0, 260, 320, 0x1a0e28, 0.92).setOrigin(1, 0);
     panelBg.setStrokeStyle(2, 0xff3ca0);
-    // Absorb pointer so ClubScene pan doesn't steal panel drags
     panelBg.setInteractive();
 
     this.panelName = this.add
-      .text(-250, 12, 'Luna', { fontSize: '20px', color: '#ff9ad5', fontStyle: 'bold' })
+      .text(-250, 12, '', { fontSize: '20px', color: '#ff9ad5', fontStyle: 'bold' })
+      .setOrigin(0, 0);
+    this.panelRole = this.add
+      .text(-250, 38, '', { fontSize: '13px', color: '#2ad6ff' })
       .setOrigin(0, 0);
     this.panelStats = this.add
-      .text(-250, 48, '', { fontSize: '14px', color: '#e8d0ff', lineSpacing: 8 })
+      .text(-250, 58, '', { fontSize: '14px', color: '#e8d0ff', lineSpacing: 6 })
       .setOrigin(0, 0);
 
-    this.panel.removeAll(false);
-    const eLabel = this.add.text(-250, 130, 'Energía', { fontSize: '12px', color: '#a080c0' });
-    const mLabel = this.add.text(-250, 170, 'Ánimo', { fontSize: '12px', color: '#a080c0' });
+    this.energyLabel = this.add.text(-250, 130, 'Energía', { fontSize: '12px', color: '#a080c0' });
+    this.moodLabel = this.add.text(-250, 170, 'Ánimo', { fontSize: '12px', color: '#a080c0' });
     const eBg = this.add.rectangle(-250, 150, 220, 12, 0x2a1838).setOrigin(0, 0.5);
     const mBg = this.add.rectangle(-250, 190, 220, 12, 0x2a1838).setOrigin(0, 0.5);
     this.energyBar = this.add.rectangle(-250, 150, 220, 12, 0x3cff9a).setOrigin(0, 0.5);
     this.moodBar = this.add.rectangle(-250, 190, 220, 12, 0xffb84d).setOrigin(0, 0.5);
-    this.restBtn = this.makeLocalButton(-250, 220, 200, 36, 'Descansar', () => {
+    this.restBtn = this.makeLocalButton(-250, 230, 200, 36, 'Descansar', () => {
       this.game.events.emit('cmd-rest');
     });
 
@@ -116,9 +133,10 @@ export class UIScene extends Phaser.Scene {
     this.panel.add([
       panelBg,
       this.panelName,
+      this.panelRole,
       this.panelStats,
-      eLabel,
-      mLabel,
+      this.energyLabel,
+      this.moodLabel,
       eBg,
       mBg,
       this.energyBar,
@@ -168,7 +186,10 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('stats-updated', this.onStats, this);
     this.game.events.on('night-started', this.onNightStarted, this);
     this.game.events.on('night-summary', this.onSummary, this);
-    this.game.events.on('select-bartender', this.onSelectBartender, this);
+    this.game.events.on('select-npc', this.onSelectNpc, this);
+    // Back-compat: older emit still works
+    this.game.events.on('select-bartender', this.onSelectBartenderLegacy, this);
+    this.game.events.on('npc-deselected', this.onNpcDeselected, this);
     this.game.events.on('build-mode-changed', this.onBuildModeChanged, this);
 
     this.scale.on('resize', this.onResize, this);
@@ -226,14 +247,12 @@ export class UIScene extends Phaser.Scene {
     return c;
   }
 
-
   isPointerOnUi(p: Phaser.Input.Pointer): boolean {
     const w = this.cameras.main.width;
     const h = this.cameras.main.height;
     if (p.y < 56) return true;
-    // Construir / Listo
     if (p.x < 140 && p.y > h - 60) return true;
-    if (this.panelVisible && p.x > w - 280 && p.y > 60 && p.y < 380) return true;
+    if (this.panelVisible && p.x > w - 280 && p.y > 60 && p.y < 400) return true;
     if (this.summary.visible) {
       const cx = w / 2;
       const cy = h / 2;
@@ -246,37 +265,80 @@ export class UIScene extends Phaser.Scene {
     if (!this.panelVisible) return;
     this.panelVisible = false;
     this.panel.setVisible(false);
-    this.game.events.emit('cmd-deselect-bartender');
+    this.selectedNpc = null;
+    this.game.events.emit('cmd-deselect-npc');
   }
 
-  private onSelectBartender = (b: any): void => {
+  /** ClubScene cleared selection (empty tap / patron left) — close panel only. */
+  private onNpcDeselected = (): void => {
+    if (!this.panelVisible) return;
+    this.panelVisible = false;
+    this.panel.setVisible(false);
+    this.selectedNpc = null;
+  };
+
+  private onSelectNpc = (npc: NpcInfo): void => {
     if (this.buildMode) return;
+    this.selectedNpc = npc;
     this.panelVisible = true;
     this.panel.setVisible(true);
-    const hud: HudBartender = {
-      name: b.displayName ?? b.name,
+    this.refreshPanel(npc);
+  };
+
+  private onSelectBartenderLegacy = (b: any): void => {
+    const npc: NpcInfo = {
+      id: b.profile?.id ?? b.id ?? 'bartender',
+      name: b.displayName ?? b.name ?? 'Luna',
+      role: 'staff',
       energy: typeof b.energy === 'number' ? b.energy : b.profile?.energy ?? 0,
       mood: typeof b.mood === 'number' ? b.mood : b.profile?.mood ?? 0,
       skill: typeof b.skill === 'number' ? b.skill : b.profile?.skill ?? 0,
       state: b.state ?? 'idle',
     };
-    this.refreshPanel(hud);
+    this.onSelectNpc(npc);
   };
 
-  private refreshPanel(b: HudBartender): void {
-    this.panelName.setText(b.name);
-    const stateEs: Record<string, string> = {
-      idle: 'Libre',
-      walking: 'Caminando',
-      busy: 'Ocupada',
-      resting: 'Descansando',
-    };
-    this.panelStats.setText(
-      `Estado: ${stateEs[b.state] || b.state}\nHabilidad: ${b.skill}`
-    );
-    this.energyBar.width = 220 * Phaser.Math.Clamp(b.energy / 100, 0, 1);
-    this.moodBar.width = 220 * Phaser.Math.Clamp(b.mood / 100, 0, 1);
-    this.energyBar.setFillStyle(b.energy < 30 ? 0xff4466 : 0x3cff9a);
+  private refreshPanel(npc: NpcInfo): void {
+    this.panelName.setText(npc.name);
+    const isStaff = npc.role === 'staff';
+    this.panelRole.setText(`Rol: ${isStaff ? 'Barman' : 'Cliente'}`);
+
+    const estado = STATE_ES[npc.state] || npc.state;
+    if (isStaff) {
+      this.panelStats.setText(
+        `Estado: ${estado}\nHabilidad: ${npc.skill ?? '—'}`
+      );
+      this.energyLabel.setText('Energía');
+      this.moodLabel.setText('Ánimo');
+      const energy = npc.energy ?? 0;
+      const mood = npc.mood ?? 0;
+      this.energyBar.width = 220 * Phaser.Math.Clamp(energy / 100, 0, 1);
+      this.moodBar.width = 220 * Phaser.Math.Clamp(mood / 100, 0, 1);
+      this.energyBar.setFillStyle(energy < 30 ? 0xff4466 : 0x3cff9a);
+      this.moodBar.setFillStyle(0xffb84d);
+      this.moodBar.setVisible(true);
+      this.moodLabel.setVisible(true);
+      const canRest = !['walking', 'busy', 'resting'].includes(npc.state);
+      this.restBtn.setVisible(canRest);
+      this.restBtn.setAlpha(canRest ? 1 : 0.4);
+    } else {
+      const drink = npc.preferredDrink || '—';
+      this.panelStats.setText(
+        `Estado: ${estado}\nPreferencia: ${drink}\nHabilidad: —`
+      );
+      this.energyLabel.setText('Paciencia');
+      this.moodLabel.setText('Ánimo de la noche');
+      const pMax = Math.max(1, npc.patienceMax ?? 1);
+      const pCur = npc.patience ?? 0;
+      const mood = npc.mood ?? Math.round((pCur / pMax) * 100);
+      this.energyBar.width = 220 * Phaser.Math.Clamp(pCur / pMax, 0, 1);
+      this.moodBar.width = 220 * Phaser.Math.Clamp(mood / 100, 0, 1);
+      this.energyBar.setFillStyle(pCur / pMax < 0.3 ? 0xff4466 : 0x2ad6ff);
+      this.moodBar.setFillStyle(0xffb84d);
+      this.moodBar.setVisible(true);
+      this.moodLabel.setVisible(true);
+      this.restBtn.setVisible(false);
+    }
   }
 
   private onBuildModeChanged = (on: boolean): void => {
@@ -289,7 +351,6 @@ export class UIScene extends Phaser.Scene {
     const canBuild = this.phase !== 'open';
     this.buildBtn.setVisible(canBuild && !this.buildMode);
     this.doneBuildBtn.setVisible(canBuild && this.buildMode);
-    // Dim / hide Abrir noche while building
     this.openBtn.setAlpha(this.buildMode ? 0.35 : 1);
     if (this.buildMode) {
       this.openBtn.setVisible(this.phase !== 'open');
@@ -304,8 +365,19 @@ export class UIScene extends Phaser.Scene {
     } else if (s.phase === 'prep') {
       this.timerText.setText('Noche: lista');
     }
-    if (s.bartender && this.panelVisible) {
-      this.refreshPanel(s.bartender);
+    if (this.panelVisible && s.selectedNpc) {
+      this.selectedNpc = s.selectedNpc;
+      this.refreshPanel(s.selectedNpc);
+    } else if (this.panelVisible && this.selectedNpc?.role === 'staff' && s.bartender) {
+      this.refreshPanel({
+        id: this.selectedNpc.id,
+        name: s.bartender.name,
+        role: 'staff',
+        energy: s.bartender.energy,
+        mood: s.bartender.mood,
+        skill: s.bartender.skill,
+        state: s.bartender.state,
+      });
     }
     this.refreshBuildButtons();
   };
@@ -314,7 +386,6 @@ export class UIScene extends Phaser.Scene {
     this.summary.setVisible(false);
     this.openBtn.setVisible(false);
     this.closeBtn.setVisible(true);
-    // Force exit build if somehow still on
     if (this.buildMode) {
       this.game.events.emit('cmd-set-build-mode', false);
     }
@@ -333,7 +404,20 @@ export class UIScene extends Phaser.Scene {
         `Dinero total: $${s.money}`
     );
     this.summary.setVisible(true);
-    if (s.bartender) this.refreshPanel(s.bartender);
+    // Patrons are cleared — if a patron was selected, close panel
+    if (this.selectedNpc?.role === 'patron') {
+      this.hidePanel();
+    } else if (s.bartender && this.panelVisible) {
+      this.refreshPanel({
+        id: this.selectedNpc?.id ?? 'bartender',
+        name: s.bartender.name,
+        role: 'staff',
+        energy: s.bartender.energy,
+        mood: s.bartender.mood,
+        skill: s.bartender.skill,
+        state: s.bartender.state,
+      });
+    }
     this.refreshBuildButtons();
   };
 

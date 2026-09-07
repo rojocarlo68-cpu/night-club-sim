@@ -9,13 +9,13 @@ Vite + TypeScript + Phaser 3. UI en espanol.
 2. Corre el script de desarrollo Vite
 3. Controles:
    - Abrir noche: spawnea clientes
-   - Clic en bartender Luna: panel Energia / Animo / Habilidad
-   - Descansar: Luna al sofa recupera energia
+   - Toca bartender o cualquier cliente: panel unificado (Nombre, Rol, Energia/Paciencia, Animo, Habilidad, Estado)
+   - Descansar: solo personal (Luna) cuando esta libre
    - Cerrar noche: resumen de la sesion
-   - Clientes van a barra o sofa; Luna atiende sola
+   - Clientes van a barra o sofa; Luna atiende sola; paciencia baja mientras esperan
    - Arrastra / desliza la pantalla para mover la camara (un dedo o mouse). Toque corto = seleccionar.
    - Construir: coloca sofa y barra (mover + girar 4 caras). Listo vuelve al juego.
-   - En juego, toca Luna para su panel. El sofa no gira fuera de Construir.
+   - ✕ o Escape cierra el panel; toque en vacio deselecciona.
 
 Meta: gana dinero sin dejar a Luna sin energia.
 

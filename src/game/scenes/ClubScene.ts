@@ -9,6 +9,7 @@ import {
 import { Pathfinder } from '../systems/Pathfinding';
 import { Bartender, BartenderData } from '../entities/Bartender';
 import { Patron, PatronData } from '../entities/Patron';
+import { NpcInfo } from '../types/Npc';
 
 interface Drink {
   id: string;
@@ -86,6 +87,10 @@ export class ClubScene extends Phaser.Scene {
   phase: NightPhase = 'prep';
   nightTimer = 0;
   buildMode = false;
+  /** Currently selected NPC id (bartender profile id or patron runtime id). */
+  private selectedNpcId: string | null = null;
+  /** Set by NPC sprite handlers so empty-world tap can deselect. */
+  private npcTapHandled = false;
 
   private spawnLeft = 0;
   private queueTiles: Set<string> = new Set();
@@ -231,13 +236,16 @@ export class ClubScene extends Phaser.Scene {
       this.pathfinder,
       bd
     );
+    this.bartender.sprite.on('pointerdown', () => {
+      if (!this.buildMode) this.npcTapHandled = true;
+    });
     this.bartender.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
       if (this.panDragging || this.furnDragging || this.skipNextTap) return;
       if (p.getDistance() > TAP_THRESH) return;
       if (this.buildMode) return;
-      this.clearFurnitureSelection();
-      this.bartender.setSelected(true);
-      this.game.events.emit('select-bartender', this.bartender);
+      p.event.stopPropagation();
+      this.npcTapHandled = true;
+      this.selectNpcStaff();
     });
 
     this.setupPointerPan();
@@ -262,9 +270,85 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-close-night', this.closeNight, this);
     this.game.events.on('cmd-rest', this.orderRest, this);
     this.game.events.on('cmd-set-build-mode', this.setBuildMode, this);
-    this.game.events.on('cmd-deselect-bartender', () => {
-      this.bartender.setSelected(false);
-    }, this);
+    this.game.events.on('cmd-deselect-npc', this.deselectNpc, this);
+    this.game.events.on('cmd-deselect-bartender', this.deselectNpc, this);
+  }
+
+  private drinkDisplayName(id: string): string {
+    return this.drinks.find((d) => d.id === id)?.name ?? id;
+  }
+
+  private bartenderNpcInfo(): NpcInfo {
+    return {
+      id: this.bartender.profile.id,
+      name: this.bartender.displayName,
+      role: 'staff',
+      energy: Math.round(this.bartender.energy),
+      mood: Math.round(this.bartender.mood),
+      skill: Math.round(this.bartender.skill),
+      state: this.bartender.state,
+    };
+  }
+
+  private patronNpcInfo(p: Patron): NpcInfo {
+    return {
+      id: p.profile.id,
+      name: p.displayName,
+      role: 'patron',
+      patience: Math.round(p.patienceRemaining * 10) / 10,
+      patienceMax: p.profile.patience,
+      preferredDrink: p.preferredDrinkName,
+      mood: p.nightMood,
+      state: p.getActionKey(),
+    };
+  }
+
+  private getSelectedNpcInfo(): NpcInfo | null {
+    if (!this.selectedNpcId) return null;
+    if (this.bartender && this.selectedNpcId === this.bartender.profile.id) {
+      return this.bartenderNpcInfo();
+    }
+    const patron = this.patrons.find((p) => p.profile.id === this.selectedNpcId);
+    if (patron) return this.patronNpcInfo(patron);
+    return null;
+  }
+
+  private selectNpcStaff(): void {
+    this.clearFurnitureSelection();
+    this.patrons.forEach((p) => p.setSelected(false));
+    this.bartender.setSelected(true);
+    this.selectedNpcId = this.bartender.profile.id;
+    const info = this.bartenderNpcInfo();
+    this.game.events.emit('select-npc', info);
+    this.game.events.emit('select-bartender', this.bartender);
+  }
+
+  private selectNpcPatron(patron: Patron): void {
+    this.clearFurnitureSelection();
+    this.bartender.setSelected(false);
+    this.patrons.forEach((p) => p.setSelected(p === patron));
+    this.selectedNpcId = patron.profile.id;
+    this.game.events.emit('select-npc', this.patronNpcInfo(patron));
+  }
+
+  deselectNpc = (): void => {
+    this.selectedNpcId = null;
+    if (this.bartender) this.bartender.setSelected(false);
+    this.patrons.forEach((p) => p.setSelected(false));
+  };
+
+  private wirePatronClick(patron: Patron): void {
+    patron.sprite.on('pointerdown', () => {
+      if (!this.buildMode) this.npcTapHandled = true;
+    });
+    patron.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (this.panDragging || this.furnDragging || this.skipNextTap) return;
+      if (p.getDistance() > TAP_THRESH) return;
+      if (this.buildMode) return;
+      p.event.stopPropagation();
+      this.npcTapHandled = true;
+      this.selectNpcPatron(patron);
+    });
   }
 
   private captureOffsets(): void {
@@ -631,7 +715,8 @@ export class ClubScene extends Phaser.Scene {
       if (this.furnDragging) {
         this.endFurnitureDrag();
       }
-      if (this.panDragging) {
+      const wasPanDrag = this.panDragging;
+      if (wasPanDrag) {
         this.skipNextTap = true;
         this.time.delayedCall(0, () => {
           this.skipNextTap = false;
@@ -640,7 +725,20 @@ export class ClubScene extends Phaser.Scene {
       this.panActive = false;
       this.panDragging = false;
       this.blockPanGesture = false;
-      void p;
+
+      // Empty-world tap deselects NPC (NPC handlers set npcTapHandled first)
+      if (
+        !wasPanDrag &&
+        !this.npcTapHandled &&
+        !this.buildMode &&
+        p.getDistance() <= TAP_THRESH &&
+        !this.isPointerOverHud(p) &&
+        this.selectedNpcId
+      ) {
+        this.deselectNpc();
+        this.game.events.emit('npc-deselected');
+      }
+      this.npcTapHandled = false;
     });
 
     this.input.on('pointerupoutside', () => {
@@ -851,8 +949,8 @@ export class ClubScene extends Phaser.Scene {
 
   private selectFurniture(id: SelectedFurniture): void {
     if (!this.buildMode || !id) return;
-    this.bartender.setSelected(false);
-    this.game.events.emit('cmd-deselect-bartender');
+    this.deselectNpc();
+    this.game.events.emit('npc-deselected');
     this.clearFurnitureSelection();
     this.selectedFurniture = id;
     if (id === 'sofa') {
@@ -888,8 +986,8 @@ export class ClubScene extends Phaser.Scene {
     }
     this.buildMode = on;
     this.clearFurnitureSelection();
-    this.bartender.setSelected(false);
-    this.game.events.emit('cmd-deselect-bartender');
+    this.deselectNpc();
+    this.game.events.emit('npc-deselected');
     if (on) {
       this.buildHint
         .setText('Modo Construir: toca y arrastra muebles')
@@ -1061,14 +1159,17 @@ export class ClubScene extends Phaser.Scene {
       col: this.scenario.spawnTile[0],
       row: this.scenario.spawnTile[1],
     };
+    const drinkName = this.drinkDisplayName(pdata.preferredDrink);
     const patron = new Patron(
       this,
       pdata.sprite,
       spawn,
       this.iso,
       this.pathfinder,
-      pdata
+      pdata,
+      drinkName
     );
+    this.wirePatronClick(patron);
     this.patrons.push(patron);
 
     const goSofa = Math.random() < 0.35;
@@ -1176,6 +1277,10 @@ export class ClubScene extends Phaser.Scene {
       row: this.scenario.exitTile[1],
     };
     patron.walkTo(exit, () => {
+      if (this.selectedNpcId === patron.profile.id) {
+        this.deselectNpc();
+        this.game.events.emit('npc-deselected');
+      }
       this.patrons = this.patrons.filter((p) => p !== patron);
       patron.destroy();
     });
@@ -1188,8 +1293,7 @@ export class ClubScene extends Phaser.Scene {
     }
     if (this.bartender.state === 'resting') return;
     this.clearFurnitureSelection();
-    this.bartender.setSelected(true);
-    this.game.events.emit('select-bartender', this.bartender);
+    this.selectNpcStaff();
     this.bartender.state = 'busy';
     this.bartender.walkTo(this.sofaRest, () => {
       this.bartender.state = 'resting';
@@ -1216,6 +1320,10 @@ export class ClubScene extends Phaser.Scene {
   private finishNight(): void {
     this.phase = 'summary';
     this.clearFurnitureSelection();
+    if (this.selectedNpcId && this.selectedNpcId !== this.bartender?.profile.id) {
+      this.deselectNpc();
+      this.game.events.emit('npc-deselected');
+    }
     this.patrons.forEach((p) => {
       this.releaseTile(p.grid);
       p.destroy();
@@ -1246,6 +1354,7 @@ export class ClubScene extends Phaser.Scene {
             state: this.bartender.state,
           }
         : null,
+      selectedNpc: this.getSelectedNpcInfo(),
       nightEarned: this.nightEarned,
       servedCount: this.servedCount,
       buildMode: this.buildMode,
@@ -1254,8 +1363,19 @@ export class ClubScene extends Phaser.Scene {
 
   update(_t: number, dt: number): void {
     if (this.phase !== 'open') return;
-    this.nightTimer -= dt / 1000;
-    if (Math.floor(this.nightTimer * 2) !== Math.floor((this.nightTimer + dt / 1000) * 2)) {
+    const dtSec = dt / 1000;
+    this.nightTimer -= dtSec;
+
+    for (const patron of [...this.patrons]) {
+      if (!patron.active) continue;
+      if (patron.tickPatience(dtSec)) {
+        patron.showBubble('¡Me voy!');
+        patron.waiting = false;
+        this.sendPatronHome(patron);
+      }
+    }
+
+    if (Math.floor(this.nightTimer * 2) !== Math.floor((this.nightTimer + dtSec) * 2)) {
       this.game.events.emit('stats-updated', this.getHudState());
     }
     if (this.nightTimer <= 0) {
@@ -1269,5 +1389,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-close-night', this.closeNight, this);
     this.game.events.off('cmd-rest', this.orderRest, this);
     this.game.events.off('cmd-set-build-mode', this.setBuildMode, this);
+    this.game.events.off('cmd-deselect-npc', this.deselectNpc, this);
+    this.game.events.off('cmd-deselect-bartender', this.deselectNpc, this);
   }
 }
