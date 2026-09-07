@@ -1,0 +1,50 @@
+{
+  "bartender": {
+    "id": "bartender_luna",
+    "name": "Luna",
+    "role": "bartender",
+    "sprite": "bartender",
+    "energy": 100,
+    "mood": 75,
+    "skill": 55,
+    "energyDrainPerServe": 6,
+    "energyRegenOnRest": 18,
+    "restDurationMs": 3500,
+    "serveDurationMs": 1800,
+    "moveSpeed": 90
+  },
+  "patrons": [
+    {
+      "id": "patron_a",
+      "name": "Kai",
+      "sprite": "patron_a",
+      "preferredDrink": "cerveza",
+      "tipChance": 0.35,
+      "patience": 12
+    },
+    {
+      "id": "patron_b",
+      "name": "Mika",
+      "sprite": "patron_b",
+      "preferredDrink": "refresco",
+      "tipChance": 0.25,
+      "patience": 14
+    },
+    {
+      "id": "patron_c",
+      "name": "Ryo",
+      "sprite": "patron_c",
+      "preferredDrink": "shot_barato",
+      "tipChance": 0.45,
+      "patience": 10
+    },
+    {
+      "id": "patron_d",
+      "name": "Yuri",
+      "sprite": "patron_a",
+      "preferredDrink": "cerveza",
+      "tipChance": 0.3,
+      "patience": 13
+    }
+  ]
+}
