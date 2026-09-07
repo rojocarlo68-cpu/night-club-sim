@@ -25,6 +25,7 @@ export class UIScene extends Phaser.Scene {
   private restBtn!: Phaser.GameObjects.Container;
   private panel!: Phaser.GameObjects.Container;
   private panelVisible = false;
+  private panelDismissBtn!: Phaser.GameObjects.Container;
   private summary!: Phaser.GameObjects.Container;
   private energyBar!: Phaser.GameObjects.Rectangle;
   private moodBar!: Phaser.GameObjects.Rectangle;
@@ -124,6 +125,10 @@ export class UIScene extends Phaser.Scene {
       this.game.events.emit('cmd-rest');
     });
 
+    this.panelDismissBtn = this.makeLocalButton(-56, 8, 36, 32, '✕', () => {
+      this.hidePanel();
+    });
+
     this.panel.add([
       panelBg,
       this.panelName,
@@ -135,7 +140,12 @@ export class UIScene extends Phaser.Scene {
       this.energyBar,
       this.moodBar,
       this.restBtn,
+      this.panelDismissBtn,
     ]);
+
+    this.input.keyboard?.on('keydown-ESC', () => {
+      if (this.panelVisible) this.hidePanel();
+    });
 
     // Summary overlay
     this.summary = this.add.container(cam.width / 2, cam.height / 2).setScrollFactor(0).setVisible(false);
@@ -215,6 +225,13 @@ export class UIScene extends Phaser.Scene {
     bg.on('pointerdown', cb);
     c.add([bg, t]);
     return c;
+  }
+
+  private hidePanel(): void {
+    if (!this.panelVisible) return;
+    this.panelVisible = false;
+    this.panel.setVisible(false);
+    this.game.events.emit('cmd-deselect-bartender');
   }
 
   private onSelectBartender = (b: any): void => {

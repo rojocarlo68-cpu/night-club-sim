@@ -130,6 +130,9 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-open-night', this.openNight, this);
     this.game.events.on('cmd-close-night', this.closeNight, this);
     this.game.events.on('cmd-rest', this.orderRest, this);
+    this.game.events.on('cmd-deselect-bartender', () => {
+      this.bartender.setSelected(false);
+    }, this);
   }
 
   private drawRoom(cols: number, rows: number): void {
