@@ -50,7 +50,7 @@ export class Bartender extends Character {
         originY: LUNA_FEET_ORIGIN_Y,
         displayWidth: displayW,
         displayHeight: displayH,
-        // Sink slightly so feet sit in the counter trough (barFront occludes legs)
+        // Default stand Y; ClubScene nudges to -8 at front staffSpot for waist clearance
         y: 6,
       });
       this.ring.setPosition(0, -2);

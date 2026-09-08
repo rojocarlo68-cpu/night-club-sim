@@ -81,16 +81,26 @@ const ZOOM_MAX = 1.7;
 const WHEEL_ZOOM_STEP = 0.08;
 /**
  * Bottom fraction of bar opaque AABB kept in barFront (counter mass over Luna).
- * NE/NW use a lower keep so the iso-sloped bottle shelf clears the overlay.
+ * SE/SW = customer FRONT: light keep so head→navel/waist clears the counter.
+ * NE/NW = service BACK: Luna is fully hidden at staffSpot (keep unused for crop;
+ *   still generated; hide is the authority).
  */
 const BAR_FRONT_KEEP_FRAC: Record<IsoFacing, number> = {
-  se: 0.55,
-  sw: 0.55,
-  ne: 0.48,
-  nw: 0.48,
+  se: 0.38,
+  sw: 0.38,
+  ne: 1.0,
+  nw: 1.0,
 };
+/** Customer-facing (front) bar angles — neon panels toward camera. */
+const BAR_FRONT_FACINGS: ReadonlySet<IsoFacing> = new Set(['se', 'sw']);
+/** Service-facing (back) bar angles — bottles toward camera. */
+const BAR_BACK_FACINGS: ReadonlySet<IsoFacing> = new Set(['ne', 'nw']);
 /** barFront depth = bartenderDepth + this (counter always above Luna). */
 const BAR_FRONT_DEPTH_ABOVE = 20;
+/** Luna sprite.y when not tucked behind a front counter. */
+const LUNA_SPRITE_Y_DEFAULT = 6;
+/** Raise Luna at front staffSpot so waist clears the counter top. */
+const LUNA_SPRITE_Y_AT_FRONT_BAR = -8;
 
 export type NightPhase = 'prep' | 'open' | 'summary';
 
@@ -471,10 +481,10 @@ export class ClubScene extends Phaser.Scene {
   }
 
   /**
-   * Layered 2D counter occlusion:
-   *   full bar (shelf) < Luna < barFront (counter mass)
-   * Luna at staffSpot sits above the full bar sprite; barFront stays above her
-   * so only head/shoulders clear the mostrador. Works for all 4 facings.
+   * Layered 2D counter occlusion by bar facing:
+   *   FRONT (SE/SW): full bar < Luna < barFront — head→waist above counter.
+   *   BACK  (NE/NW): Luna fully hidden at staffSpot (service side / bottles to camera).
+   * Away from staffSpot (sofa/rest/walk): Luna always fully visible.
    */
   private syncBartenderBarDepth(): void {
     if (!this.bartender || !this.barDef) return;
@@ -486,13 +496,26 @@ export class ClubScene extends Phaser.Scene {
     );
     let d = depthForCharacter(g.col, g.row);
     const atStaff = g.col === this.staffSpot.col && g.row === this.staffSpot.row;
-    if (atStaff) {
+    const facing = this.barFacing;
+    const backAtBar = atStaff && BAR_BACK_FACINGS.has(facing);
+    const frontAtBar = atStaff && BAR_FRONT_FACINGS.has(facing);
+
+    // BACK: completely invisible behind service-side bar
+    this.bartender.setVisible(!backAtBar);
+
+    if (frontAtBar) {
       // Between full bar and counter overlay
       d = Math.max(d, barD + 10);
     }
     this.bartender.setDepth(d);
     if (this.barFrontImage) {
       this.barFrontImage.setDepth(Math.max(d, barD) + BAR_FRONT_DEPTH_ABOVE);
+    }
+
+    // Nudge Luna Y on front staff so waist clears counter; restore otherwise
+    const spr = this.bartender.sprite;
+    if (spr?.texture?.key === 'luna_idle') {
+      spr.y = frontAtBar ? LUNA_SPRITE_Y_AT_FRONT_BAR : LUNA_SPRITE_Y_DEFAULT;
     }
   }
 
@@ -1371,8 +1394,11 @@ export class ClubScene extends Phaser.Scene {
     this.barFrontImage.setTexture(this.barFrontTextureKey(next));
     this.applyBarDisplaySize();
     this.syncSpotsFromFurniture();
-    if (this.bartender && this.phase !== 'open') {
-      this.bartender.snapTo(this.staffSpot);
+    if (this.bartender) {
+      if (this.phase !== 'open') {
+        this.bartender.snapTo(this.staffSpot);
+      }
+      // Occlusion (front keep / back hide) must update immediately on rotate
       this.syncBartenderBarDepth();
     }
     this.persistLayout();
