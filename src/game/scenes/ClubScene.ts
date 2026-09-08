@@ -86,8 +86,10 @@ const WHEEL_ZOOM_STEP = 0.08;
  *   still generated; hide is the authority).
  */
 const BAR_FRONT_KEEP_FRAC: Record<IsoFacing, number> = {
-  se: 0.62,
-  sw: 0.62,
+  // Front: thin counter lip only — peek sheet transparent legs do the occlusion;
+  // aggressive keepFrac buried Luna's head.
+  se: 0.22,
+  sw: 0.22,
   ne: 1.0,
   nw: 1.0,
 };
@@ -482,7 +484,7 @@ export class ClubScene extends Phaser.Scene {
 
   /**
    * Layered 2D counter occlusion by bar facing:
-   *   FRONT (SE/SW): full bar < Luna < barFront — head→waist above counter.
+   *   FRONT (SE/SW): full bar < Luna peek (head→navel); barFront hidden/soft.
    *   BACK  (NE/NW): Luna fully hidden at staffSpot (service side / bottles to camera).
    * Away from staffSpot (sofa/rest/walk): Luna always fully visible.
    */
@@ -512,11 +514,17 @@ export class ClubScene extends Phaser.Scene {
       this.barFrontImage.setDepth(Math.max(d, barD) + BAR_FRONT_DEPTH_ABOVE);
     }
 
-    // Front: crop Luna to head→navel + counter overlay; else full body
+    // Front: peek texture (head→navel); else full body. No setCrop shrink.
     this.bartender.setFrontBarPeek(frontAtBar);
     const spr = this.bartender.sprite;
-    if (spr?.texture?.key === 'luna_idle') {
+    const lunaKey = spr?.texture?.key;
+    if (lunaKey === 'luna_idle' || lunaKey === 'luna_idle_peek') {
       spr.y = frontAtBar ? LUNA_SPRITE_Y_AT_FRONT_BAR : LUNA_SPRITE_Y_DEFAULT;
+    }
+    // SE/SW: hide barFront — peek transparency + full bar behind are enough;
+    // aggressive overlay buried her head. NE/NW keep overlay (Luna already hidden).
+    if (this.barFrontImage) {
+      this.barFrontImage.setVisible(!BAR_FRONT_FACINGS.has(facing));
     }
   }
 

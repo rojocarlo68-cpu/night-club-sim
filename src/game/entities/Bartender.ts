@@ -20,11 +20,14 @@ export interface BartenderData {
 export const LUNA_IDLE_FRAME_W = 146;
 export const LUNA_IDLE_FRAME_H = 784;
 export const LUNA_FEET_ORIGIN_Y = 583 / 784;
+/** Full-body display height (furniture-matched); peek uses the same size. */
+export const LUNA_DISPLAY_H = 88;
 
 export class Bartender extends Character {
   profile: BartenderData;
   selected = false;
   private ring?: Phaser.GameObjects.Ellipse;
+  private frontPeek = false;
 
   constructor(
     scene: Phaser.Scene,
@@ -43,14 +46,14 @@ export class Bartender extends Character {
 
     if (texture === 'luna_idle') {
       // Match furniture scale: sofa ~84px tall; Luna standing ~sofa height (not 3× taller)
-      const displayH = 88;
+      const displayH = LUNA_DISPLAY_H;
       const displayW = (LUNA_IDLE_FRAME_W / LUNA_IDLE_FRAME_H) * displayH;
       this.setupSheetIdle({
         animKey: 'luna-idle',
         originY: LUNA_FEET_ORIGIN_Y,
         displayWidth: displayW,
         displayHeight: displayH,
-        // Default stand Y; ClubScene nudges to -8 at front staffSpot for waist clearance
+        // Default stand Y; ClubScene nudges slightly at front staffSpot
         y: 6,
       });
       this.ring.setPosition(0, -2);
@@ -58,32 +61,54 @@ export class Bartender extends Character {
     }
   }
 
+  private lunaDisplaySize(): { w: number; h: number } {
+    const h = LUNA_DISPLAY_H;
+    return { w: (LUNA_IDLE_FRAME_W / LUNA_IDLE_FRAME_H) * h, h };
+  }
+
   /**
-   * When behind a front-facing counter: crop to head→chest/navel and
-   * plant the crop bottom on the counter line. Clear crop when leaving.
+   * Front bar (SE/SW): swap to baked peek sheet (head→navel, transparent below)
+   * at the SAME display size / feet origin as full Luna — no setCrop shrink.
+   * Elsewhere: full luna_idle + clear crop.
    */
   setFrontBarPeek(active: boolean): void {
-    if (this.sprite.texture?.key !== 'luna_idle') return;
-    const fw = LUNA_IDLE_FRAME_W;
-    const fh = LUNA_IDLE_FRAME_H;
+    const key = this.sprite.texture?.key;
+    if (key !== 'luna_idle' && key !== 'luna_idle_peek') return;
+    if (this.frontPeek === active) return;
+    this.frontPeek = active;
+
+    const { w, h } = this.lunaDisplaySize();
+    // Keep current animation frame index when swapping sheets
+    const frameName = this.sprite.frame?.name;
+    const frameIndex =
+      typeof frameName === 'string' && /^\d+$/.test(frameName)
+        ? Number(frameName)
+        : typeof frameName === 'number'
+          ? frameName
+          : 0;
+
     if (active) {
-      // ~head through navel/chest (not full skirt/legs)
-      const showH = Math.floor(fh * 0.46);
-      this.sprite.setCrop(0, 0, fw, showH);
-      this.sprite.setOrigin(0.5, 1);
-      const displayH = 88 * (showH / fh);
-      const displayW = (fw / fh) * 88;
-      this.sprite.setDisplaySize(displayW, displayH);
+      this.sprite.setCrop();
+      this.sprite.setTexture('luna_idle_peek', frameIndex);
+      this.sprite.setOrigin(0.5, LUNA_FEET_ORIGIN_Y);
+      this.sprite.setDisplaySize(w, h);
+      this.idleAnimKey = 'luna-idle-peek';
+      if (this.scene.anims.exists('luna-idle-peek')) {
+        this.sprite.play('luna-idle-peek', true);
+      }
     } else {
       this.sprite.setCrop();
+      this.sprite.setTexture('luna_idle', frameIndex);
       this.sprite.setOrigin(0.5, LUNA_FEET_ORIGIN_Y);
-      const displayH = 88;
-      const displayW = (fw / fh) * displayH;
-      this.sprite.setDisplaySize(displayW, displayH);
+      this.sprite.setDisplaySize(w, h);
+      this.idleAnimKey = 'luna-idle';
+      if (this.scene.anims.exists('luna-idle')) {
+        this.sprite.play('luna-idle', true);
+      }
     }
   }
 
-    setSelected(v: boolean): void {
+  setSelected(v: boolean): void {
     this.selected = v;
     this.ring?.setFillStyle(0xff3ca0, v ? 0.45 : 0);
   }
