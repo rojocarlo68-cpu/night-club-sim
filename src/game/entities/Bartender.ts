@@ -58,7 +58,32 @@ export class Bartender extends Character {
     }
   }
 
-  setSelected(v: boolean): void {
+  /**
+   * When behind a front-facing counter: crop to head→chest/navel and
+   * plant the crop bottom on the counter line. Clear crop when leaving.
+   */
+  setFrontBarPeek(active: boolean): void {
+    if (this.sprite.texture?.key !== 'luna_idle') return;
+    const fw = LUNA_IDLE_FRAME_W;
+    const fh = LUNA_IDLE_FRAME_H;
+    if (active) {
+      // ~head through navel/chest (not full skirt/legs)
+      const showH = Math.floor(fh * 0.46);
+      this.sprite.setCrop(0, 0, fw, showH);
+      this.sprite.setOrigin(0.5, 1);
+      const displayH = 88 * (showH / fh);
+      const displayW = (fw / fh) * 88;
+      this.sprite.setDisplaySize(displayW, displayH);
+    } else {
+      this.sprite.setCrop();
+      this.sprite.setOrigin(0.5, LUNA_FEET_ORIGIN_Y);
+      const displayH = 88;
+      const displayW = (fw / fh) * displayH;
+      this.sprite.setDisplaySize(displayW, displayH);
+    }
+  }
+
+    setSelected(v: boolean): void {
     this.selected = v;
     this.ring?.setFillStyle(0xff3ca0, v ? 0.45 : 0);
   }

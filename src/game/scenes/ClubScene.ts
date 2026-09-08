@@ -86,8 +86,8 @@ const WHEEL_ZOOM_STEP = 0.08;
  *   still generated; hide is the authority).
  */
 const BAR_FRONT_KEEP_FRAC: Record<IsoFacing, number> = {
-  se: 0.38,
-  sw: 0.38,
+  se: 0.62,
+  sw: 0.62,
   ne: 1.0,
   nw: 1.0,
 };
@@ -100,7 +100,7 @@ const BAR_FRONT_DEPTH_ABOVE = 20;
 /** Luna sprite.y when not tucked behind a front counter. */
 const LUNA_SPRITE_Y_DEFAULT = 6;
 /** Raise Luna at front staffSpot so waist clears the counter top. */
-const LUNA_SPRITE_Y_AT_FRONT_BAR = -8;
+const LUNA_SPRITE_Y_AT_FRONT_BAR = -2;
 
 export type NightPhase = 'prep' | 'open' | 'summary';
 
@@ -512,7 +512,8 @@ export class ClubScene extends Phaser.Scene {
       this.barFrontImage.setDepth(Math.max(d, barD) + BAR_FRONT_DEPTH_ABOVE);
     }
 
-    // Nudge Luna Y on front staff so waist clears counter; restore otherwise
+    // Front: crop Luna to head→navel + counter overlay; else full body
+    this.bartender.setFrontBarPeek(frontAtBar);
     const spr = this.bartender.sprite;
     if (spr?.texture?.key === 'luna_idle') {
       spr.y = frontAtBar ? LUNA_SPRITE_Y_AT_FRONT_BAR : LUNA_SPRITE_Y_DEFAULT;
@@ -993,7 +994,7 @@ export class ClubScene extends Phaser.Scene {
   private ensureBarFrontTextures(): void {
     for (const facing of FACINGS) {
       const srcKey = `furn_bar_${facing}`;
-      const frontKey = `furn_bar_front_${facing}`;
+      const frontKey = `furn_bar_front_v2_${facing}`;
       if (this.textures.exists(frontKey)) continue;
       this.requireTexture(srcKey);
       const srcImg = this.textures.get(srcKey).getSourceImage() as
@@ -1033,7 +1034,7 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private barFrontTextureKey(facing: IsoFacing): string {
-    return `furn_bar_front_${facing}`;
+    return `furn_bar_front_v2_${facing}`;
   }
 
   private placeFurniture(): void {
