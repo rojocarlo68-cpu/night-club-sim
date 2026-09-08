@@ -53,7 +53,6 @@ export class Bartender extends Character {
       const displayW = (LUNA_IDLE_FRAME_W / LUNA_IDLE_FRAME_H) * displayH;
       this.setupSheetIdle({
         animKey: 'luna-idle',
-        altAnimKeys: ['luna-idle-b'],
         originY: LUNA_FEET_ORIGIN_Y,
         displayWidth: displayW,
         displayHeight: displayH,
