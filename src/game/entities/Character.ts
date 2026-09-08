@@ -3,6 +3,7 @@ import { IsoConfig, tileToScreen, depthForCharacter } from '../systems/IsoUtils'
 import { GridPos, Pathfinder } from '../systems/Pathfinding';
 
 export type CharacterState = 'idle' | 'walking' | 'busy' | 'resting';
+export type IsoFacing = 'se' | 'sw' | 'ne' | 'nw';
 
 export class Character extends Phaser.GameObjects.Container {
   grid: GridPos;
@@ -14,6 +15,11 @@ export class Character extends Phaser.GameObjects.Container {
   protected idleAnimKey: string | null = null;
   /** When set, randomly pick among these idle anims after each loop. */
   protected idleAnimPool: string[] | null = null;
+  /** Prefix for directional walk anims: `${prefix}-${facing}` e.g. patron-walk-se */
+  protected walkAnimPrefix: string | null = null;
+  /** Prefix for directional idle: `${prefix}-${facing}`; falls back to idleAnimKey. */
+  protected idleAnimPrefix: string | null = null;
+  facing: IsoFacing = 'se';
   private path: GridPos[] = [];
   private pathIndex = 0;
   private onArrive?: () => void;
@@ -48,6 +54,8 @@ export class Character extends Phaser.GameObjects.Container {
     displayWidth: number;
     displayHeight: number;
     y?: number;
+    walkAnimPrefix?: string;
+    idleAnimPrefix?: string;
   }): void {
     this.useSheetIdle = true;
     this.idleAnimKey = opts.animKey;
@@ -55,6 +63,8 @@ export class Character extends Phaser.GameObjects.Container {
       opts.altAnimKeys && opts.altAnimKeys.length > 0
         ? [opts.animKey, ...opts.altAnimKeys]
         : null;
+    this.walkAnimPrefix = opts.walkAnimPrefix ?? null;
+    this.idleAnimPrefix = opts.idleAnimPrefix ?? null;
     this.bobTween?.stop();
     this.bobTween = undefined;
     this.sprite.setOrigin(opts.originX ?? 0.5, opts.originY);
@@ -67,10 +77,14 @@ export class Character extends Phaser.GameObjects.Container {
     this.playSheetIdle(true);
   }
 
-  /** Pick a random idle from the pool (or the single key) and play it once / loop. */
+  /** Pick a random idle from the pool (or the single / facing key) and play it. */
   protected playSheetIdle(force = false): void {
     const pool = this.idleAnimPool;
     let key = this.idleAnimKey;
+    if (this.idleAnimPrefix) {
+      const facingKey = `${this.idleAnimPrefix}-${this.facing}`;
+      if (this.scene.anims.exists(facingKey)) key = facingKey;
+    }
     if (pool && pool.length > 0) {
       key = pool[Math.floor(Math.random() * pool.length)] ?? key;
     }
@@ -85,13 +99,30 @@ export class Character extends Phaser.GameObjects.Container {
   ): void {
     if (!this.useSheetIdle || !this.idleAnimPool) return;
     if (!this.idleAnimPool.includes(anim.key)) return;
-    // Only re-roll while standing idle (not mid-walk / busy stop).
     if (this.state === 'walking') return;
     this.playSheetIdle(true);
   }
 
+  protected facingFromStep(from: GridPos, to: GridPos): IsoFacing {
+    const dc = to.col - from.col;
+    const dr = to.row - from.row;
+    if (Math.abs(dc) >= Math.abs(dr)) {
+      return dc >= 0 ? 'se' : 'nw';
+    }
+    return dr >= 0 ? 'sw' : 'ne';
+  }
+
+  protected playWalkFacing(facing: IsoFacing): void {
+    this.facing = facing;
+    if (!this.walkAnimPrefix) return;
+    const key = `${this.walkAnimPrefix}-${facing}`;
+    if (this.scene.anims.exists(key)) {
+      this.sprite.play(key, true);
+    }
+  }
+
   startBob(): void {
-    if (this.useSheetIdle && this.idleAnimKey) {
+    if (this.useSheetIdle && (this.idleAnimKey || this.idleAnimPrefix)) {
       this.playSheetIdle(true);
       return;
     }
@@ -109,7 +140,7 @@ export class Character extends Phaser.GameObjects.Container {
   stopBob(): void {
     if (this.useSheetIdle) {
       this.sprite.stop();
-      this.sprite.setFrame(0);
+      // Keep current frame (walk mid-stride or idle) — don't force frame 0
       return;
     }
     this.bobTween?.stop();
@@ -129,7 +160,6 @@ export class Character extends Phaser.GameObjects.Container {
     const path = this.pathfinder.findPath(this.grid, target);
     if (path.length < 2) {
       if (path.length === 1) {
-        // Already there (or snapped to same tile)
         onArrive?.();
         return true;
       }
@@ -153,10 +183,16 @@ export class Character extends Phaser.GameObjects.Container {
       return;
     }
     const next = this.path[this.pathIndex++];
+    const facing = this.facingFromStep(this.grid, next);
+    this.playWalkFacing(facing);
     const screen = tileToScreen(next.col, next.row, this.iso);
     const dist = Phaser.Math.Distance.Between(this.x, this.y, screen.x, screen.y);
     const duration = Math.max(120, (dist / this.moveSpeed) * 1000);
-    this.stopBob();
+    if (!this.walkAnimPrefix) this.stopBob();
+    else {
+      this.bobTween?.stop();
+      this.bobTween = undefined;
+    }
     this.scene.tweens.add({
       targets: this,
       x: screen.x,

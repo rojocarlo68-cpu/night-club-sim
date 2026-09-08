@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { Character } from './Character';
 import { IsoConfig } from '../systems/IsoUtils';
 import { Pathfinder, GridPos } from '../systems/Pathfinding';
+import { LUNA_DISPLAY_H } from './Bartender';
 
 export interface PatronData {
   id: string;
@@ -16,6 +17,13 @@ export interface PatronData {
 }
 
 export type PatronGoal = 'bar' | 'sofa' | 'leave';
+
+/** Male client walk/idle sheets: 112×192 frames, feet near bottom. */
+export const PATRON_FRAME_W = 112;
+export const PATRON_FRAME_H = 192;
+export const PATRON_FEET_ORIGIN_Y = (PATRON_FRAME_H - 2) / PATRON_FRAME_H;
+/** Same on-screen height as Luna/Nova (~88px). */
+export const PATRON_DISPLAY_H = LUNA_DISPLAY_H;
 
 export class Patron extends Character {
   profile: PatronData;
@@ -38,16 +46,43 @@ export class Patron extends Character {
     data: PatronData,
     drinkDisplayName?: string
   ) {
-    super(scene, texture, grid, iso, pathfinder, 75);
+    // Prefer animated sheets when available
+    const startTex =
+      scene.textures.exists('patron_idle')
+        ? 'patron_idle'
+        : scene.textures.exists('patron_walk')
+          ? 'patron_walk'
+          : texture;
+    super(scene, startTex, grid, iso, pathfinder, 75);
     this.profile = { ...data };
     this.patienceRemaining = data.patience;
     this.preferredDrinkName = drinkDisplayName || data.preferredDrink;
-    this.sprite.setInteractive({ useHandCursor: true });
-    this.ring = scene.add.ellipse(0, -4, 36, 14, 0x2ad6ff, 0.0);
+
+    const displayH = PATRON_DISPLAY_H;
+    const displayW = (PATRON_FRAME_W / PATRON_FRAME_H) * displayH;
+
+    if (scene.textures.exists('patron_idle') || scene.textures.exists('patron_walk')) {
+      this.setupSheetIdle({
+        animKey: 'patron-idle-se',
+        originY: PATRON_FEET_ORIGIN_Y,
+        displayWidth: displayW,
+        displayHeight: displayH,
+        y: 6,
+        walkAnimPrefix: 'patron-walk',
+        idleAnimPrefix: 'patron-idle',
+      });
+    } else {
+      this.sprite.setOrigin(0.5, 0.92);
+      this.sprite.setDisplaySize(displayW, displayH);
+      this.sprite.y = -2;
+    }
+
+    this.refreshHitArea();
+    this.ring = scene.add.ellipse(0, -2, 18, 8, 0x2ad6ff, 0.0);
     this.add(this.ring);
     this.ring.setDepth(-1);
     this.label = scene.add
-      .text(0, -52, data.name, {
+      .text(0, -displayH - 8, data.name, {
         fontSize: '11px',
         color: '#ffe6ff',
         stroke: '#1a0a22',
@@ -55,6 +90,21 @@ export class Patron extends Character {
       })
       .setOrigin(0.5);
     this.add(this.label);
+  }
+
+  /** Match Luna/Nova: tight body hitbox in sprite-local space. */
+  refreshHitArea(): void {
+    const w = this.sprite.displayWidth;
+    const h = this.sprite.displayHeight;
+    const ox = this.sprite.originX;
+    const oy = this.sprite.originY;
+    const padX = 6;
+    const hit = new Phaser.Geom.Rectangle(-w * ox - padX, -h * oy, w + padX * 2, h);
+    this.sprite.setInteractive({
+      hitArea: hit,
+      hitAreaCallback: Phaser.Geom.Rectangle.Contains,
+      useHandCursor: true,
+    });
   }
 
   setSelected(v: boolean): void {

@@ -2,7 +2,7 @@
   "bartender": {
     "id": "bartender_luna",
     "name": "Luna",
-    "role": "bartender",
+    "role": "waitress",
     "sprite": "luna_idle",
     "energy": 100,
     "mood": 75,
@@ -18,7 +18,7 @@
     {
       "id": "patron_a",
       "name": "Kai",
-      "sprite": "patron_a",
+      "sprite": "patron_idle",
       "preferredDrink": "cerveza",
       "tipChance": 0.35,
       "patience": 12
@@ -26,7 +26,7 @@
     {
       "id": "patron_b",
       "name": "Mika",
-      "sprite": "patron_b",
+      "sprite": "patron_idle",
       "preferredDrink": "refresco",
       "tipChance": 0.25,
       "patience": 14
@@ -34,7 +34,7 @@
     {
       "id": "patron_c",
       "name": "Ryo",
-      "sprite": "patron_c",
+      "sprite": "patron_idle",
       "preferredDrink": "shot_barato",
       "tipChance": 0.45,
       "patience": 10
@@ -42,7 +42,7 @@
     {
       "id": "patron_d",
       "name": "Yuri",
-      "sprite": "patron_a",
+      "sprite": "patron_idle",
       "preferredDrink": "cerveza",
       "tipChance": 0.3,
       "patience": 13
@@ -52,8 +52,8 @@
     {
       "id": "bartender_luna",
       "name": "Luna",
-      "roleLabel": "Barman",
-      "role": "bartender",
+      "roleLabel": "Camarera",
+      "role": "waitress",
       "sprite": "luna_idle",
       "portrait": "luna_portrait",
       "energy": 100,

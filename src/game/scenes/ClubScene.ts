@@ -267,26 +267,21 @@ export class ClubScene extends Phaser.Scene {
     this.setupCamera();
 
     const bd = this.chars.bartender;
+    // Luna is free staff like Nova — spawn on the floor near sofa, not glued to bar.
+    const lunaSpawn = this.findFloorStaffSpawnTile();
     this.bartender = new Bartender(
       this,
       bd.sprite || 'bartender',
-      { ...this.staffSpot },
+      lunaSpawn,
       this.iso,
       this.pathfinder,
       bd
     );
     this.syncBartenderBarDepth();
-    this.bartender.sprite.on('pointerdown', () => {
-      if (!this.buildMode) this.npcTapHandled = true;
-    });
-    this.bartender.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
-      if (this.panDragging || this.furnDragging || this.skipNextTap) return;
-      if (p.getDistance() > TAP_THRESH) return;
-      if (this.buildMode) return;
-      p.event.stopPropagation();
-      this.npcTapHandled = true;
-      this.selectNpcStaff(this.bartender.profile.id);
-    });
+    this.wireStaffClick(this.bartender);
+    // Ensure Luna receives taps above furniture / world (same path as Nova).
+    this.bartender.sprite.setDepth(1);
+    this.bartender.refreshHitArea();
 
     this.loadStaffPool();
     this.spawnHiredExtraStaff();
@@ -404,6 +399,7 @@ export class ClubScene extends Phaser.Scene {
   private selectNpcPatron(patron: Patron): void {
     this.clearFurnitureSelection();
     this.bartender.setSelected(false);
+    this.extraStaff.forEach((s) => s.setSelected(false));
     this.patrons.forEach((p) => p.setSelected(p === patron));
     this.selectedNpcId = patron.profile.id;
     this.game.events.emit('select-npc', this.patronNpcInfo(patron));
@@ -692,10 +688,8 @@ export class ClubScene extends Phaser.Scene {
         this.barFacing = facing;
         this.syncSpotsFromFurniture();
         this.repositionFurnitureVisual('bar');
-        if (this.bartender && this.phase !== 'open') {
-          this.bartender.snapTo(this.staffSpot);
-          this.syncBartenderBarDepth();
-        }
+        // Luna stays on the floor — do not snap her into the bar when furniture moves.
+        this.syncBartenderBarDepth();
       }
     }
     this.rebuildPathfinder();
@@ -1089,10 +1083,7 @@ export class ClubScene extends Phaser.Scene {
       this.persistLayout();
       this.rebuildPathfinder();
       this.syncSpotsFromFurniture();
-      if (this.bartender && this.phase !== 'open') {
-        this.bartender.snapTo(this.staffSpot);
-        this.syncBartenderBarDepth();
-      }
+      this.syncBartenderBarDepth();
     }
     this.furnDragging = false;
     this.furnDragId = null;
@@ -1117,10 +1108,7 @@ export class ClubScene extends Phaser.Scene {
     if (persist) {
       this.persistLayout();
       this.rebuildPathfinder();
-      if (this.bartender && this.phase !== 'open') {
-        this.bartender.snapTo(this.staffSpot);
-        this.syncBartenderBarDepth();
-      }
+      this.syncBartenderBarDepth();
     }
   }
 
@@ -1235,10 +1223,7 @@ export class ClubScene extends Phaser.Scene {
       this.persistLayout();
       this.rebuildPathfinder();
       this.syncSpotsFromFurniture();
-      if (this.bartender) {
-        this.bartender.snapTo(this.staffSpot);
-        this.syncBartenderBarDepth();
-      }
+      this.syncBartenderBarDepth();
     }
     this.game.events.emit('build-mode-changed', this.buildMode);
   };
@@ -1345,12 +1330,7 @@ export class ClubScene extends Phaser.Scene {
     this.barImage.setTexture(this.furnitureTextureKey('bar', next));
     this.applyBarDisplaySize();
     this.syncSpotsFromFurniture();
-    if (this.bartender) {
-      if (this.phase !== 'open') {
-        this.bartender.snapTo(this.staffSpot);
-      }
-      this.syncBartenderBarDepth();
-    }
+    this.syncBartenderBarDepth();
     this.persistLayout();
     this.rebuildPathfinder();
   }
@@ -1377,11 +1357,15 @@ export class ClubScene extends Phaser.Scene {
   private resetForNewNight(): void {
     this.patrons.forEach((p) => p.destroy());
     this.patrons = [];
-    this.bartender.snapTo(this.staffSpot);
+    // Keep Luna/Nova where they are on the floor (free staff).
     this.syncBartenderBarDepth();
     this.bartender.state = 'idle';
     this.bartender.profile.energy = Math.min(100, this.bartender.profile.energy + 25);
     this.bartender.startBob();
+    for (const s of this.extraStaff) {
+      s.state = 'idle';
+      s.startBob();
+    }
   }
 
   private scheduleSpawns(): void {
@@ -1555,10 +1539,17 @@ export class ClubScene extends Phaser.Scene {
     };
   }
 
-  /** Pick a free walkable tile near the bar/staff area for a newly hired NPC. */
-  private findStaffSpawnTile(): { col: number; row: number } {
-    const base = this.staffSpot ?? { col: this.barDef.tile[0], row: this.barDef.tile[1] };
+  /**
+   * Free walkable tile near sofa/floor for Luna & Nova (not inside the bar).
+   * Both are independent waitresses — bar is only a destination for menu actions.
+   */
+  private findFloorStaffSpawnTile(): { col: number; row: number } {
+    const base = this.sofaRest ?? {
+      col: this.sofaDef?.tile[0] ?? 3,
+      row: this.sofaDef?.tile[1] ?? 5,
+    };
     const offsets: [number, number][] = [
+      [0, 1],
       [1, 1],
       [-1, 1],
       [1, 0],
@@ -1566,14 +1557,35 @@ export class ClubScene extends Phaser.Scene {
       [0, 2],
       [2, 1],
       [-2, 1],
+      [2, 0],
+      [-2, 0],
       [0, -1],
+      [1, 2],
+      [-1, 2],
     ];
     for (const [dc, dr] of offsets) {
       const col = base.col + dc;
       const row = base.row + dr;
       if (this.isTileFreeForStaff(col, row)) return { col, row };
     }
-    return { col: base.col, row: Math.min(base.row + 1, this.scenario.map.rows - 2) };
+    // Fallback: south of bar interact (still on floor, not staffSpot)
+    const alt = this.barInteract ?? { col: 4, row: 4 };
+    for (const [dc, dr] of [
+      [0, 2],
+      [-1, 2],
+      [1, 2],
+      [0, 3],
+    ] as [number, number][]) {
+      const col = alt.col + dc;
+      const row = alt.row + dr;
+      if (this.isTileFreeForStaff(col, row)) return { col, row };
+    }
+    return { col: 4, row: 6 };
+  }
+
+  /** Alias — hired Nova uses the same floor spawn as Luna. */
+  private findStaffSpawnTile(): { col: number; row: number } {
+    return this.findFloorStaffSpawnTile();
   }
 
   private isTileFreeForStaff(col: number, row: number): boolean {
@@ -1619,6 +1631,7 @@ export class ClubScene extends Phaser.Scene {
       this.candidateToBartenderData(cand)
     );
     this.wireStaffClick(npc);
+    npc.refreshHitArea();
     this.extraStaff.push(npc);
     if (walkIn) {
       const near = this.findStaffSpawnTile();
@@ -1671,12 +1684,9 @@ export class ClubScene extends Phaser.Scene {
         npc.applyRest();
         npc.state = 'idle';
         npc.startBob();
-        const home =
-          npc === this.bartender
-            ? this.staffSpot
-            : this.findStaffSpawnTile();
+        const home = this.findFloorStaffSpawnTile();
         npc.walkTo(home, () => {
-          if (npc === this.bartender) this.syncBartenderBarDepth();
+          this.syncBartenderBarDepth();
           this.game.events.emit('stats-updated', this.getHudState());
           this.emitStaffRoster();
         });
@@ -1693,7 +1703,7 @@ export class ClubScene extends Phaser.Scene {
       current.push({
         id: this.bartender.profile.id,
         name: this.bartender.displayName,
-        roleLabel: 'Barman',
+        roleLabel: 'Camarera',
         portrait: lunaPortrait,
         energy: Math.round(this.bartender.energy),
         mood: Math.round(this.bartender.mood),
@@ -2028,7 +2038,6 @@ export class ClubScene extends Phaser.Scene {
     this.patrons = [];
     this.queueTiles.clear();
     this.bartender.state = 'idle';
-    this.bartender.snapTo(this.staffSpot);
     this.syncBartenderBarDepth();
     this.bartender.startBob();
     this.persistLayout();

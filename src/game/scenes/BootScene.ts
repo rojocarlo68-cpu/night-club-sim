@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import { PATRON_FRAME_W, PATRON_FRAME_H } from '../entities/Patron';
 
 export class BootScene extends Phaser.Scene {
   private loadFailed = false;
@@ -13,7 +14,6 @@ export class BootScene extends Phaser.Scene {
     const w = this.cameras.main.width;
     const h = this.cameras.main.height;
 
-    // Title stays centered; progress UI near bottom
     this.add
       .text(w / 2, h / 2 - 40, 'Night Club', {
         fontSize: '28px',
@@ -43,7 +43,6 @@ export class BootScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setVisible(false);
 
-    // Prefer paths relative to the page (Vite base: './')
     this.load.setPath('./');
 
     this.load.on('progress', (v: number) => {
@@ -71,15 +70,12 @@ export class BootScene extends Phaser.Scene {
       }
       this.statusText.setText('Cargando 100%…');
       this.ensureCharacterAnims();
-      // Leave immediately into gameplay scenes
       this.scene.start('ClubScene');
       this.scene.launch('UIScene');
     });
 
-    // Room backdrop (Carlo art)
     this.load.image('room_floor', 'assets/tiles/room_floor.jpeg');
 
-    // Furniture — PNG only (no load.svg)
     this.load.image('furn_sofa_se', 'assets/furniture/sofa_se.png');
     this.load.image('furn_sofa_sw', 'assets/furniture/sofa_sw.png');
     this.load.image('furn_sofa_ne', 'assets/furniture/sofa_ne.png');
@@ -90,24 +86,32 @@ export class BootScene extends Phaser.Scene {
     this.load.image('furn_bar_nw', 'assets/furniture/bar_nw.png');
     this.load.image('furn_bar', 'assets/furniture/bar_se.png');
 
-    // Optional legacy tiles
     this.load.image('tile_floor', 'assets/tiles/floor.png');
     this.load.image('tile_wall', 'assets/tiles/wall.png');
 
-    // Characters — Luna/Nova idle spritesheets + patron PNGs
     this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
     });
-    this.load.image('bartender', 'assets/characters/bartender.png'); // legacy fallback
+    this.load.image('bartender', 'assets/characters/bartender.png');
+    // Legacy single-frame keys (same male client art)
     this.load.image('patron_a', 'assets/characters/patron_a.png');
     this.load.image('patron_b', 'assets/characters/patron_b.png');
     this.load.image('patron_c', 'assets/characters/patron_c.png');
+    // Male client iso walk (4×6) + idle (4 facings)
+    this.load.spritesheet('patron_walk', 'assets/characters/patron_walk_sheet.png', {
+      frameWidth: PATRON_FRAME_W,
+      frameHeight: PATRON_FRAME_H,
+    });
+    this.load.spritesheet('patron_idle', 'assets/characters/patron_idle_sheet.png', {
+      frameWidth: PATRON_FRAME_W,
+      frameHeight: PATRON_FRAME_H,
+    });
     this.load.spritesheet('nova_idle', 'assets/characters/nova_idle_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
     });
-    this.load.image('nova', 'assets/characters/nova.png'); // legacy static (unused in-world)
+    this.load.image('nova', 'assets/characters/nova.png');
     this.load.image('nova_portrait', 'assets/characters/nova_portrait.png');
     this.load.image('luna_portrait', 'assets/characters/luna_portrait.png');
 
@@ -115,18 +119,14 @@ export class BootScene extends Phaser.Scene {
     this.load.json('scenario', 'data/scenario.json');
     this.load.json('staff_pool', 'data/staff_pool.json');
 
-    // Silence unused locals (bar kept for visual track)
     void bar;
   }
 
   create(): void {
-    // Scene transition is driven by loader 'complete' so we never hang
-    // if create somehow runs without a successful load.
     if (this.loadFailed) return;
   }
 
   private ensureCharacterAnims(): void {
-    // Luna idle: loop original sheet only (no alternate B).
     if (!this.anims.exists('luna-idle')) {
       this.anims.create({
         key: 'luna-idle',
@@ -142,6 +142,54 @@ export class BootScene extends Phaser.Scene {
         frameRate: 9,
         repeat: -1,
       });
+    }
+
+    // patron_walk sheet: row0 SE 0-5, SW 6-11, NE 12-17, NW 18-23
+    const facings: Array<{ key: string; start: number }> = [
+      { key: 'se', start: 0 },
+      { key: 'sw', start: 6 },
+      { key: 'ne', start: 12 },
+      { key: 'nw', start: 18 },
+    ];
+    for (const f of facings) {
+      const walkKey = `patron-walk-${f.key}`;
+      if (!this.anims.exists(walkKey) && this.textures.exists('patron_walk')) {
+        this.anims.create({
+          key: walkKey,
+          frames: this.anims.generateFrameNumbers('patron_walk', {
+            start: f.start,
+            end: f.start + 5,
+          }),
+          frameRate: 10,
+          repeat: -1,
+        });
+      }
+      const idleKey = `patron-idle-${f.key}`;
+      if (!this.anims.exists(idleKey)) {
+        if (this.textures.exists('patron_idle')) {
+          const idleFrame = facings.findIndex((x) => x.key === f.key);
+          this.anims.create({
+            key: idleKey,
+            frames: this.anims.generateFrameNumbers('patron_idle', {
+              start: idleFrame,
+              end: idleFrame,
+            }),
+            frameRate: 1,
+            repeat: -1,
+          });
+        } else if (this.textures.exists('patron_walk')) {
+          // Standing = first frame of walk cycle
+          this.anims.create({
+            key: idleKey,
+            frames: this.anims.generateFrameNumbers('patron_walk', {
+              start: f.start,
+              end: f.start,
+            }),
+            frameRate: 1,
+            repeat: -1,
+          });
+        }
+      }
     }
   }
 }
