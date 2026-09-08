@@ -42,9 +42,9 @@ export class Bartender extends Character {
     this.ring.setDepth(-1);
 
     if (texture === 'luna_idle') {
-      // ~50px wide footprint (similar to old 64px placeholder, not huge)
-      const displayW = 50;
-      const displayH = (LUNA_IDLE_FRAME_H / LUNA_IDLE_FRAME_W) * displayW;
+      // Match furniture scale: sofa ~84px tall; Luna standing ~sofa height (not 3× taller)
+      const displayH = 88;
+      const displayW = (LUNA_IDLE_FRAME_W / LUNA_IDLE_FRAME_H) * displayH;
       this.setupSheetIdle({
         animKey: 'luna-idle',
         originY: LUNA_FEET_ORIGIN_Y,
@@ -53,6 +53,7 @@ export class Bartender extends Character {
         y: 0,
       });
       this.ring.setPosition(0, -2);
+      this.ring.setSize(18, 8);
     }
   }
 
