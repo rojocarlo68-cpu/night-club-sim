@@ -213,7 +213,10 @@ export class UIScene extends Phaser.Scene {
       this.summary.setVisible(false);
       this.game.events.emit('cmd-open-night');
     });
-    this.summary.add([sumBg, sumTitle, sumBody, again]);
+    const sumClose = this.makeLocalButton(152, -118, 36, 32, '✕', () => {
+      this.summary.setVisible(false);
+    });
+    this.summary.add([sumBg, sumTitle, sumBody, again, sumClose]);
 
     this.createStaffPanel();
 
