@@ -20,8 +20,14 @@ export interface BartenderData {
 export const LUNA_IDLE_FRAME_W = 146;
 export const LUNA_IDLE_FRAME_H = 784;
 export const LUNA_FEET_ORIGIN_Y = 583 / 784;
-/** Full-body display height (furniture-matched). Frame height — Luna/Nova sheets have large transparent padding, so visible body is ~47–54px. */
-export const LUNA_DISPLAY_H = 88;
+/**
+ * Full-frame display height for Luna/Nova sheets (146×784 with large transparent padding).
+ * Tuned so *visible* body (Luna content ~417px) matches DJ full-body scale:
+ *   DJ booth displaySize [98,110], person hair→desk 189px → upper 46.2px on screen;
+ *   desk ≈ waist (~55%) ⇒ implied full body ≈ 84px. LUNA_DISPLAY_H=158 → 158*(417/784)≈84px.
+ * DJ booth displaySize is unchanged — platform height offset is expected.
+ */
+export const LUNA_DISPLAY_H = 158;
 /** Alias used by patrons / asserts (same value as LUNA_DISPLAY_H). */
 export const STAFF_DISPLAY_H = LUNA_DISPLAY_H;
 
@@ -60,7 +66,7 @@ export class Bartender extends Character {
     this.ring.setDepth(-1);
 
     if (texture === 'luna_idle') {
-      // Match furniture scale: sofa ~84px tall; Luna standing ~sofa height (not 3× taller)
+      // Visible body ~84px (DJ full-body scale / sofa height); frame 158 accounts for sheet padding
       const displayH = LUNA_DISPLAY_H;
       const displayW = (LUNA_IDLE_FRAME_W / LUNA_IDLE_FRAME_H) * displayH;
       this.setupSheetIdle({
@@ -71,9 +77,9 @@ export class Bartender extends Character {
         y: 6,
       });
       this.ring.setPosition(0, -2);
-      this.ring.setSize(18, 8);
+      this.ring.setSize(28, 12);
     } else if (texture === 'nova_idle' || texture === 'nova') {
-      // Hireable maid — same on-screen height as Luna (~88px), idle sheet preferred
+      // Hireable maid — same display height as Luna (~158 frame / ~84px visible), idle sheet preferred
       const displayH = LUNA_DISPLAY_H;
       const displayW = (NOVA_IDLE_FRAME_W / NOVA_IDLE_FRAME_H) * displayH;
       if (texture === 'nova_idle') {
@@ -90,7 +96,7 @@ export class Bartender extends Character {
         this.sprite.y = -2;
       }
       this.ring.setPosition(0, -2);
-      this.ring.setSize(18, 8);
+      this.ring.setSize(28, 12);
     }
     // Hit area must match display size (sheet frames are ~146×784 — raw hitbox
     // was huge / misaligned). Call after setupSheetIdle / setDisplaySize.
@@ -236,7 +242,7 @@ export class Bartender extends Character {
       if (!this.scene.anims.exists(key) || !this.scene.textures.exists('nova_serve_beer')) {
         return false;
       }
-      // Same idle-tuned feet origin (~610/784); displayH 88
+      // Same idle-tuned feet origin (~610/784); displayH follows LUNA_DISPLAY_H
       originY = NOVA_FEET_ORIGIN_Y;
     } else {
       return false;

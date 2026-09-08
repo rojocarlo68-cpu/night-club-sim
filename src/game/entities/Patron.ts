@@ -23,11 +23,10 @@ export const PATRON_FRAME_W = 112;
 export const PATRON_FRAME_H = 192;
 export const PATRON_FEET_ORIGIN_Y = (PATRON_FRAME_H - 2) / PATRON_FRAME_H;
 /**
- * Luna/Nova sheets are 784px tall with ~half transparent padding, so
- * STAFF_DISPLAY_H=88 yields only ~47px of *visible* body. Patron frames
- * fill nearly the whole 192px — PATRON_DISPLAY_H=88 left clients ~1.8×
- * taller than Luna on screen. Match Luna's visible body height:
- *   88 * (417/784) * (192/188) ≈ 48
+ * Luna/Nova sheets are 784px tall with large transparent padding, so
+ * STAFF_DISPLAY_H is frame height (158) while *visible* body is ~84px.
+ * Patron frames fill nearly the whole 192px — match Luna's visible body:
+ *   158 * (417/784) * (192/188) ≈ 86
  */
 export const LUNA_CONTENT_H = 417;
 export const LUNA_FRAME_H_FOR_SCALE = 784;
@@ -69,7 +68,7 @@ export class Patron extends Character {
     this.patienceRemaining = data.patience;
     this.preferredDrinkName = drinkDisplayName || data.preferredDrink;
 
-    // Content-matched height vs Luna (~48), not raw STAFF_DISPLAY_H (88).
+    // Content-matched height vs Luna (~84 visible), not raw STAFF_DISPLAY_H (158).
     // Walk/idle must use setDisplaySize — never raw 112×192 (looks huge),
     // and never setScale(1) which undoes setDisplaySize.
     const displayH = PATRON_DISPLAY_H;
