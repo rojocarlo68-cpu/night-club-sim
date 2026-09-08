@@ -276,6 +276,11 @@ export class ClubScene extends Phaser.Scene {
       this.requireTexture(`furn_bar_${facing}`);
     }
     this.loadShopCatalog();
+    this.upgradeAllShopFurnitureFromCatalog();
+    for (const facing of FACINGS) {
+      const key = `furn_dj_booth_${facing}`;
+      if (this.textures.exists(key)) this.requireTexture(key);
+    }
     for (const f of this.scenario.furniture) {
       if (f.fromShop || f.catalogId) {
         const key = this.furnitureTextureKey(f.type, (f.facing as IsoFacing) || 'se', f);
@@ -1048,13 +1053,19 @@ export class ClubScene extends Phaser.Scene {
           : this.scenario.furniture.find((f) => f.id === kind || f.type === kind));
     const fromScenario = src?.sprites?.[facing];
     if (fromScenario) return fromScenario;
+    const cat =
+      this.shopCatalogById.get(src?.catalogId ?? '') ||
+      this.shopCatalogById.get(src?.type ?? '') ||
+      this.shopCatalogById.get(kind);
+    if (cat?.sprites?.[facing]) return cat.sprites[facing] as string;
+    if (cat?.sprites?.se && (src?.fromShop || src?.catalogId || cat.id === kind)) {
+      return cat.sprites.se as string;
+    }
     // Single-angle shop sprites (same key for all facings)
     if (src?.fromShop || src?.catalogId) {
-      const cat = this.shopCatalogById.get(src.catalogId ?? src.type);
       if (cat) return cat.sprite;
       if (src.sprite && this.textures.exists(src.sprite)) return src.sprite;
     }
-    const cat = this.shopCatalogById.get(kind);
     if (cat) return cat.sprite;
     return `furn_${kind}_${facing}`;
   }
@@ -1226,10 +1237,12 @@ export class ClubScene extends Phaser.Scene {
       if (!def || !img) return;
       const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
       img.setPosition(pos.x, pos.y);
-      img.setFlipX(!!def.flipX);
+      if ((def.facingSupport ?? 'flip') === 'flip') {
+        img.setFlipX(!!def.flipX);
+      }
       img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
       if (this.selectedFurniture === id) {
-        this.rotateUi.setPosition(pos.x, pos.y - 70);
+        this.rotateUi.setPosition(pos.x, pos.y - 78);
       }
     }
   }
@@ -2689,6 +2702,41 @@ export class ClubScene extends Phaser.Scene {
     for (const it of items) this.shopCatalogById.set(it.id, it);
   }
 
+  private shopSpritesFromCatalog(
+    cat: ShopFurnitureItem
+  ): Partial<Record<IsoFacing, string>> {
+    if (cat.sprites) {
+      return {
+        se: cat.sprites.se ?? cat.sprite,
+        sw: cat.sprites.sw ?? cat.sprites.se ?? cat.sprite,
+        ne: cat.sprites.ne ?? cat.sprites.se ?? cat.sprite,
+        nw: cat.sprites.nw ?? cat.sprites.se ?? cat.sprite,
+      };
+    }
+    return { se: cat.sprite, sw: cat.sprite, ne: cat.sprite, nw: cat.sprite };
+  }
+
+  /** Refresh texture keys / facingSupport from catalog (upgrades old localStorage DJ booth). */
+  private upgradeShopFurnitureFromCatalog(def: FurnitureDef): void {
+    const cat = this.shopCatalogById.get(def.catalogId ?? def.type);
+    if (!cat) return;
+    def.sprite = cat.sprite;
+    def.sprites = this.shopSpritesFromCatalog(cat);
+    def.facingSupport = cat.facingSupport;
+    def.displayW = cat.displaySize[0];
+    def.displayH = cat.displaySize[1];
+    if (typeof cat.yBias === 'number') def.yBias = cat.yBias;
+    if (cat.facingSupport === 'full') {
+      def.flipX = false;
+    }
+  }
+
+  private upgradeAllShopFurnitureFromCatalog(): void {
+    for (const f of this.scenario.furniture) {
+      if (f.fromShop || f.catalogId) this.upgradeShopFurnitureFromCatalog(f);
+    }
+  }
+
   private defFromShopCatalog(catalogId: string, instanceId?: string): FurnitureDef | null {
     const cat = this.shopCatalogById.get(catalogId);
     if (!cat) return null;
@@ -2702,7 +2750,7 @@ export class ClubScene extends Phaser.Scene {
       fromShop: true,
       facing,
       flipX: false,
-      sprites: { se: cat.sprite, sw: cat.sprite, ne: cat.sprite, nw: cat.sprite },
+      sprites: this.shopSpritesFromCatalog(cat),
       tile: [4, 4],
       footprint: [cat.footprint[0], cat.footprint[1]],
       displayW: cat.displaySize[0],
@@ -2739,15 +2787,47 @@ export class ClubScene extends Phaser.Scene {
     return FACINGS.includes(f) ? f : 'se';
   }
 
+  /** True when DJ booth idle sheets are loaded (optional subtle loop). */
+  private djBoothIdleReady(): boolean {
+    return (
+      this.textures.exists('dj_booth_front_sheet') &&
+      this.textures.exists('dj_booth_back_sheet') &&
+      this.anims.exists('dj-booth-idle-front') &&
+      this.anims.exists('dj-booth-idle-back')
+    );
+  }
+
+  private applyDjBoothIdleVisual(
+    img: Phaser.GameObjects.Image,
+    facing: IsoFacing,
+    size: { w: number; h: number }
+  ): void {
+    if (!(img instanceof Phaser.GameObjects.Sprite) || !this.djBoothIdleReady()) return;
+    const front = facing === 'se' || facing === 'sw';
+    const sheet = front ? 'dj_booth_front_sheet' : 'dj_booth_back_sheet';
+    const anim = front ? 'dj-booth-idle-front' : 'dj-booth-idle-back';
+    img.setTexture(sheet, 0);
+    img.setFlipX(facing === 'sw' || facing === 'nw');
+    img.setDisplaySize(size.w, size.h);
+    img.play(anim);
+  }
+
   private spawnShopFurnitureVisual(def: FurnitureDef): void {
     const facing = (def.facing as IsoFacing) || 'se';
     const key = this.furnitureTextureKey(def.type, facing, def);
     this.requireTexture(key);
     const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
     const size = this.furnitureDisplaySize(def.type, def);
-    const img = this.add.image(pos.x, pos.y, key);
+    const useDjIdle = def.catalogId === 'dj_booth' && this.djBoothIdleReady();
+    const img = useDjIdle
+      ? this.add.sprite(pos.x, pos.y, key)
+      : this.add.image(pos.x, pos.y, key);
     img.setDisplaySize(size.w, size.h);
-    img.setFlipX(!!def.flipX);
+    if (useDjIdle) {
+      this.applyDjBoothIdleVisual(img, facing, size);
+    } else {
+      img.setFlipX(!!def.flipX);
+    }
     img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
     img.setInteractive({ useHandCursor: true });
     const instanceId = def.id;
@@ -2775,10 +2855,9 @@ export class ClubScene extends Phaser.Scene {
     if (support === 'none') return;
 
     if (support === 'flip') {
-      // Single-angle asset: mirror until Carlo sends more facings
+      // Single-angle asset: mirror until more facings exist
       def.flipX = !def.flipX;
       img.setFlipX(!!def.flipX);
-      // Alternate facing label for persistence / depth feel
       const idx = FACINGS.indexOf(this.getFurnitureFacing(id));
       const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
       def.facing = next;
@@ -2786,7 +2865,7 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
 
-    // full: cycle facing (same texture if only one sprite mapped)
+    // full: cycle facing like sofa/bar (swap footprint axes)
     const idx = FACINGS.indexOf(this.getFurnitureFacing(id));
     const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
     const prevFp: [number, number] = [...def.footprint] as [number, number];
@@ -2799,9 +2878,15 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
     def.facing = next;
+    def.flipX = false;
     const size = this.furnitureDisplaySize(def.type, def);
-    img.setTexture(this.furnitureTextureKey(def.type, next, def));
-    img.setDisplaySize(size.w, size.h);
+    if (def.catalogId === 'dj_booth' && this.djBoothIdleReady()) {
+      this.applyDjBoothIdleVisual(img, next, size);
+    } else {
+      img.setTexture(this.furnitureTextureKey(def.type, next, def));
+      img.setFlipX(false);
+      img.setDisplaySize(size.w, size.h);
+    }
     this.persistLayout();
     this.rebuildPathfinder();
   }

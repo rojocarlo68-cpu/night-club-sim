@@ -85,7 +85,21 @@ export class BootScene extends Phaser.Scene {
     this.load.image('furn_bar_ne', 'assets/furniture/bar_ne.png');
     this.load.image('furn_bar_nw', 'assets/furniture/bar_nw.png');
     this.load.image('furn_bar', 'assets/furniture/bar_se.png');
-    this.load.image('furn_dj_booth', 'assets/furniture/dj_booth.png');
+    this.load.image('furn_dj_booth_se', 'assets/furniture/dj_booth_se.png');
+    this.load.image('furn_dj_booth_sw', 'assets/furniture/dj_booth_sw.png');
+    this.load.image('furn_dj_booth_ne', 'assets/furniture/dj_booth_ne.png');
+    this.load.image('furn_dj_booth_nw', 'assets/furniture/dj_booth_nw.png');
+    // Legacy alias (shop thumb / old saves) → SE
+    this.load.image('furn_dj_booth', 'assets/furniture/dj_booth_se.png');
+    // Idle sheets (2×4): front=SE/SW, back=NE/NW
+    this.load.spritesheet('dj_booth_front_sheet', 'assets/furniture/dj_booth_front_sheet.png', {
+      frameWidth: 448,
+      frameHeight: 504,
+    });
+    this.load.spritesheet('dj_booth_back_sheet', 'assets/furniture/dj_booth_back_sheet.png', {
+      frameWidth: 468,
+      frameHeight: 528,
+    });
 
     this.load.image('tile_floor', 'assets/tiles/floor.png');
     this.load.image('tile_wall', 'assets/tiles/wall.png');
@@ -169,6 +183,24 @@ export class BootScene extends Phaser.Scene {
         frames: this.anims.generateFrameNumbers('nova_serve_beer', { start: 0, end: 7 }),
         frameRate: 4,
         repeat: 0,
+      });
+    }
+
+    // DJ booth idle (subtle 8-frame loop) — front sheet SE/SW, back NE/NW
+    if (!this.anims.exists('dj-booth-idle-front') && this.textures.exists('dj_booth_front_sheet')) {
+      this.anims.create({
+        key: 'dj-booth-idle-front',
+        frames: this.anims.generateFrameNumbers('dj_booth_front_sheet', { start: 0, end: 7 }),
+        frameRate: 6,
+        repeat: -1,
+      });
+    }
+    if (!this.anims.exists('dj-booth-idle-back') && this.textures.exists('dj_booth_back_sheet')) {
+      this.anims.create({
+        key: 'dj-booth-idle-back',
+        frames: this.anims.generateFrameNumbers('dj_booth_back_sheet', { start: 0, end: 7 }),
+        frameRate: 6,
+        repeat: -1,
       });
     }
 

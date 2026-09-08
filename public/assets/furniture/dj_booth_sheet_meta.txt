@@ -1,0 +1,4 @@
+front_sheet=1792x1008 frame=448x504
+back_sheet=1872x1056 frame=468x528
+facing: se=front0 sw=front0_flip ne=back0 nw=back0_flip
+placement_se=320x360 ne=320x361

@@ -62,9 +62,11 @@ Compras + placements + dinero persisten en localStorage con el layout.
 
 ### Mesa de DJ (`dj_booth`)
 - Precio: $120
-- Sprite: `public/assets/furniture/dj_booth.png` (copia en `/workspace/cutouts/dj_booth.png`)
+- Sheets: `dj_booth_front_sheet.png` (SE/SW, 2x4 idle) + `dj_booth_back_sheet.png` (NE/NW)
+- Placement: `dj_booth_{se,sw,ne,nw}.png` (SW/NW = horizontal flip of front/back frame 0)
+- Facing map: SE/SW = front sheet; NE/NW = back sheet (crowd sees neon front)
 - **No** esta en el scenario inicial — solo via tienda
-- `facingSupport: flip` — solo 1 angulo por ahora; **Girar refleja** horizontalmente hasta que Carlo envie mas angulos SE/SW/NE/NW
+- `facingSupport: full` — Girar como sofa/barra; saves antiguas se actualizan al cargar
 
 ## Stack
 - Vite 5 + TypeScript + Phaser 3
