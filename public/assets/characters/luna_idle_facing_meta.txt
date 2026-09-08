@@ -1,0 +1,4 @@
+front=luna_idle_sheet.png 1168x784 frame=146x784 cols=8 (src A face, content~417px)
+back=luna_idle_back_sheet.png 1168x784 frame=146x784 cols=8 (src B hair-back, native 200x1077 normalized)
+facing: se=front, sw=front flipX, ne=back, nw=back flipX
+feet_origin_y=583/784 display_h=158 visible~84px

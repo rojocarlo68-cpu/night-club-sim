@@ -16,7 +16,7 @@ export interface BartenderData {
   moveSpeed: number;
 }
 
-/** Luna idle sheet: 1168×784 → 8 frames of 146×784; feet near y=583. */
+/** Luna idle front/back sheets: 1168×784 → 8 frames of 146×784; feet near y=583. */
 export const LUNA_IDLE_FRAME_W = 146;
 export const LUNA_IDLE_FRAME_H = 784;
 export const LUNA_FEET_ORIGIN_Y = 583 / 784;
@@ -70,11 +70,13 @@ export class Bartender extends Character {
       const displayH = LUNA_DISPLAY_H;
       const displayW = (LUNA_IDLE_FRAME_W / LUNA_IDLE_FRAME_H) * displayH;
       this.setupSheetIdle({
-        animKey: 'luna-idle',
+        animKey: 'luna-idle-se',
         originY: LUNA_FEET_ORIGIN_Y,
         displayWidth: displayW,
         displayHeight: displayH,
         y: 6,
+        idleAnimPrefix: 'luna-idle',
+        flipIdleFacings: true, // SE/SW=front sheet, NE/NW=back sheet + flipX
       });
       this.ring.setPosition(0, -2);
       this.ring.setSize(28, 12);
@@ -250,6 +252,7 @@ export class Bartender extends Character {
 
     this.bobTween?.stop();
     this.bobTween = undefined;
+    this.applyFacingFlip();
     this.sprite.play(key, true);
     this.reapplyDisplaySize();
     this.sprite.setOrigin(0.5, originY);

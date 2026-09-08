@@ -9,8 +9,8 @@ from PIL import Image
 from scipy import ndimage
 
 ATT = Path("/home/box/agent-data/agents/f700e6ae-328d-4b52-bf56-2e253ee65a34/attachments")
-FRONT_SRC = ATT / "b109b6558cdf8e8e1bb20cd9144e5cd2ddff53d89641c5db4b0c9bf39c0b7578.png"  # face = front
-BACK_SRC = ATT / "3ee96ebc80057803e632cdebf1b5a1f3eca4d5aae19541c9236744d6cb8f29ae.png"  # hair-back = back
+FRONT_SRC = ATT / "cc3e1bad1718d74718198171a63f9dcffb3209147aac690ca940e554c7498d11.png"  # face = front
+BACK_SRC = ATT / "77b9f8663bf50dffaf80e88ecf9a329784326dfbd6a8abc5504b5f554fca7579.png"  # hair-back = back
 # ref single: 8cd3e8bc4661dd191ddbec84341eab35a9680593cd13370f5eb5cafb5537508d.png
 
 OUT = Path("/workspace/night-club-sim/public/assets/furniture")
@@ -210,9 +210,9 @@ def main() -> None:
     display_h = int(round(luna * FRAME_H / person_h))
     display_w = int(round(display_h * FRAME_W / FRAME_H))
     # Prefer tidy pair close to measured
-    if abs(display_h - 110) <= 3:
-        display_h, display_w = 110, 98
-    print(f"person_h={person_h} ({hair_top}->{booth_y}) luna={luna:.1f} → displaySize=[{display_w},{display_h}]")
+    # Keep in-game displaySize locked (shop_furniture.json)
+    display_h, display_w = 110, 98
+    print(f"person_h={person_h} ({hair_top}->{booth_y}) luna={luna:.1f} → keep displaySize=[{display_w},{display_h}]")
 
     for label, im in ("front", front), ("back", back):
         a = np.array(im)
@@ -235,7 +235,7 @@ def main() -> None:
         f"facing: se=front frame0, sw=front flip, ne=back frame0, nw=back flip\n"
         f"placement_se={se.size[0]}x{se.size[1]} ne={ne.size[0]}x{ne.size[1]}\n"
         f"person_h_px={person_h} displaySize=[{display_w}, {display_h}]\n"
-        f"sources: front=b109b655…png back=3ee96ebc…png ref=8cd3e8bc…png\n"
+        f"sources: front=cc3e1bad…png back=77b9f866…png (clean crops, no grid)\n"
     )
     print(meta.read_text())
     checker(front.crop((0, 0, FRAME_W, FRAME_H)), PREV / "dj_front_f0_check.jpg")

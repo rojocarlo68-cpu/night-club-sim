@@ -108,6 +108,11 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 146,
       frameHeight: 784,
     });
+    // Back-facing idle (normalized to same 146×784 as front)
+    this.load.spritesheet('luna_idle_back', 'assets/characters/luna_idle_back_sheet.png', {
+      frameWidth: 146,
+      frameHeight: 784,
+    });
     this.load.spritesheet('luna_serve_beer', 'assets/characters/luna_serve_beer_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
@@ -151,7 +156,26 @@ export class BootScene extends Phaser.Scene {
   }
 
   private ensureCharacterAnims(): void {
-    if (!this.anims.exists('luna-idle')) {
+    // Luna directional idle: SE/SW = front sheet, NE/NW = back sheet (flipX in Character)
+    const lunaIdleFacings: Array<{ key: string; texture: string }> = [
+      { key: 'se', texture: 'luna_idle' },
+      { key: 'sw', texture: 'luna_idle' },
+      { key: 'ne', texture: 'luna_idle_back' },
+      { key: 'nw', texture: 'luna_idle_back' },
+    ];
+    for (const f of lunaIdleFacings) {
+      const animKey = `luna-idle-${f.key}`;
+      if (!this.anims.exists(animKey) && this.textures.exists(f.texture)) {
+        this.anims.create({
+          key: animKey,
+          frames: this.anims.generateFrameNumbers(f.texture, { start: 0, end: 7 }),
+          frameRate: 9,
+          repeat: -1,
+        });
+      }
+    }
+    // Legacy alias (default SE)
+    if (!this.anims.exists('luna-idle') && this.anims.exists('luna-idle-se')) {
       this.anims.create({
         key: 'luna-idle',
         frames: this.anims.generateFrameNumbers('luna_idle', { start: 0, end: 7 }),

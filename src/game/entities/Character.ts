@@ -19,6 +19,8 @@ export class Character extends Phaser.GameObjects.Container {
   protected walkAnimPrefix: string | null = null;
   /** Prefix for directional idle: `${prefix}-${facing}`; falls back to idleAnimKey. */
   protected idleAnimPrefix: string | null = null;
+  /** When true, SW/NW mirror the SE/NE sheets via flipX (Luna front/back). */
+  protected flipIdleFacings = false;
   /** Persist display size across texture swaps (idle ↔ walk ↔ serve). */
   protected sheetDisplayW = 0;
   protected sheetDisplayH = 0;
@@ -59,6 +61,8 @@ export class Character extends Phaser.GameObjects.Container {
     y?: number;
     walkAnimPrefix?: string;
     idleAnimPrefix?: string;
+    /** Mirror SW/NW with flipX (front/back sheet pairs). */
+    flipIdleFacings?: boolean;
   }): void {
     this.useSheetIdle = true;
     this.idleAnimKey = opts.animKey;
@@ -68,6 +72,7 @@ export class Character extends Phaser.GameObjects.Container {
         : null;
     this.walkAnimPrefix = opts.walkAnimPrefix ?? null;
     this.idleAnimPrefix = opts.idleAnimPrefix ?? null;
+    this.flipIdleFacings = opts.flipIdleFacings ?? false;
     this.sheetDisplayW = opts.displayWidth;
     this.sheetDisplayH = opts.displayHeight;
     this.bobTween?.stop();
@@ -107,13 +112,21 @@ export class Character extends Phaser.GameObjects.Container {
       const facingKey = `${this.idleAnimPrefix}-${this.facing}`;
       if (this.scene.anims.exists(facingKey)) key = facingKey;
     }
-    if (pool && pool.length > 0) {
+    // Facing-prefix idle wins over random pool (pool is for same-facing alts only).
+    if (pool && pool.length > 0 && !this.idleAnimPrefix) {
       key = pool[Math.floor(Math.random() * pool.length)] ?? key;
     }
     if (!key || !this.scene.anims.exists(key)) return;
     this.idleAnimKey = key;
+    this.applyFacingFlip();
     this.sprite.play(key, force);
     this.reapplyDisplaySize();
+  }
+
+  /** Mirror SW/NW when using front/back sheet pairs. */
+  protected applyFacingFlip(): void {
+    if (!this.flipIdleFacings) return;
+    this.sprite.setFlipX(this.facing === 'sw' || this.facing === 'nw');
   }
 
   private onSheetIdleComplete(
@@ -137,11 +150,22 @@ export class Character extends Phaser.GameObjects.Container {
 
   protected playWalkFacing(facing: IsoFacing): void {
     this.facing = facing;
-    if (!this.walkAnimPrefix) return;
-    const key = `${this.walkAnimPrefix}-${facing}`;
-    if (this.scene.anims.exists(key)) {
-      this.sprite.play(key, true);
-      this.reapplyDisplaySize();
+    this.applyFacingFlip();
+    if (this.walkAnimPrefix) {
+      const key = `${this.walkAnimPrefix}-${facing}`;
+      if (this.scene.anims.exists(key)) {
+        this.sprite.play(key, true);
+        this.reapplyDisplaySize();
+        return;
+      }
+    }
+    // No walk art yet — keep directional idle playing while moving.
+    if (this.idleAnimPrefix) {
+      const idleKey = `${this.idleAnimPrefix}-${facing}`;
+      if (this.scene.anims.exists(idleKey)) {
+        this.sprite.play(idleKey, true);
+        this.reapplyDisplaySize();
+      }
     }
   }
 
@@ -212,10 +236,12 @@ export class Character extends Phaser.GameObjects.Container {
     const screen = tileToScreen(next.col, next.row, this.iso);
     const dist = Phaser.Math.Distance.Between(this.x, this.y, screen.x, screen.y);
     const duration = Math.max(120, (dist / this.moveSpeed) * 1000);
-    if (!this.walkAnimPrefix) this.stopBob();
-    else {
+    // Prefer walk anim; else directional idle keeps playing (don't stopBob freeze).
+    if (this.walkAnimPrefix || this.idleAnimPrefix) {
       this.bobTween?.stop();
       this.bobTween = undefined;
+    } else {
+      this.stopBob();
     }
     this.scene.tweens.add({
       targets: this,

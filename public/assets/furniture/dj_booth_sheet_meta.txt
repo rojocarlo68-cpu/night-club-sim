@@ -1,6 +1,6 @@
 front_sheet=1600x900 frame=400x450 cols=4 rows=2
 back_sheet=1600x900 frame=400x450 cols=4 rows=2
 facing: se=front frame0, sw=front flip, ne=back frame0, nw=back flip
-placement_se=320x360 ne=320x360
+placement_se=320x337 ne=320x332
 person_h_px=189 displaySize=[98, 110]
-sources: front=b109b655…png back=3ee96ebc…png ref=8cd3e8bc…png
+sources: front=cc3e1bad…png back=77b9f866…png (clean crops, no grid)
