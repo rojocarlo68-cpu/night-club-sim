@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": "dj_booth",
+      "name": "Mesa de DJ",
+      "price": 120,
+      "category": "muebles",
+      "sprite": "furn_dj_booth",
+      "spriteFile": "assets/furniture/dj_booth.png",
+      "footprint": [2, 1],
+      "displaySize": [150, 105],
+      "yBias": -10,
+      "facingSupport": "flip",
+      "defaultFacing": "se",
+      "blurb": "Cabina DJ neón. Solo 1 ángulo: Girar refleja hasta más vistas."
+    }
+  ]
+}

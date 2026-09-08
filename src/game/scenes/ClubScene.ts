@@ -17,6 +17,7 @@ import { Bartender, BartenderData, StaffAiJob } from '../entities/Bartender';
 import { Patron, PatronData } from '../entities/Patron';
 import { NpcInfo } from '../types/Npc';
 import { StaffCandidate, StaffPoolFile, StaffRosterEntry, StaffRosterPayload } from '../types/Staff';
+import { ShopCatalogPayload, ShopFurnitureFile, ShopFurnitureItem } from '../types/Shop';
 
 interface Drink {
   id: string;
@@ -38,6 +39,15 @@ interface FurnitureDef {
   interact?: [number, number];
   staffSpot?: [number, number];
   restSpot?: [number, number];
+  /** Shop catalog id when this instance was purchased. */
+  catalogId?: string;
+  /** Horizontal mirror for single-angle shop sprites. */
+  flipX?: boolean;
+  fromShop?: boolean;
+  displayW?: number;
+  displayH?: number;
+  yBias?: number;
+  facingSupport?: 'full' | 'flip' | 'none';
 }
 
 interface Scenario {
@@ -73,6 +83,9 @@ interface SavedLayoutItem {
   id: string;
   tile: [number, number];
   facing?: IsoFacing;
+  catalogId?: string;
+  flipX?: boolean;
+  footprint?: [number, number];
 }
 
 interface SavedLayout {
@@ -95,7 +108,8 @@ const ZOOM_MAX = 1.7;
 const WHEEL_ZOOM_STEP = 0.08;
 export type NightPhase = 'prep' | 'open' | 'summary';
 
-type SelectedFurniture = 'sofa' | 'bar' | null;
+/** 'sofa' | 'bar' | shop instance id */
+type SelectedFurniture = string | null;
 
 export class ClubScene extends Phaser.Scene {
   iso!: IsoConfig;
@@ -139,6 +153,11 @@ export class ClubScene extends Phaser.Scene {
   private barImage!: Phaser.GameObjects.Image;
   private barGlow!: Phaser.GameObjects.Arc;
   private roomImage!: Phaser.GameObjects.Image;
+  /** Purchased / decor furniture images keyed by instance id. */
+  private shopImages = new Map<string, Phaser.GameObjects.Image>();
+  private shopCatalog: ShopFurnitureItem[] = [];
+  private shopCatalogById = new Map<string, ShopFurnitureItem>();
+  private shopInstanceSeq = 0;
 
   private selectedFurniture: SelectedFurniture = null;
   private rotateUi!: Phaser.GameObjects.Container;
@@ -256,6 +275,13 @@ export class ClubScene extends Phaser.Scene {
       this.requireTexture(`furn_sofa_${facing}`);
       this.requireTexture(`furn_bar_${facing}`);
     }
+    this.loadShopCatalog();
+    for (const f of this.scenario.furniture) {
+      if (f.fromShop || f.catalogId) {
+        const key = this.furnitureTextureKey(f.type, (f.facing as IsoFacing) || 'se', f);
+        this.requireTexture(key);
+      }
+    }
     this.requireTexture(this.chars.bartender.sprite || 'bartender');
 
     this.rebuildPathfinder();
@@ -282,6 +308,7 @@ export class ClubScene extends Phaser.Scene {
     this.bartender.refreshHitArea();
 
     this.loadStaffPool();
+    this.loadShopCatalog();
     this.ensureFreeStarterStaff();
     this.spawnHiredExtraStaff();
 
@@ -316,7 +343,10 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-set-build-mode', this.setBuildMode, this);
     this.game.events.on('cmd-deselect-npc', this.deselectNpc, this);
     this.game.events.on('cmd-deselect-bartender', this.deselectNpc, this);
+    this.game.events.on('cmd-request-shop-catalog', this.emitShopCatalog, this);
+    this.game.events.on('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
     this.emitStaffRoster();
+    this.emitShopCatalog();
   }
 
   private drinkDisplayName(id: string): string {
@@ -465,8 +495,20 @@ export class ClubScene extends Phaser.Scene {
         this.money = Math.max(0, Math.floor(saved.money));
       }
       if (!saved?.furniture?.length) return;
+      // Ensure shop catalog available before restoring purchased pieces
+      this.loadShopCatalog();
       for (const item of saved.furniture) {
-        const def = this.scenario.furniture.find((f) => f.id === item.id);
+        let def = this.scenario.furniture.find((f) => f.id === item.id);
+        if (!def && item.catalogId) {
+          const spawned = this.defFromShopCatalog(item.catalogId, item.id);
+          if (spawned) {
+            if (Array.isArray(item.footprint) && item.footprint.length === 2) {
+              spawned.footprint = [item.footprint[0], item.footprint[1]];
+            }
+            this.scenario.furniture.push(spawned);
+            def = spawned;
+          }
+        }
         if (!def) continue;
         if (
           Array.isArray(item.tile) &&
@@ -477,6 +519,9 @@ export class ClubScene extends Phaser.Scene {
         }
         if (item.facing && FACINGS.includes(item.facing)) {
           def.facing = item.facing;
+        }
+        if (typeof item.flipX === 'boolean') {
+          def.flipX = item.flipX;
         }
       }
       // Re-apply relative spots from offsets
@@ -510,6 +555,9 @@ export class ClubScene extends Phaser.Scene {
         id: f.id,
         tile: [...f.tile] as [number, number],
         facing: f.facing as IsoFacing | undefined,
+        catalogId: f.catalogId,
+        flipX: f.flipX,
+        footprint: [...f.footprint] as [number, number],
       })),
       hiredStaff: [...this.hiredStaffIds],
       money: this.money,
@@ -599,7 +647,10 @@ export class ClubScene extends Phaser.Scene {
   }
 
   /** Display size for any furniture type (extend when adding shop items). */
-  private furnitureDisplaySize(kind: string): { w: number; h: number } {
+  private furnitureDisplaySize(kind: string, def?: FurnitureDef): { w: number; h: number } {
+    if (def?.displayW && def?.displayH) return { w: def.displayW, h: def.displayH };
+    const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
+    if (cat) return { w: cat.displaySize[0], h: cat.displaySize[1] };
     if (kind === 'bar') return { w: 168, h: 124 };
     if (kind === 'sofa') return { w: 110, h: 84 };
     return { w: 96, h: 72 };
@@ -609,9 +660,13 @@ export class ClubScene extends Phaser.Scene {
   private furnitureWorldPos(
     kind: string,
     col: number,
-    row: number
+    row: number,
+    def?: FurnitureDef
   ): { x: number; y: number } {
     const { x, y } = tileToScreen(col, row, this.iso);
+    if (typeof def?.yBias === 'number') return { x, y: y + def.yBias };
+    const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
+    if (cat) return { x, y: y + (cat.yBias ?? -8) };
     if (kind === 'bar') return { x, y: y - 16 };
     if (kind === 'sofa') return { x, y: y - 6 };
     return { x, y: y - 8 };
@@ -636,8 +691,8 @@ export class ClubScene extends Phaser.Scene {
     facing: IsoFacing,
     def?: FurnitureDef
   ): boolean {
-    const size = this.furnitureDisplaySize(kind);
-    const pos = this.furnitureWorldPos(kind, col, row);
+    const size = this.furnitureDisplaySize(kind, def);
+    const pos = this.furnitureWorldPos(kind, col, row, def);
     const key = this.furnitureTextureFor(kind, facing, def);
     return canPlaceVisual(
       this.textures,
@@ -662,18 +717,16 @@ export class ClubScene extends Phaser.Scene {
 
   private setFurnitureDragTint(id: SelectedFurniture, valid: boolean): void {
     if (!id) return;
-    const img = id === 'sofa' ? this.sofaImage : this.barImage;
+    const img = this.getFurnitureImage(id);
     if (!img) return;
     if (!valid) {
       img.setTint(0xff4466);
       return;
     }
     // Restore selection tint while dragging/selected
-    if (id === 'sofa') {
-      img.setTint(0xffc0e8);
-    } else {
-      img.setTint(0xffe0a0);
-    }
+    if (id === 'sofa') img.setTint(0xffc0e8);
+    else if (id === 'bar') img.setTint(0xffe0a0);
+    else img.setTint(0xc8b0ff);
   }
 
   /**
@@ -699,6 +752,8 @@ export class ClubScene extends Phaser.Scene {
         this.repositionFurnitureVisual('bar');
         // Luna stays on the floor — do not snap her into the bar when furniture moves.
         this.syncBartenderBarDepth();
+      } else if (def.fromShop || def.catalogId) {
+        this.repositionFurnitureVisual(def.id);
       }
     }
     this.rebuildPathfinder();
@@ -986,9 +1041,21 @@ export class ClubScene extends Phaser.Scene {
   private furnitureTextureKey(kind: string, facing: IsoFacing, def?: FurnitureDef): string {
     const src =
       def ??
-      (kind === 'sofa' ? this.sofaDef : kind === 'bar' ? this.barDef : undefined);
+      (kind === 'sofa'
+        ? this.sofaDef
+        : kind === 'bar'
+          ? this.barDef
+          : this.scenario.furniture.find((f) => f.id === kind || f.type === kind));
     const fromScenario = src?.sprites?.[facing];
     if (fromScenario) return fromScenario;
+    // Single-angle shop sprites (same key for all facings)
+    if (src?.fromShop || src?.catalogId) {
+      const cat = this.shopCatalogById.get(src.catalogId ?? src.type);
+      if (cat) return cat.sprite;
+      if (src.sprite && this.textures.exists(src.sprite)) return src.sprite;
+    }
+    const cat = this.shopCatalogById.get(kind);
+    if (cat) return cat.sprite;
     return `furn_${kind}_${facing}`;
   }
 
@@ -1052,6 +1119,8 @@ export class ClubScene extends Phaser.Scene {
             this.selectFurniture('sofa');
           }
         });
+      } else if (f.fromShop || f.catalogId) {
+        this.spawnShopFurnitureVisual(f);
       }
     }
     const anchor = this.sofaDef || this.barDef;
@@ -1076,8 +1145,9 @@ export class ClubScene extends Phaser.Scene {
     const world = this.cameras.main.getWorldPoint(p.x, p.y);
     const tile = screenToTile(world.x, world.y, this.iso);
     const id = this.furnDragId;
-    const def = id === 'sofa' ? this.sofaDef : this.barDef;
-    const facing = id === 'sofa' ? this.sofaFacing : this.barFacing;
+    const def = this.getFurnitureDef(id);
+    if (!def) return;
+    const facing = this.getFurnitureFacing(id);
     const ok = this.poseAllowed(def, tile.col, tile.row, facing);
     this.dragPoseValid = ok;
     this.setFurnitureDragTint(id, ok);
@@ -1106,13 +1176,14 @@ export class ClubScene extends Phaser.Scene {
     persist: boolean
   ): void {
     if (!id) return;
-    const def = id === 'sofa' ? this.sofaDef : this.barDef;
-    const facing = id === 'sofa' ? this.sofaFacing : this.barFacing;
+    const def = this.getFurnitureDef(id);
+    if (!def) return;
+    const facing = this.getFurnitureFacing(id);
     // Tile/rim first filter; sprite-vs-neon is the authority for looking inside
     if (!this.poseAllowed(def, col, row, facing)) return;
     if (def.tile[0] === col && def.tile[1] === row) return;
     def.tile = [col, row];
-    this.syncSpotsFromFurniture();
+    if (id === 'sofa' || id === 'bar') this.syncSpotsFromFurniture();
     this.repositionFurnitureVisual(id);
     if (persist) {
       this.persistLayout();
@@ -1122,6 +1193,7 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private repositionFurnitureVisual(id: SelectedFurniture): void {
+    if (!id) return;
     if (id === 'sofa') {
       const pos = this.furnitureWorldPos('sofa', this.sofaDef.tile[0], this.sofaDef.tile[1]);
       this.sofaImage.setPosition(pos.x, pos.y);
@@ -1148,6 +1220,17 @@ export class ClubScene extends Phaser.Scene {
         this.rotateUi.setPosition(pos.x, pos.y - 70);
       }
       this.syncBartenderBarDepth();
+    } else {
+      const def = this.getFurnitureDef(id);
+      const img = this.shopImages.get(id);
+      if (!def || !img) return;
+      const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
+      img.setPosition(pos.x, pos.y);
+      img.setFlipX(!!def.flipX);
+      img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
+      if (this.selectedFurniture === id) {
+        this.rotateUi.setPosition(pos.x, pos.y - 70);
+      }
     }
   }
 
@@ -1192,21 +1275,39 @@ export class ClubScene extends Phaser.Scene {
       const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
       this.rotateUi.setPosition(x, y - 72);
       this.buildHint.setText('Arrastra el sofá · Girar ⟲ ⟳').setVisible(true);
-    } else {
+    } else if (id === 'bar') {
       this.barImage.setTint(0xffe0a0);
       this.rotateUi.setVisible(true);
       const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
       this.rotateUi.setPosition(x, y - 86);
       this.buildHint.setText('Arrastra la barra · Girar ⟲ ⟳').setVisible(true);
+    } else {
+      const def = this.getFurnitureDef(id);
+      const img = this.shopImages.get(id);
+      if (!def || !img) return;
+      img.setTint(0xc8b0ff);
+      const support = def.facingSupport ?? 'flip';
+      this.rotateUi.setVisible(support !== 'none');
+      const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
+      this.rotateUi.setPosition(pos.x, pos.y - 78);
+      const name = this.shopCatalogById.get(def.catalogId ?? '')?.name ?? 'mueble';
+      const rotHint =
+        support === 'flip'
+          ? ' · Girar refleja (1 ángulo)'
+          : support === 'full'
+            ? ' · Girar ⟲ ⟳'
+            : '';
+      this.buildHint.setText(`Arrastra ${name}${rotHint}`).setVisible(true);
     }
   }
 
   private clearFurnitureSelection(): void {
     if (this.selectedFurniture === 'sofa' && this.sofaImage) {
       this.sofaImage.clearTint();
-    }
-    if (this.selectedFurniture === 'bar' && this.barImage) {
+    } else if (this.selectedFurniture === 'bar' && this.barImage) {
       this.barImage.clearTint();
+    } else if (this.selectedFurniture) {
+      this.shopImages.get(this.selectedFurniture)?.clearTint();
     }
     this.selectedFurniture = null;
     if (this.rotateUi) this.rotateUi.setVisible(false);
@@ -1225,8 +1326,9 @@ export class ClubScene extends Phaser.Scene {
     this.syncFurnitureInteractive();
     if (on) {
       this.buildHint
-        .setText('Modo Construir: toca y arrastra muebles')
+        .setText('Modo Construir: toca y arrastra muebles · Tienda Muebles')
         .setVisible(true);
+      this.emitShopCatalog();
     } else {
       this.buildHint.setVisible(false);
       this.persistLayout();
@@ -1240,7 +1342,8 @@ export class ClubScene extends Phaser.Scene {
   private rotateSelected(dir: number): void {
     if (!this.buildMode) return;
     if (this.selectedFurniture === 'bar') this.rotateBar(dir);
-    else this.rotateSofa(dir);
+    else if (this.selectedFurniture === 'sofa') this.rotateSofa(dir);
+    else if (this.selectedFurniture) this.rotateShopFurniture(this.selectedFurniture, dir);
   }
 
   private rotateSofa(dir: number): void {
@@ -1742,6 +1845,13 @@ export class ClubScene extends Phaser.Scene {
         this.sofaImage.setInteractive({ useHandCursor: true });
       } else if (this.sofaImage.input) {
         this.sofaImage.disableInteractive();
+      }
+    }
+    for (const img of this.shopImages.values()) {
+      if (this.buildMode) {
+        img.setInteractive({ useHandCursor: true });
+      } else if (img.input) {
+        img.disableInteractive();
       }
     }
   }
@@ -2569,6 +2679,204 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
+
+  private loadShopCatalog(): void {
+    if (this.shopCatalog.length) return;
+    const raw = this.cache.json.get('shop_furniture') as ShopFurnitureFile | undefined;
+    const items = Array.isArray(raw?.items) ? raw!.items : [];
+    this.shopCatalog = items;
+    this.shopCatalogById.clear();
+    for (const it of items) this.shopCatalogById.set(it.id, it);
+  }
+
+  private defFromShopCatalog(catalogId: string, instanceId?: string): FurnitureDef | null {
+    const cat = this.shopCatalogById.get(catalogId);
+    if (!cat) return null;
+    const id = instanceId || this.nextShopInstanceId(catalogId);
+    const facing = (cat.defaultFacing as IsoFacing) || 'se';
+    return {
+      id,
+      type: cat.id,
+      sprite: cat.sprite,
+      catalogId: cat.id,
+      fromShop: true,
+      facing,
+      flipX: false,
+      sprites: { se: cat.sprite, sw: cat.sprite, ne: cat.sprite, nw: cat.sprite },
+      tile: [4, 4],
+      footprint: [cat.footprint[0], cat.footprint[1]],
+      displayW: cat.displaySize[0],
+      displayH: cat.displaySize[1],
+      yBias: cat.yBias ?? -8,
+      facingSupport: cat.facingSupport,
+    };
+  }
+
+  private nextShopInstanceId(catalogId: string): string {
+    this.shopInstanceSeq += 1;
+    // Keep ids unique across reloads by including money-tick-ish seq + existing count
+    const n = this.scenario.furniture.filter((f) => f.catalogId === catalogId).length + 1;
+    return `${catalogId}_${n}_${this.shopInstanceSeq}`;
+  }
+
+  private getFurnitureDef(id: string): FurnitureDef | null {
+    if (id === 'sofa') return this.sofaDef;
+    if (id === 'bar') return this.barDef;
+    return this.scenario.furniture.find((f) => f.id === id) ?? null;
+  }
+
+  private getFurnitureImage(id: string): Phaser.GameObjects.Image | null {
+    if (id === 'sofa') return this.sofaImage ?? null;
+    if (id === 'bar') return this.barImage ?? null;
+    return this.shopImages.get(id) ?? null;
+  }
+
+  private getFurnitureFacing(id: string): IsoFacing {
+    if (id === 'sofa') return this.sofaFacing;
+    if (id === 'bar') return this.barFacing;
+    const def = this.getFurnitureDef(id);
+    const f = (def?.facing as IsoFacing) || 'se';
+    return FACINGS.includes(f) ? f : 'se';
+  }
+
+  private spawnShopFurnitureVisual(def: FurnitureDef): void {
+    const facing = (def.facing as IsoFacing) || 'se';
+    const key = this.furnitureTextureKey(def.type, facing, def);
+    this.requireTexture(key);
+    const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
+    const size = this.furnitureDisplaySize(def.type, def);
+    const img = this.add.image(pos.x, pos.y, key);
+    img.setDisplaySize(size.w, size.h);
+    img.setFlipX(!!def.flipX);
+    img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
+    img.setInteractive({ useHandCursor: true });
+    const instanceId = def.id;
+    img.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (p.rightButtonDown()) return;
+      if (!this.buildMode) return;
+      this.beginFurniturePointer(p, instanceId);
+    });
+    img.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (this.panDragging || this.skipNextTap) return;
+      if (!this.buildMode) return;
+      if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;
+      if (!this.furnDragging || this.furnDragId !== instanceId) {
+        this.selectFurniture(instanceId);
+      }
+    });
+    this.shopImages.set(def.id, img);
+  }
+
+  private rotateShopFurniture(id: string, dir: number): void {
+    const def = this.getFurnitureDef(id);
+    const img = this.shopImages.get(id);
+    if (!def || !img) return;
+    const support = def.facingSupport ?? 'flip';
+    if (support === 'none') return;
+
+    if (support === 'flip') {
+      // Single-angle asset: mirror until Carlo sends more facings
+      def.flipX = !def.flipX;
+      img.setFlipX(!!def.flipX);
+      // Alternate facing label for persistence / depth feel
+      const idx = FACINGS.indexOf(this.getFurnitureFacing(id));
+      const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
+      def.facing = next;
+      this.persistLayout();
+      return;
+    }
+
+    // full: cycle facing (same texture if only one sprite mapped)
+    const idx = FACINGS.indexOf(this.getFurnitureFacing(id));
+    const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
+    const prevFp: [number, number] = [...def.footprint] as [number, number];
+    def.footprint = [prevFp[1], prevFp[0]];
+    const tileOk = this.canPlaceFurniture(def, def.tile[0], def.tile[1]);
+    const visualOk =
+      tileOk && this.canPlaceVisualAt(def.type, def.tile[0], def.tile[1], next, def);
+    if (!visualOk) {
+      def.footprint = prevFp;
+      return;
+    }
+    def.facing = next;
+    const size = this.furnitureDisplaySize(def.type, def);
+    img.setTexture(this.furnitureTextureKey(def.type, next, def));
+    img.setDisplaySize(size.w, size.h);
+    this.persistLayout();
+    this.rebuildPathfinder();
+  }
+
+  private findFreeShopTile(def: FurnitureDef, facing: IsoFacing): [number, number] | null {
+    const found = this.findNearestValidTile(def, facing);
+    if (found) return found;
+    // Fallback: spiral from center
+    const { cols, rows } = this.scenario.map;
+    const cx = Math.floor(cols / 2);
+    const cy = Math.floor(rows / 2);
+    for (let rad = 0; rad < Math.max(cols, rows); rad++) {
+      for (let dc = -rad; dc <= rad; dc++) {
+        for (let dr = -rad; dr <= rad; dr++) {
+          if (Math.abs(dc) !== rad && Math.abs(dr) !== rad) continue;
+          const c = cx + dc;
+          const r = cy + dr;
+          if (this.poseAllowed(def, c, r, facing)) return [c, r];
+        }
+      }
+    }
+    return null;
+  }
+
+  emitShopCatalog = (): void => {
+    this.loadShopCatalog();
+    const payload: ShopCatalogPayload = {
+      money: this.money,
+      items: this.shopCatalog.map((it) => {
+        const ownedCount = this.scenario.furniture.filter((f) => f.catalogId === it.id).length;
+        return {
+          ...it,
+          ownedCount,
+          canBuy: this.money >= it.price,
+        };
+      }),
+    };
+    this.game.events.emit('shop-catalog', payload);
+  };
+
+  private onCmdBuyShopFurniture = (catalogId: string): void => {
+    if (!this.buildMode) return;
+    this.loadShopCatalog();
+    const cat = this.shopCatalogById.get(catalogId);
+    if (!cat) {
+      this.game.events.emit('shop-buy-failed', { id: catalogId, reason: 'missing' });
+      return;
+    }
+    if (this.money < cat.price) {
+      this.game.events.emit('shop-buy-failed', { id: catalogId, reason: 'money' });
+      return;
+    }
+    const def = this.defFromShopCatalog(catalogId);
+    if (!def) return;
+    const facing = (def.facing as IsoFacing) || 'se';
+    const tile = this.findFreeShopTile(def, facing);
+    if (!tile) {
+      this.game.events.emit('shop-buy-failed', { id: catalogId, reason: 'space' });
+      return;
+    }
+    def.tile = tile;
+    this.money -= cat.price;
+    this.scenario.furniture.push(def);
+    this.spawnShopFurnitureVisual(def);
+    this.rebuildPathfinder();
+    this.persistLayout();
+    this.syncFurnitureInteractive();
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.emitShopCatalog();
+    this.selectFurniture(def.id);
+    this.buildHint
+      .setText(`Comprado: ${cat.name} — arrástrala a su lugar`)
+      .setVisible(true);
+  };
+
   shutdown(): void {
     this.game.events.off('cmd-open-night', this.openNight, this);
     this.game.events.off('cmd-close-night', this.closeNight, this);
@@ -2580,5 +2888,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-set-build-mode', this.setBuildMode, this);
     this.game.events.off('cmd-deselect-npc', this.deselectNpc, this);
     this.game.events.off('cmd-deselect-bartender', this.deselectNpc, this);
+    this.game.events.off('cmd-request-shop-catalog', this.emitShopCatalog, this);
+    this.game.events.off('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
   }
 }

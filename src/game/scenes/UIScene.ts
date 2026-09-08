@@ -1,6 +1,7 @@
 import Phaser from 'phaser';
 import { NpcInfo } from '../types/Npc';
 import { StaffRosterEntry, StaffRosterPayload } from '../types/Staff';
+import { ShopCatalogPayload } from '../types/Shop';
 
 interface HudBartender {
   name: string;
@@ -72,6 +73,13 @@ export class UIScene extends Phaser.Scene {
   private staffRoster: StaffRosterPayload | null = null;
   private staffRows: Phaser.GameObjects.GameObject[] = [];
 
+  private shopBtn!: Phaser.GameObjects.Container;
+  private shopPanel!: Phaser.GameObjects.Container;
+  private shopPanelVisible = false;
+  private shopCatalog: ShopCatalogPayload | null = null;
+  private shopRows: Phaser.GameObjects.GameObject[] = [];
+  private shopTab: 'muebles' | 'decoracion' = 'muebles';
+
   constructor() {
     super({ key: 'UIScene', active: false });
   }
@@ -121,6 +129,10 @@ export class UIScene extends Phaser.Scene {
     this.staffBtn = this.makeButton(136, cam.height - 48, 100, 36, 'Staff', () => {
       this.toggleStaffPanel();
     });
+    this.shopBtn = this.makeButton(136, cam.height - 48, 110, 36, 'Muebles', () => {
+      this.toggleShopPanel();
+    });
+    this.shopBtn.setVisible(false);
 
     // NPC stats panel — bottom-right so it does not cover the club view
     this.panel = this.add
@@ -180,7 +192,8 @@ export class UIScene extends Phaser.Scene {
     const kb = this.input.keyboard;
     if (kb) {
       kb.on('keydown-ESC', () => {
-        if (this.staffPanelVisible) this.hideStaffPanel();
+        if (this.shopPanelVisible) this.hideShopPanel();
+        else if (this.staffPanelVisible) this.hideStaffPanel();
         else if (this.panelVisible) this.hidePanel();
         else if (this.buildMode) this.game.events.emit('cmd-set-build-mode', false);
       });
@@ -219,6 +232,7 @@ export class UIScene extends Phaser.Scene {
     this.summary.add([sumBg, sumTitle, sumBody, again, sumClose]);
 
     this.createStaffPanel();
+    this.createShopPanel();
 
     this.game.events.on('club-ready', this.onStats, this);
     this.game.events.on('stats-updated', this.onStats, this);
@@ -231,6 +245,8 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('build-mode-changed', this.onBuildModeChanged, this);
     this.game.events.on('staff-roster', this.onStaffRoster, this);
     this.game.events.on('staff-hire-failed', this.onHireFailed, this);
+    this.game.events.on('shop-catalog', this.onShopCatalog, this);
+    this.game.events.on('shop-buy-failed', this.onShopBuyFailed, this);
 
     this.scale.on('resize', this.onResize, this);
     this.refreshBuildButtons();
@@ -309,6 +325,12 @@ export class UIScene extends Phaser.Scene {
       const cy = h / 2;
       if (Math.abs(p.x - cx) < 210 && Math.abs(p.y - cy) < 250) return true;
     }
+    if (this.shopPanelVisible) {
+      const cx = w / 2;
+      const cy = h / 2;
+      if (Math.abs(p.x - cx) < 230 && Math.abs(p.y - cy) < 260) return true;
+    }
+    if (this.buildMode && p.x < 260 && p.y > h - 60) return true;
     if (this.summary.visible) {
       const cx = w / 2;
       const cy = h / 2;
@@ -410,6 +432,9 @@ export class UIScene extends Phaser.Scene {
     if (on) {
       this.hidePanel();
       this.hideStaffPanel();
+      this.game.events.emit('cmd-request-shop-catalog');
+    } else {
+      this.hideShopPanel();
     }
     this.refreshBuildButtons();
   };
@@ -419,6 +444,7 @@ export class UIScene extends Phaser.Scene {
     this.buildBtn.setVisible(canBuild && !this.buildMode);
     this.doneBuildBtn.setVisible(canBuild && this.buildMode);
     this.staffBtn.setVisible(!this.buildMode);
+    this.shopBtn.setVisible(canBuild && this.buildMode);
     this.openBtn.setAlpha(this.buildMode ? 0.35 : 1);
     if (this.buildMode) {
       this.openBtn.setVisible(this.phase !== 'open');
@@ -497,10 +523,12 @@ export class UIScene extends Phaser.Scene {
     this.buildBtn.setPosition(16, h - 48);
     this.doneBuildBtn.setPosition(16, h - 48);
     this.staffBtn.setPosition(136, h - 48);
+    this.shopBtn.setPosition(136, h - 48);
     this.layoutNpcPanel(w, h);
     this.timerText.setX(w / 2);
     this.summary.setPosition(w / 2, h / 2);
     this.staffPanel.setPosition(w / 2, h / 2);
+    if (this.shopPanel) this.shopPanel.setPosition(w / 2, h / 2);
   };
 
   private createStaffPanel(): void {
@@ -696,6 +724,191 @@ export class UIScene extends Phaser.Scene {
     hire.setAlpha(can ? 1 : 0.4);
     this.staffPanel.add(hire);
     this.staffRows.push(hire);
+
+    return y + rowH;
+  }
+
+  private createShopPanel(): void {
+    const cam = this.cameras.main;
+    this.shopPanel = this.add
+      .container(cam.width / 2, cam.height / 2)
+      .setScrollFactor(0)
+      .setVisible(false)
+      .setDepth(9650);
+    const bg = this.add.rectangle(0, 0, 420, 480, 0x140a22, 0.96);
+    bg.setStrokeStyle(2, 0xff3ca0);
+    bg.setInteractive();
+    const title = this.add
+      .text(0, -218, 'Tienda — Muebles', {
+        fontSize: '20px',
+        color: '#ff9ad5',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setName('shopTitle');
+    const close = this.makeLocalButton(170, -228, 36, 32, '✕', () => this.hideShopPanel());
+    this.shopPanel.add([bg, title, close]);
+  }
+
+  private toggleShopPanel(): void {
+    if (this.shopPanelVisible) this.hideShopPanel();
+    else this.showShopPanel();
+  }
+
+  private showShopPanel(): void {
+    if (!this.buildMode) return;
+    this.hideStaffPanel();
+    this.hidePanel();
+    this.shopPanelVisible = true;
+    this.shopPanel.setVisible(true);
+    this.game.events.emit('cmd-request-shop-catalog');
+    this.rebuildShopPanel();
+  }
+
+  private hideShopPanel(): void {
+    if (!this.shopPanelVisible) return;
+    this.shopPanelVisible = false;
+    this.shopPanel.setVisible(false);
+  }
+
+  private onShopCatalog = (payload: ShopCatalogPayload): void => {
+    this.shopCatalog = payload;
+    if (this.shopPanelVisible) this.rebuildShopPanel();
+  };
+
+  private onShopBuyFailed = (info: { id: string; reason: string }): void => {
+    const title = this.shopPanel.getByName('shopTitle') as Phaser.GameObjects.Text | null;
+    if (!title) return;
+    const msg =
+      info.reason === 'money'
+        ? 'Tienda — sin dinero'
+        : info.reason === 'space'
+          ? 'Tienda — sin espacio'
+          : 'Tienda — error';
+    title.setText(msg);
+    title.setColor('#ff6688');
+    this.time.delayedCall(1600, () => {
+      title.setText(this.shopTab === 'muebles' ? 'Tienda — Muebles' : 'Tienda — Decoración');
+      title.setColor('#ff9ad5');
+    });
+  };
+
+  private clearShopRows(): void {
+    for (const g of this.shopRows) g.destroy();
+    this.shopRows = [];
+  }
+
+  private rebuildShopPanel(): void {
+    if (!this.shopPanel) return;
+    this.clearShopRows();
+    const catalog = this.shopCatalog;
+
+    const tabY = -185;
+    const mkTab = (x: number, label: string, tab: 'muebles' | 'decoracion') => {
+      const active = this.shopTab === tab;
+      const btn = this.makeLocalButton(x, tabY, 120, 30, label, () => {
+        this.shopTab = tab;
+        const title = this.shopPanel.getByName('shopTitle') as Phaser.GameObjects.Text | null;
+        if (title) {
+          title.setText(tab === 'muebles' ? 'Tienda — Muebles' : 'Tienda — Decoración');
+          title.setColor('#ff9ad5');
+        }
+        this.rebuildShopPanel();
+      });
+      btn.setAlpha(active ? 1 : 0.55);
+      this.shopPanel.add(btn);
+      this.shopRows.push(btn);
+    };
+    mkTab(-130, 'Muebles', 'muebles');
+    mkTab(10, 'Decoración', 'decoracion');
+
+    if (!catalog) {
+      const wait = this.add
+        .text(0, 0, 'Cargando…', { fontSize: '14px', color: '#c8a0e0' })
+        .setOrigin(0.5);
+      this.shopPanel.add(wait);
+      this.shopRows.push(wait);
+      return;
+    }
+
+    const moneyHint = this.add
+      .text(0, -148, `Dinero: $${catalog.money}`, {
+        fontSize: '13px',
+        color: '#ffe066',
+      })
+      .setOrigin(0.5);
+    this.shopPanel.add(moneyHint);
+    this.shopRows.push(moneyHint);
+
+    const items = catalog.items.filter((it) => {
+      const cat = (it.category || 'muebles').toLowerCase();
+      if (this.shopTab === 'muebles') return cat === 'muebles' || cat === 'furniture';
+      return cat === 'decoracion' || cat === 'decor' || cat === 'decoration';
+    });
+
+    let y = -120;
+    if (!items.length) {
+      const empty = this.add
+        .text(0, y + 40, 'Nada en esta sección todavía.', {
+          fontSize: '13px',
+          color: '#a080c0',
+          align: 'center',
+        })
+        .setOrigin(0.5);
+      this.shopPanel.add(empty);
+      this.shopRows.push(empty);
+      return;
+    }
+
+    for (const it of items) {
+      y = this.addShopItemRow(it, y, catalog.money);
+      y += 10;
+    }
+  }
+
+  private addShopItemRow(
+    it: ShopCatalogPayload['items'][number],
+    y: number,
+    money: number
+  ): number {
+    const rowH = 110;
+    const card = this.add.rectangle(0, y + rowH / 2, 380, rowH, 0x1a0e28, 0.95).setOrigin(0.5);
+    card.setStrokeStyle(1, 0x6a3a78);
+    this.shopPanel.add(card);
+    this.shopRows.push(card);
+
+    const px = -150;
+    if (this.textures.exists(it.sprite)) {
+      const img = this.add.image(px, y + rowH / 2, it.sprite).setDisplaySize(72, 50);
+      this.shopPanel.add(img);
+      this.shopRows.push(img);
+    } else {
+      const ph = this.add.rectangle(px, y + rowH / 2, 72, 50, 0x2a1838).setOrigin(0.5);
+      this.shopPanel.add(ph);
+      this.shopRows.push(ph);
+    }
+
+    const can = money >= it.price;
+    const owned = it.ownedCount > 0 ? `  ·  En club: ${it.ownedCount}` : '';
+    const info = this.add
+      .text(
+        -100,
+        y + 12,
+        `${it.name}
+Precio: $${it.price}${owned}
+${it.blurb ?? ''}`,
+        { fontSize: '12px', color: '#e8d0ff', lineSpacing: 4, wordWrap: { width: 200 } }
+      )
+      .setOrigin(0, 0);
+    this.shopPanel.add(info);
+    this.shopRows.push(info);
+
+    const buy = this.makeLocalButton(110, y + 68, 100, 28, 'Comprar', () => {
+      this.game.events.emit('cmd-buy-shop-furniture', it.id);
+    });
+    buy.setAlpha(can ? 1 : 0.4);
+    this.shopPanel.add(buy);
+    this.shopRows.push(buy);
 
     return y + rowH;
   }

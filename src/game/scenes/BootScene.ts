@@ -85,6 +85,7 @@ export class BootScene extends Phaser.Scene {
     this.load.image('furn_bar_ne', 'assets/furniture/bar_ne.png');
     this.load.image('furn_bar_nw', 'assets/furniture/bar_nw.png');
     this.load.image('furn_bar', 'assets/furniture/bar_se.png');
+    this.load.image('furn_dj_booth', 'assets/furniture/dj_booth.png');
 
     this.load.image('tile_floor', 'assets/tiles/floor.png');
     this.load.image('tile_wall', 'assets/tiles/wall.png');
@@ -126,6 +127,7 @@ export class BootScene extends Phaser.Scene {
     this.load.json('characters', 'data/characters.json');
     this.load.json('scenario', 'data/scenario.json');
     this.load.json('staff_pool', 'data/staff_pool.json');
+    this.load.json('shop_furniture', 'data/shop_furniture.json');
 
     void bar;
   }

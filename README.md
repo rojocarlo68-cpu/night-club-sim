@@ -14,7 +14,7 @@ Vite + TypeScript + Phaser 3. UI en espanol.
    - Cerrar noche: resumen de la sesion
    - Clientes van a barra o sofa; Luna atiende sola; paciencia baja mientras esperan
    - Arrastra / desliza la pantalla para mover la camara (un dedo o mouse). Toque corto = seleccionar.
-   - Construir: coloca sofa y barra (mover + girar 4 caras). Listo vuelve al juego.
+   - Construir: coloca sofa y barra (mover + girar 4 caras). Boton Muebles abre la tienda (Mesa de DJ, etc.). Listo vuelve al juego.
    - ✕ o Escape cierra el panel; toque en vacio deselecciona.
 
 Meta: gana dinero sin dejar a Luna sin energia.
@@ -28,11 +28,13 @@ Instalar, luego build. Salida en carpeta dist. Preview disponible.
 Playable floor = iso diamond from `room_floor` neon rim, inset ~4% (`FloorBounds.ts`).
 Move/rotate reject if the furniture **visual footprint** (opaque-pixel floor-contact box) leaves that polygon.
 Tile snap + rim stay as a first filter; sprite-vs-neon is the authority. New decorations reuse `canPlaceVisual`.
+Shop items use the same neon bounds checks.
 
 ## Datos
 
 - public/data/characters.json — bartender y clientes
 - public/data/scenario.json — mapa, muebles (sofa.facing), bebidas, duracion
+- public/data/shop_furniture.json — catalogo tienda Construir (id, name, price, category, sprite, footprint, facingSupport)
 
 ## Arte — room + sofa (Carlo)
 
@@ -51,6 +53,18 @@ Barra 4 angulos PNG transparente (mismo pipeline que el sofa):
 - public/assets/furniture/bar_nw.png (frente clientes arriba-izquierda)
 Personajes y tiles: PNG (sin load.svg). Paleta oscura + neon magenta/cyan.
 Sofas max ~512px ancho; room_floor.jpeg max ~1280 en el lado largo.
+
+## Tienda Construir (Muebles / Decoracion)
+
+En modo Construir, boton **Muebles** abre catalogo data-driven (`shop_furniture.json`).
+Comprar deduce dinero, spawnea instancia en baldosa libre; arrastrar/girar como sofa/barra.
+Compras + placements + dinero persisten en localStorage con el layout.
+
+### Mesa de DJ (`dj_booth`)
+- Precio: $120
+- Sprite: `public/assets/furniture/dj_booth.png` (copia en `/workspace/cutouts/dj_booth.png`)
+- **No** esta en el scenario inicial — solo via tienda
+- `facingSupport: flip` — solo 1 angulo por ahora; **Girar refleja** horizontalmente hasta que Carlo envie mas angulos SE/SW/NE/NW
 
 ## Stack
 - Vite 5 + TypeScript + Phaser 3
