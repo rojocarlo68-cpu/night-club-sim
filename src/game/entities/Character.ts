@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { IsoConfig, tileToScreen, depthForTile } from '../systems/IsoUtils';
+import { IsoConfig, tileToScreen, depthForCharacter } from '../systems/IsoUtils';
 import { GridPos, Pathfinder } from '../systems/Pathfinding';
 
 export type CharacterState = 'idle' | 'walking' | 'busy' | 'resting';
@@ -32,7 +32,7 @@ export class Character extends Phaser.GameObjects.Container {
     this.sprite.setOrigin(0.5, 0.85);
     this.add(this.sprite);
     scene.add.existing(this);
-    this.setDepth(depthForTile(grid.col, grid.row, 5));
+    this.setDepth(depthForCharacter(grid.col, grid.row));
     this.startBob();
   }
 
@@ -123,11 +123,11 @@ export class Character extends Phaser.GameObjects.Container {
       duration,
       ease: 'Linear',
       onUpdate: () => {
-        this.setDepth(depthForTile(next.col, next.row, 5));
+        this.setDepth(depthForCharacter(next.col, next.row));
       },
       onComplete: () => {
         this.grid = { ...next };
-        this.setDepth(depthForTile(this.grid.col, this.grid.row, 5));
+        this.setDepth(depthForCharacter(this.grid.col, this.grid.row));
         this.followPath();
       },
     });
@@ -141,6 +141,6 @@ export class Character extends Phaser.GameObjects.Container {
     this.grid = { ...grid };
     const p = tileToScreen(grid.col, grid.row, this.iso);
     this.setPosition(p.x, p.y);
-    this.setDepth(depthForTile(grid.col, grid.row, 5));
+    this.setDepth(depthForCharacter(grid.col, grid.row));
   }
 }

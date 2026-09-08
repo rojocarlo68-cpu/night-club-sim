@@ -18,6 +18,9 @@ const config: Phaser.Types.Core.GameConfig = {
     antialias: true,
     pixelArt: false,
   },
+  input: {
+    activePointers: 3,
+  },
 };
 
 // eslint-disable-next-line no-new

@@ -1,5 +1,11 @@
 import Phaser from 'phaser';
-import { IsoConfig, tileToScreen, screenToTile, depthForTile } from '../systems/IsoUtils';
+import {
+  IsoConfig,
+  tileToScreen,
+  screenToTile,
+  depthForFurniture,
+  depthForCharacter,
+} from '../systems/IsoUtils';
 import {
   Point,
   ROOM_NEON_MATCH_FRAC,
@@ -69,6 +75,10 @@ const LAYOUT_KEY = 'night-club-layout-v1';
 const BUILD_MARGIN = 1;
 const TAP_THRESH = 10;
 const HUD_TOP = 56;
+/** Pinch / wheel zoom clamps (initial narrow-viewport zoom still applied in setupCamera). */
+const ZOOM_MIN = 0.6;
+const ZOOM_MAX = 1.7;
+const WHEEL_ZOOM_STEP = 0.08;
 
 export type NightPhase = 'prep' | 'open' | 'summary';
 
@@ -126,6 +136,13 @@ export class ClubScene extends Phaser.Scene {
   private panScrollX = 0;
   private panScrollY = 0;
   private skipNextTap = false;
+
+  // Pinch / wheel zoom
+  private pinching = false;
+  private pinchStartDist = 0;
+  private pinchStartZoom = 1;
+  private pinchMidX = 0;
+  private pinchMidY = 0;
 
   // Furniture drag in build mode
   private furnDragging = false;
@@ -236,6 +253,7 @@ export class ClubScene extends Phaser.Scene {
       this.pathfinder,
       bd
     );
+    this.syncBartenderBarDepth();
     this.bartender.sprite.on('pointerdown', () => {
       if (!this.buildMode) this.npcTapHandled = true;
     });
@@ -249,6 +267,7 @@ export class ClubScene extends Phaser.Scene {
     });
 
     this.setupPointerPan();
+    this.setupZoom();
     this.input.mouse?.disableContextMenu();
 
     this.buildHint = this.add
@@ -436,6 +455,26 @@ export class ClubScene extends Phaser.Scene {
     this.sofaRest = { col: this.sofaDef.restSpot![0], row: this.sofaDef.restSpot![1] };
   }
 
+  /**
+   * Luna at staffSpot must draw in front of the bar sprite (working behind the
+   * counter visually) even when her tile sorts behind the bar footprint after rotate.
+   */
+  private syncBartenderBarDepth(): void {
+    if (!this.bartender || !this.barDef) return;
+    const g = this.bartender.grid;
+    let d = depthForCharacter(g.col, g.row);
+    const atStaff = g.col === this.staffSpot.col && g.row === this.staffSpot.row;
+    if (atStaff) {
+      const barD = depthForFurniture(
+        this.barDef.tile[0],
+        this.barDef.tile[1],
+        this.barDef.footprint
+      );
+      d = Math.max(d, barD + 10);
+    }
+    this.bartender.setDepth(d);
+  }
+
   private rebuildPathfinder(): void {
     const { cols, rows } = this.scenario.map;
     const blocked = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
@@ -592,6 +631,7 @@ export class ClubScene extends Phaser.Scene {
         this.repositionFurnitureVisual('bar');
         if (this.bartender && this.phase !== 'open') {
           this.bartender.snapTo(this.staffSpot);
+          this.syncBartenderBarDepth();
         }
       }
     }
@@ -660,7 +700,23 @@ export class ClubScene extends Phaser.Scene {
 
   private setupCamera(): void {
     const cam = this.cameras.main;
+    this.refreshCameraBounds();
+
+    // Slight zoom-out on narrow / mobile viewports (pinch/wheel can still go to ZOOM_MIN/MAX)
+    const w = cam.width;
+    let zoom = 1;
+    if (w < 420) zoom = 0.72;
+    else if (w < 560) zoom = 0.8;
+    else if (w < 720) zoom = 0.9;
+    cam.setZoom(Phaser.Math.Clamp(zoom, ZOOM_MIN, ZOOM_MAX));
+    cam.centerOn(this.roomImage.x, this.roomImage.y + 20);
+  }
+
+  /** World scroll bounds around the room — call after zoom so corners stay reachable. */
+  private refreshCameraBounds(): void {
+    const cam = this.cameras.main;
     const room = this.roomImage;
+    if (!room) return;
     const pad = 100;
     const bw = room.displayWidth + pad * 2;
     const bh = room.displayHeight + pad * 2;
@@ -670,15 +726,109 @@ export class ClubScene extends Phaser.Scene {
       bw,
       bh
     );
+  }
 
-    // Slight zoom-out on narrow / mobile viewports
-    const w = cam.width;
-    let zoom = 1;
-    if (w < 420) zoom = 0.72;
-    else if (w < 560) zoom = 0.8;
-    else if (w < 720) zoom = 0.9;
-    cam.setZoom(zoom);
-    cam.centerOn(room.x, room.y + 20);
+  /**
+   * Set zoom while keeping the given screen point (pinch midpoint / cursor) stable in world space.
+   */
+  private setZoomAt(nextZoom: number, screenX: number, screenY: number): void {
+    const cam = this.cameras.main;
+    const z = Phaser.Math.Clamp(nextZoom, ZOOM_MIN, ZOOM_MAX);
+    if (Math.abs(z - cam.zoom) < 0.0001) {
+      this.refreshCameraBounds();
+      return;
+    }
+    const before = cam.getWorldPoint(screenX, screenY);
+    cam.setZoom(z);
+    const after = cam.getWorldPoint(screenX, screenY);
+    cam.scrollX += before.x - after.x;
+    cam.scrollY += before.y - after.y;
+    this.refreshCameraBounds();
+  }
+
+  private setupZoom(): void {
+    // Second finger for pinch-to-zoom on mobile
+    this.input.addPointer(2);
+
+    this.input.on(
+      'wheel',
+      (
+        pointer: Phaser.Input.Pointer,
+        _gos: Phaser.GameObjects.GameObject[],
+        _dx: number,
+        dy: number
+      ) => {
+        if (this.isPointerOverHud(pointer)) return;
+        const cam = this.cameras.main;
+        const factor = dy > 0 ? 1 - WHEEL_ZOOM_STEP : 1 + WHEEL_ZOOM_STEP;
+        this.setZoomAt(cam.zoom * factor, pointer.x, pointer.y);
+      }
+    );
+
+    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.activePinchPointers() >= 2) {
+        this.beginPinch();
+      }
+      void p;
+    });
+
+    this.input.on('pointermove', () => {
+      if (this.activePinchPointers() >= 2) {
+        if (!this.pinching) this.beginPinch();
+        else this.updatePinch();
+      }
+    });
+
+    const endPinch = () => {
+      if (this.pinching) {
+        this.pinching = false;
+        // Avoid treating pinch release as a world tap
+        this.skipNextTap = true;
+        this.time.delayedCall(0, () => {
+          this.skipNextTap = false;
+        });
+      }
+    };
+    this.input.on('pointerup', endPinch);
+    this.input.on('pointerupoutside', endPinch);
+  }
+
+  private activePinchPointers(): number {
+    let n = 0;
+    for (const ptr of this.input.manager.pointers) {
+      if (ptr && ptr.active && ptr.isDown) n++;
+    }
+    return n;
+  }
+
+  private beginPinch(): void {
+    const pts = this.input.manager.pointers.filter((p) => p && p.active && p.isDown);
+    if (pts.length < 2) return;
+    const a = pts[0];
+    const b = pts[1];
+    this.pinching = true;
+    this.pinchStartDist = Math.max(10, Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y));
+    this.pinchStartZoom = this.cameras.main.zoom;
+    this.pinchMidX = (a.x + b.x) / 2;
+    this.pinchMidY = (a.y + b.y) / 2;
+    // Pinch ≠ pan: cancel any one-finger pan / furniture drag start
+    this.panActive = false;
+    this.panDragging = false;
+    this.blockPanGesture = true;
+  }
+
+  private updatePinch(): void {
+    const pts = this.input.manager.pointers.filter((p) => p && p.active && p.isDown);
+    if (pts.length < 2) return;
+    const a = pts[0];
+    const b = pts[1];
+    const dist = Math.max(10, Phaser.Math.Distance.Between(a.x, a.y, b.x, b.y));
+    const midX = (a.x + b.x) / 2;
+    const midY = (a.y + b.y) / 2;
+    const scale = dist / this.pinchStartDist;
+    this.setZoomAt(this.pinchStartZoom * scale, midX, midY);
+    this.pinchMidX = midX;
+    this.pinchMidY = midY;
   }
 
   private setupPointerPan(): void {
@@ -686,6 +836,8 @@ export class ClubScene extends Phaser.Scene {
       if (p.rightButtonDown()) return;
       if (this.isPointerOverHud(p)) return;
       if (this.furnDragging || this.blockPanGesture) return;
+      // Two-finger touch is pinch zoom, not pan
+      if (this.activePinchPointers() >= 2 || this.pinching) return;
       this.panActive = true;
       this.panDragging = false;
       this.panStartX = p.x;
@@ -695,6 +847,12 @@ export class ClubScene extends Phaser.Scene {
     });
 
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      if (this.pinching || this.activePinchPointers() >= 2) {
+        // Pinch owns the gesture — do not pan or drag furniture
+        this.panActive = false;
+        this.panDragging = false;
+        return;
+      }
       if (this.furnDragging && this.furnDragId) {
         this.dragFurnitureToPointer(p);
         return;
@@ -785,9 +943,9 @@ export class ClubScene extends Phaser.Scene {
         this.requireTexture(bkey);
         this.barImage = this.add.image(x, y - 16, bkey);
         this.applyBarDisplaySize();
-        this.barImage.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
+        this.barImage.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint));
         this.barGlow = this.add.circle(x, y - 20, 36, 0xaa44ff, 0.08);
-        this.barGlow.setDepth(depthForTile(f.tile[0], f.tile[1], 2));
+        this.barGlow.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint, 2));
         this.barImage.setInteractive({ useHandCursor: true, draggable: false });
         this.barImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
           if (p.rightButtonDown()) return;
@@ -810,7 +968,7 @@ export class ClubScene extends Phaser.Scene {
         this.requireTexture(key);
         this.sofaImage = this.add.image(x, y - 6, key);
         this.sofaImage.setDisplaySize(110, 84);
-        this.sofaImage.setDepth(depthForTile(f.tile[0], f.tile[1], 3));
+        this.sofaImage.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint));
         this.sofaImage.setInteractive({ useHandCursor: true });
         this.sofaImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
           if (p.rightButtonDown()) return;
@@ -867,6 +1025,7 @@ export class ClubScene extends Phaser.Scene {
       this.syncSpotsFromFurniture();
       if (this.bartender && this.phase !== 'open') {
         this.bartender.snapTo(this.staffSpot);
+        this.syncBartenderBarDepth();
       }
     }
     this.furnDragging = false;
@@ -894,6 +1053,7 @@ export class ClubScene extends Phaser.Scene {
       this.rebuildPathfinder();
       if (this.bartender && this.phase !== 'open') {
         this.bartender.snapTo(this.staffSpot);
+        this.syncBartenderBarDepth();
       }
     }
   }
@@ -902,16 +1062,22 @@ export class ClubScene extends Phaser.Scene {
     if (id === 'sofa') {
       const pos = this.furnitureWorldPos('sofa', this.sofaDef.tile[0], this.sofaDef.tile[1]);
       this.sofaImage.setPosition(pos.x, pos.y);
-      this.sofaImage.setDepth(depthForTile(this.sofaDef.tile[0], this.sofaDef.tile[1], 3));
+      this.sofaImage.setDepth(
+        depthForFurniture(this.sofaDef.tile[0], this.sofaDef.tile[1], this.sofaDef.footprint)
+      );
       if (this.selectedFurniture === 'sofa') {
         this.rotateUi.setPosition(pos.x, pos.y - 66);
       }
     } else if (id === 'bar') {
       const pos = this.furnitureWorldPos('bar', this.barDef.tile[0], this.barDef.tile[1]);
       this.barImage.setPosition(pos.x, pos.y);
-      this.barImage.setDepth(depthForTile(this.barDef.tile[0], this.barDef.tile[1], 3));
+      this.barImage.setDepth(
+        depthForFurniture(this.barDef.tile[0], this.barDef.tile[1], this.barDef.footprint)
+      );
       this.barGlow.setPosition(pos.x, pos.y - 4);
-      this.barGlow.setDepth(depthForTile(this.barDef.tile[0], this.barDef.tile[1], 2));
+      this.barGlow.setDepth(
+        depthForFurniture(this.barDef.tile[0], this.barDef.tile[1], this.barDef.footprint, 2)
+      );
       if (this.selectedFurniture === 'bar') {
         this.rotateUi.setPosition(pos.x, pos.y - 70);
       }
@@ -997,7 +1163,10 @@ export class ClubScene extends Phaser.Scene {
       this.persistLayout();
       this.rebuildPathfinder();
       this.syncSpotsFromFurniture();
-      if (this.bartender) this.bartender.snapTo(this.staffSpot);
+      if (this.bartender) {
+        this.bartender.snapTo(this.staffSpot);
+        this.syncBartenderBarDepth();
+      }
     }
     this.game.events.emit('build-mode-changed', this.buildMode);
   };
@@ -1106,6 +1275,7 @@ export class ClubScene extends Phaser.Scene {
     this.syncSpotsFromFurniture();
     if (this.bartender && this.phase !== 'open') {
       this.bartender.snapTo(this.staffSpot);
+      this.syncBartenderBarDepth();
     }
     this.persistLayout();
     this.rebuildPathfinder();
@@ -1134,6 +1304,7 @@ export class ClubScene extends Phaser.Scene {
     this.patrons.forEach((p) => p.destroy());
     this.patrons = [];
     this.bartender.snapTo(this.staffSpot);
+    this.syncBartenderBarDepth();
     this.bartender.state = 'idle';
     this.bartender.profile.energy = Math.min(100, this.bartender.profile.energy + 25);
     this.bartender.startBob();
@@ -1235,6 +1406,7 @@ export class ClubScene extends Phaser.Scene {
 
     this.bartender.state = 'busy';
     this.bartender.walkTo(this.staffSpot, () => {
+      this.syncBartenderBarDepth();
       this.bartender.stopBob();
       const skillBonus = this.bartender.skill / 200;
       const serveTime = drink.serveTimeMs * (1 - skillBonus * 0.3);
@@ -1305,6 +1477,7 @@ export class ClubScene extends Phaser.Scene {
         this.bartender.state = 'idle';
         this.bartender.startBob();
         this.bartender.walkTo(this.staffSpot, () => {
+          this.syncBartenderBarDepth();
           this.game.events.emit('stats-updated', this.getHudState());
           this.game.events.emit('bartender-resting', false);
         });
@@ -1332,6 +1505,7 @@ export class ClubScene extends Phaser.Scene {
     this.queueTiles.clear();
     this.bartender.state = 'idle';
     this.bartender.snapTo(this.staffSpot);
+    this.syncBartenderBarDepth();
     this.bartender.startBob();
     this.game.events.emit('night-summary', {
       ...this.getHudState(),
@@ -1362,6 +1536,8 @@ export class ClubScene extends Phaser.Scene {
   }
 
   update(_t: number, dt: number): void {
+    // Keep Luna above the bar while she works the staff side (any facing / rotate)
+    this.syncBartenderBarDepth();
     if (this.phase !== 'open') return;
     const dtSec = dt / 1000;
     this.nightTimer -= dtSec;
