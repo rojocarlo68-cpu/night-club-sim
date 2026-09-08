@@ -99,6 +99,10 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 146,
       frameHeight: 784,
     });
+    this.load.spritesheet('luna_idle_b', 'assets/characters/luna_idle_b_sheet.png', {
+      frameWidth: 146,
+      frameHeight: 784,
+    });
     this.load.image('bartender', 'assets/characters/bartender.png'); // legacy fallback
     this.load.image('patron_a', 'assets/characters/patron_a.png');
     this.load.image('patron_b', 'assets/characters/patron_b.png');
@@ -126,12 +130,21 @@ export class BootScene extends Phaser.Scene {
   }
 
   private ensureCharacterAnims(): void {
+    // Luna idle variants: play once then Character re-picks at random on complete.
     if (!this.anims.exists('luna-idle')) {
       this.anims.create({
         key: 'luna-idle',
         frames: this.anims.generateFrameNumbers('luna_idle', { start: 0, end: 7 }),
         frameRate: 9,
-        repeat: -1,
+        repeat: 0,
+      });
+    }
+    if (!this.anims.exists('luna-idle-b')) {
+      this.anims.create({
+        key: 'luna-idle-b',
+        frames: this.anims.generateFrameNumbers('luna_idle_b', { start: 0, end: 7 }),
+        frameRate: 9,
+        repeat: 0,
       });
     }
     if (!this.anims.exists('nova-idle')) {

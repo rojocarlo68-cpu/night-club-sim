@@ -12,6 +12,8 @@ export class Character extends Phaser.GameObjects.Container {
   protected bobTween?: Phaser.Tweens.Tween;
   protected useSheetIdle = false;
   protected idleAnimKey: string | null = null;
+  /** When set, randomly pick among these idle anims after each loop. */
+  protected idleAnimPool: string[] | null = null;
   private path: GridPos[] = [];
   private pathIndex = 0;
   private onArrive?: () => void;
@@ -39,6 +41,8 @@ export class Character extends Phaser.GameObjects.Container {
   /** Configure Luna (or other) spritesheet idle: feet origin + scale + loop anim. */
   setupSheetIdle(opts: {
     animKey: string;
+    /** Extra idle anim keys; when present, randomly alternate after each loop. */
+    altAnimKeys?: string[];
     originX?: number;
     originY: number;
     displayWidth: number;
@@ -47,21 +51,48 @@ export class Character extends Phaser.GameObjects.Container {
   }): void {
     this.useSheetIdle = true;
     this.idleAnimKey = opts.animKey;
+    this.idleAnimPool =
+      opts.altAnimKeys && opts.altAnimKeys.length > 0
+        ? [opts.animKey, ...opts.altAnimKeys]
+        : null;
     this.bobTween?.stop();
     this.bobTween = undefined;
     this.sprite.setOrigin(opts.originX ?? 0.5, opts.originY);
     this.sprite.setDisplaySize(opts.displayWidth, opts.displayHeight);
     this.sprite.y = opts.y ?? 0;
-    if (this.scene.anims.exists(opts.animKey)) {
-      this.sprite.play(opts.animKey);
+    this.sprite.off('animationcomplete', this.onSheetIdleComplete, this);
+    if (this.idleAnimPool) {
+      this.sprite.on('animationcomplete', this.onSheetIdleComplete, this);
     }
+    this.playSheetIdle(true);
+  }
+
+  /** Pick a random idle from the pool (or the single key) and play it once / loop. */
+  protected playSheetIdle(force = false): void {
+    const pool = this.idleAnimPool;
+    let key = this.idleAnimKey;
+    if (pool && pool.length > 0) {
+      key = pool[Math.floor(Math.random() * pool.length)] ?? key;
+    }
+    if (!key || !this.scene.anims.exists(key)) return;
+    this.idleAnimKey = key;
+    this.sprite.play(key, force);
+  }
+
+  private onSheetIdleComplete(
+    anim: Phaser.Animations.Animation,
+    _frame: Phaser.Animations.AnimationFrame
+  ): void {
+    if (!this.useSheetIdle || !this.idleAnimPool) return;
+    if (!this.idleAnimPool.includes(anim.key)) return;
+    // Only re-roll while standing idle (not mid-walk / busy stop).
+    if (this.state === 'walking') return;
+    this.playSheetIdle(true);
   }
 
   startBob(): void {
     if (this.useSheetIdle && this.idleAnimKey) {
-      if (this.scene.anims.exists(this.idleAnimKey)) {
-        this.sprite.play(this.idleAnimKey, true);
-      }
+      this.playSheetIdle(true);
       return;
     }
     this.bobTween?.stop();
