@@ -93,12 +93,12 @@ export class BootScene extends Phaser.Scene {
     this.load.image('furn_dj_booth', 'assets/furniture/dj_booth_se.png');
     // Idle sheets (2×4): front=SE/SW, back=NE/NW
     this.load.spritesheet('dj_booth_front_sheet', 'assets/furniture/dj_booth_front_sheet.png', {
-      frameWidth: 448,
-      frameHeight: 504,
+      frameWidth: 400,
+      frameHeight: 450,
     });
     this.load.spritesheet('dj_booth_back_sheet', 'assets/furniture/dj_booth_back_sheet.png', {
-      frameWidth: 468,
-      frameHeight: 528,
+      frameWidth: 400,
+      frameHeight: 450,
     });
 
     this.load.image('tile_floor', 'assets/tiles/floor.png');

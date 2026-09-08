@@ -104,7 +104,7 @@ const TAP_THRESH = 10;
 const HUD_TOP = 56;
 /** Pinch / wheel zoom clamps (initial narrow-viewport zoom still applied in setupCamera). */
 const ZOOM_MIN = 0.6;
-const ZOOM_MAX = 1.7;
+const ZOOM_MAX = 2.1;
 const WHEEL_ZOOM_STEP = 0.08;
 export type NightPhase = 'prep' | 'open' | 'summary';
 
