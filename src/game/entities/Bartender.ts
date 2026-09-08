@@ -23,6 +23,11 @@ export const LUNA_FEET_ORIGIN_Y = 583 / 784;
 /** Full-body display height (furniture-matched). */
 export const LUNA_DISPLAY_H = 88;
 
+/** Nova idle sheet: same 1168×784 / 8×146 layout; feet near y=610. */
+export const NOVA_IDLE_FRAME_W = 146;
+export const NOVA_IDLE_FRAME_H = 784;
+export const NOVA_FEET_ORIGIN_Y = 610 / 784;
+
 export class Bartender extends Character {
   profile: BartenderData;
   selected = false;
@@ -56,11 +61,23 @@ export class Bartender extends Character {
       });
       this.ring.setPosition(0, -2);
       this.ring.setSize(18, 8);
-    } else if (texture === 'nova') {
-      // Hireable maid standing sprite — furniture-matched height
-      this.sprite.setOrigin(0.5, 0.92);
-      this.sprite.setDisplaySize(36, LUNA_DISPLAY_H);
-      this.sprite.y = -2;
+    } else if (texture === 'nova_idle' || texture === 'nova') {
+      // Hireable maid — same on-screen height as Luna (~88px), idle sheet preferred
+      const displayH = LUNA_DISPLAY_H;
+      const displayW = (NOVA_IDLE_FRAME_W / NOVA_IDLE_FRAME_H) * displayH;
+      if (texture === 'nova_idle') {
+        this.setupSheetIdle({
+          animKey: 'nova-idle',
+          originY: NOVA_FEET_ORIGIN_Y,
+          displayWidth: displayW,
+          displayHeight: displayH,
+          y: 6,
+        });
+      } else {
+        this.sprite.setOrigin(0.5, 0.92);
+        this.sprite.setDisplaySize(displayW, displayH);
+        this.sprite.y = -2;
+      }
       this.ring.setPosition(0, -2);
       this.ring.setSize(18, 8);
     }

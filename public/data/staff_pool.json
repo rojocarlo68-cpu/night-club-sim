@@ -6,7 +6,7 @@
       "roleLabel": "Camarera",
       "role": "waitress",
       "cost": 80,
-      "sprite": "nova",
+      "sprite": "nova_idle",
       "portrait": "nova_portrait",
       "energy": 100,
       "mood": 70,

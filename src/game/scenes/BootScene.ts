@@ -94,7 +94,7 @@ export class BootScene extends Phaser.Scene {
     this.load.image('tile_floor', 'assets/tiles/floor.png');
     this.load.image('tile_wall', 'assets/tiles/wall.png');
 
-    // Characters — Luna idle spritesheet + patron PNGs
+    // Characters — Luna/Nova idle spritesheets + patron PNGs
     this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
@@ -103,7 +103,11 @@ export class BootScene extends Phaser.Scene {
     this.load.image('patron_a', 'assets/characters/patron_a.png');
     this.load.image('patron_b', 'assets/characters/patron_b.png');
     this.load.image('patron_c', 'assets/characters/patron_c.png');
-    this.load.image('nova', 'assets/characters/nova.png');
+    this.load.spritesheet('nova_idle', 'assets/characters/nova_idle_sheet.png', {
+      frameWidth: 146,
+      frameHeight: 784,
+    });
+    this.load.image('nova', 'assets/characters/nova.png'); // legacy static (unused in-world)
     this.load.image('nova_portrait', 'assets/characters/nova_portrait.png');
     this.load.image('luna_portrait', 'assets/characters/luna_portrait.png');
 
@@ -126,6 +130,14 @@ export class BootScene extends Phaser.Scene {
       this.anims.create({
         key: 'luna-idle',
         frames: this.anims.generateFrameNumbers('luna_idle', { start: 0, end: 7 }),
+        frameRate: 9,
+        repeat: -1,
+      });
+    }
+    if (!this.anims.exists('nova-idle')) {
+      this.anims.create({
+        key: 'nova-idle',
+        frames: this.anims.generateFrameNumbers('nova_idle', { start: 0, end: 7 }),
         frameRate: 9,
         repeat: -1,
       });
