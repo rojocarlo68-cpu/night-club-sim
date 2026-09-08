@@ -16,6 +16,11 @@ export interface BartenderData {
   moveSpeed: number;
 }
 
+/** Luna idle sheet: 1168×784 → 8 frames of 146×784; feet near y=583. */
+export const LUNA_IDLE_FRAME_W = 146;
+export const LUNA_IDLE_FRAME_H = 784;
+export const LUNA_FEET_ORIGIN_Y = 583 / 784;
+
 export class Bartender extends Character {
   profile: BartenderData;
   selected = false;
@@ -35,6 +40,20 @@ export class Bartender extends Character {
     this.ring = scene.add.ellipse(0, -4, 36, 14, 0xff3ca0, 0.0);
     this.add(this.ring);
     this.ring.setDepth(-1);
+
+    if (texture === 'luna_idle') {
+      // ~50px wide footprint (similar to old 64px placeholder, not huge)
+      const displayW = 50;
+      const displayH = (LUNA_IDLE_FRAME_H / LUNA_IDLE_FRAME_W) * displayW;
+      this.setupSheetIdle({
+        animKey: 'luna-idle',
+        originY: LUNA_FEET_ORIGIN_Y,
+        displayWidth: displayW,
+        displayHeight: displayH,
+        y: 0,
+      });
+      this.ring.setPosition(0, -2);
+    }
   }
 
   setSelected(v: boolean): void {

@@ -8,8 +8,10 @@ export class Character extends Phaser.GameObjects.Container {
   grid: GridPos;
   state: CharacterState = 'idle';
   moveSpeed: number;
-  public sprite: Phaser.GameObjects.Image;
+  public sprite: Phaser.GameObjects.Sprite;
   protected bobTween?: Phaser.Tweens.Tween;
+  protected useSheetIdle = false;
+  protected idleAnimKey: string | null = null;
   private path: GridPos[] = [];
   private pathIndex = 0;
   private onArrive?: () => void;
@@ -26,7 +28,7 @@ export class Character extends Phaser.GameObjects.Container {
     super(scene, pos.x, pos.y);
     this.grid = { ...grid };
     this.moveSpeed = moveSpeed;
-    this.sprite = scene.add.image(0, -20, texture);
+    this.sprite = scene.add.sprite(0, -20, texture);
     this.sprite.setOrigin(0.5, 0.85);
     this.add(this.sprite);
     scene.add.existing(this);
@@ -34,7 +36,34 @@ export class Character extends Phaser.GameObjects.Container {
     this.startBob();
   }
 
+  /** Configure Luna (or other) spritesheet idle: feet origin + scale + loop anim. */
+  setupSheetIdle(opts: {
+    animKey: string;
+    originX?: number;
+    originY: number;
+    displayWidth: number;
+    displayHeight: number;
+    y?: number;
+  }): void {
+    this.useSheetIdle = true;
+    this.idleAnimKey = opts.animKey;
+    this.bobTween?.stop();
+    this.bobTween = undefined;
+    this.sprite.setOrigin(opts.originX ?? 0.5, opts.originY);
+    this.sprite.setDisplaySize(opts.displayWidth, opts.displayHeight);
+    this.sprite.y = opts.y ?? 0;
+    if (this.scene.anims.exists(opts.animKey)) {
+      this.sprite.play(opts.animKey);
+    }
+  }
+
   startBob(): void {
+    if (this.useSheetIdle && this.idleAnimKey) {
+      if (this.scene.anims.exists(this.idleAnimKey)) {
+        this.sprite.play(this.idleAnimKey, true);
+      }
+      return;
+    }
     this.bobTween?.stop();
     this.bobTween = this.scene.tweens.add({
       targets: this.sprite,
@@ -47,6 +76,11 @@ export class Character extends Phaser.GameObjects.Container {
   }
 
   stopBob(): void {
+    if (this.useSheetIdle) {
+      this.sprite.stop();
+      this.sprite.setFrame(0);
+      return;
+    }
     this.bobTween?.stop();
     this.sprite.y = -20;
   }

@@ -70,6 +70,7 @@ export class BootScene extends Phaser.Scene {
         return;
       }
       this.statusText.setText('Cargando 100%…');
+      this.ensureCharacterAnims();
       // Leave immediately into gameplay scenes
       this.scene.start('ClubScene');
       this.scene.launch('UIScene');
@@ -93,8 +94,12 @@ export class BootScene extends Phaser.Scene {
     this.load.image('tile_floor', 'assets/tiles/floor.png');
     this.load.image('tile_wall', 'assets/tiles/wall.png');
 
-    // Characters — PNG only
-    this.load.image('bartender', 'assets/characters/bartender.png');
+    // Characters — Luna idle spritesheet + patron PNGs
+    this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_sheet.png', {
+      frameWidth: 146,
+      frameHeight: 784,
+    });
+    this.load.image('bartender', 'assets/characters/bartender.png'); // legacy fallback
     this.load.image('patron_a', 'assets/characters/patron_a.png');
     this.load.image('patron_b', 'assets/characters/patron_b.png');
     this.load.image('patron_c', 'assets/characters/patron_c.png');
@@ -110,5 +115,15 @@ export class BootScene extends Phaser.Scene {
     // Scene transition is driven by loader 'complete' so we never hang
     // if create somehow runs without a successful load.
     if (this.loadFailed) return;
+  }
+
+  private ensureCharacterAnims(): void {
+    if (this.anims.exists('luna-idle')) return;
+    this.anims.create({
+      key: 'luna-idle',
+      frames: this.anims.generateFrameNumbers('luna_idle', { start: 0, end: 7 }),
+      frameRate: 9,
+      repeat: -1,
+    });
   }
 }

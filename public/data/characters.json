@@ -3,7 +3,7 @@
     "id": "bartender_luna",
     "name": "Luna",
     "role": "bartender",
-    "sprite": "bartender",
+    "sprite": "luna_idle",
     "energy": 100,
     "mood": 75,
     "skill": 55,
