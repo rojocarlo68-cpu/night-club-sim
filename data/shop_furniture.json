@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "id": "dj_booth",
+      "name": "Mesa de DJ",
+      "price": 120,
+      "category": "muebles",
+      "sprite": "furn_dj_booth_se",
+      "spriteFile": "assets/furniture/dj_booth_se.png",
+      "sprites": {
+        "se": "furn_dj_booth_se",
+        "sw": "furn_dj_booth_sw",
+        "ne": "furn_dj_booth_ne",
+        "nw": "furn_dj_booth_nw"
+      },
+      "footprint": [2, 1],
+      "displaySize": [98, 110],
+      "yBias": -18,
+      "facingSupport": "full",
+      "defaultFacing": "se",
+      "blurb": "Cabina DJ neón, 4 caras. Girar ⟲ ⟳ como sofá/barra."
+    }
+  ]
+}
