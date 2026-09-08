@@ -20,8 +20,10 @@ export interface BartenderData {
 export const LUNA_IDLE_FRAME_W = 146;
 export const LUNA_IDLE_FRAME_H = 784;
 export const LUNA_FEET_ORIGIN_Y = 583 / 784;
-/** Full-body display height (furniture-matched). */
+/** Full-body display height (furniture-matched). Frame height — Luna/Nova sheets have large transparent padding, so visible body is ~47–54px. */
 export const LUNA_DISPLAY_H = 88;
+/** Alias used by patrons / asserts (same value as LUNA_DISPLAY_H). */
+export const STAFF_DISPLAY_H = LUNA_DISPLAY_H;
 
 /** Nova idle sheet: same 1168×784 / 8×146 layout; feet near y=610. */
 export const NOVA_IDLE_FRAME_W = 146;

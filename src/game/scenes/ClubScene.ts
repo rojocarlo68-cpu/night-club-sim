@@ -1407,6 +1407,8 @@ export class ClubScene extends Phaser.Scene {
       pdata,
       drinkName
     );
+    // Spawning / first walk play can race texture bind — lock size again.
+    patron.reapplyDisplaySize();
     this.wirePatronClick(patron);
     this.patrons.push(patron);
 

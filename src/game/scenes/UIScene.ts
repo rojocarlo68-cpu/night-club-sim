@@ -37,6 +37,11 @@ const STATE_ES: Record<string, string> = {
   wandering: 'Vagando',
 };
 
+const PANEL_W = 260;
+const PANEL_H = 320;
+/** Gap above bottom edge (clears Construir/Staff row ~48px). */
+const PANEL_BOTTOM_MARGIN = 60;
+
 export class UIScene extends Phaser.Scene {
   private moneyText!: Phaser.GameObjects.Text;
   private timerText!: Phaser.GameObjects.Text;
@@ -117,9 +122,13 @@ export class UIScene extends Phaser.Scene {
       this.toggleStaffPanel();
     });
 
-    // Side panel (unified NPC)
-    this.panel = this.add.container(cam.width - 20, 70).setScrollFactor(0).setVisible(false);
-    const panelBg = this.add.rectangle(0, 0, 260, 320, 0x1a0e28, 0.92).setOrigin(1, 0);
+    // NPC stats panel — bottom-right so it does not cover the club view
+    this.panel = this.add
+      .container(cam.width - 20, cam.height - PANEL_BOTTOM_MARGIN - PANEL_H)
+      .setScrollFactor(0)
+      .setVisible(false)
+      .setDepth(9500);
+    const panelBg = this.add.rectangle(0, 0, PANEL_W, PANEL_H, 0x1a0e28, 0.92).setOrigin(1, 0);
     panelBg.setStrokeStyle(2, 0xff3ca0);
     panelBg.setInteractive();
 
@@ -276,12 +285,22 @@ export class UIScene extends Phaser.Scene {
     return c;
   }
 
+
+  /** Bottom-right NPC panel position (responsive). */
+  private layoutNpcPanel(w: number, h: number): void {
+    this.panel.setPosition(w - 20, h - PANEL_BOTTOM_MARGIN - PANEL_H);
+  }
+
   isPointerOnUi(p: Phaser.Input.Pointer): boolean {
     const w = this.cameras.main.width;
     const h = this.cameras.main.height;
     if (p.y < 56) return true;
     if (p.x < 250 && p.y > h - 60) return true;
-    if (this.panelVisible && p.x > w - 280 && p.y > 60 && p.y < 400) return true;
+    if (this.panelVisible) {
+      const panelTop = h - PANEL_BOTTOM_MARGIN - PANEL_H;
+      const panelBottom = h - PANEL_BOTTOM_MARGIN + 8;
+      if (p.x > w - PANEL_W - 24 && p.y > panelTop - 8 && p.y < panelBottom) return true;
+    }
     if (this.staffPanelVisible) {
       const cx = w / 2;
       const cy = h / 2;
@@ -315,6 +334,7 @@ export class UIScene extends Phaser.Scene {
     if (this.buildMode) return;
     this.selectedNpc = npc;
     this.panelVisible = true;
+    this.layoutNpcPanel(this.cameras.main.width, this.cameras.main.height);
     this.panel.setVisible(true);
     this.refreshPanel(npc);
   };
@@ -474,7 +494,7 @@ export class UIScene extends Phaser.Scene {
     this.buildBtn.setPosition(16, h - 48);
     this.doneBuildBtn.setPosition(16, h - 48);
     this.staffBtn.setPosition(136, h - 48);
-    this.panel.setX(w - 20);
+    this.layoutNpcPanel(w, h);
     this.timerText.setX(w / 2);
     this.summary.setPosition(w / 2, h / 2);
     this.staffPanel.setPosition(w / 2, h / 2);

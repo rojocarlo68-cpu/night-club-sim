@@ -73,6 +73,7 @@ export class Character extends Phaser.GameObjects.Container {
     this.bobTween?.stop();
     this.bobTween = undefined;
     this.sprite.setOrigin(opts.originX ?? 0.5, opts.originY);
+    this.bindDisplaySizeGuard();
     this.reapplyDisplaySize();
     this.sprite.y = opts.y ?? 0;
     this.sprite.off('animationcomplete', this.onSheetIdleComplete, this);
@@ -82,11 +83,20 @@ export class Character extends Phaser.GameObjects.Container {
     this.playSheetIdle(true);
   }
 
-  /** Re-apply sheet display size after setTexture/play (Phaser resets to frame size). */
+  /** Re-apply sheet display size after setTexture/play (Phaser can reset to frame size / scale 1). */
   reapplyDisplaySize(): void {
     if (this.sheetDisplayW > 0 && this.sheetDisplayH > 0) {
+      // Prefer setDisplaySize over setScale(1) — native frames (e.g. 112×192) look huge.
       this.sprite.setDisplaySize(this.sheetDisplayW, this.sheetDisplayH);
     }
+  }
+
+  /** Keep display size locked across every animation frame / texture swap. */
+  protected bindDisplaySizeGuard(): void {
+    this.sprite.off('animationupdate', this.reapplyDisplaySize, this);
+    this.sprite.off('animationstart', this.reapplyDisplaySize, this);
+    this.sprite.on('animationupdate', this.reapplyDisplaySize, this);
+    this.sprite.on('animationstart', this.reapplyDisplaySize, this);
   }
 
   /** Pick a random idle from the pool (or the single / facing key) and play it. */
