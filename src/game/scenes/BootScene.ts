@@ -93,6 +93,10 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 146,
       frameHeight: 784,
     });
+    this.load.spritesheet('luna_serve_beer', 'assets/characters/luna_serve_beer_sheet.png', {
+      frameWidth: 146,
+      frameHeight: 784,
+    });
     this.load.image('bartender', 'assets/characters/bartender.png');
     // Legacy single-frame keys (same male client art)
     this.load.image('patron_a', 'assets/characters/patron_a.png');
@@ -133,6 +137,15 @@ export class BootScene extends Phaser.Scene {
         frames: this.anims.generateFrameNumbers('luna_idle', { start: 0, end: 7 }),
         frameRate: 9,
         repeat: -1,
+      });
+    }
+    // 8 frames over 2.0s for beer pour / prepare
+    if (!this.anims.exists('luna-serve-beer') && this.textures.exists('luna_serve_beer')) {
+      this.anims.create({
+        key: 'luna-serve-beer',
+        frames: this.anims.generateFrameNumbers('luna_serve_beer', { start: 0, end: 7 }),
+        frameRate: 4,
+        repeat: 0,
       });
     }
     if (!this.anims.exists('nova-idle')) {

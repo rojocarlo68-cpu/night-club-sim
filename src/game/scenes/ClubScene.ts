@@ -1856,6 +1856,13 @@ export class ClubScene extends Phaser.Scene {
     opts?: { player?: boolean; aiJob?: StaffAiJob }
   ): void {
     if (staff.grid.col === goal.col && staff.grid.row === goal.row) return;
+    // Avoid piling onto another staff's tile — pick adjacent alternate
+    let dest = goal;
+    if (this.isStaffTileBlocked(goal, staff)) {
+      const alt = this.findFreeStaffGoal(staff, goal);
+      if (!alt) return;
+      dest = alt;
+    }
     const asPlayer = opts?.player !== false && !opts?.aiJob;
     if (asPlayer) {
       this.releaseStaffAiClaims(staff);
@@ -1864,10 +1871,12 @@ export class ClubScene extends Phaser.Scene {
       staff.aiJob = opts.aiJob;
       staff.playerCommanded = false;
     }
+    this.claimStaffTile(staff, dest);
     // Cancel AI wander/serve mid-path when player overrides
     staff.state = 'walking';
-    const ok = staff.walkTo(goal, () => {
+    const ok = staff.walkTo(dest, () => {
       staff.state = 'idle';
+      this.releaseStaffTileClaims(staff);
       staff.startBob();
       if (asPlayer) staff.clearPlayerCommand();
       else staff.clearAiJob();
@@ -1877,6 +1886,7 @@ export class ClubScene extends Phaser.Scene {
     });
     if (!ok) {
       staff.state = 'idle';
+      this.releaseStaffTileClaims(staff);
       staff.startBob();
       if (asPlayer) staff.clearPlayerCommand();
       else staff.clearAiJob();
@@ -1900,10 +1910,12 @@ export class ClubScene extends Phaser.Scene {
     this.releaseStaffAiClaims(staff);
     staff.cancelWalk();
     staff.beginPlayerCommand('serve');
+    staff.servingDrinkId = 'generic';
     staff.state = 'busy';
     const finish = () => {
       if (staff === this.bartender) this.syncBartenderBarDepth();
       staff.stopBob();
+      staff.setServeLabel('Sirviendo bebida');
       this.playStaffActionTween(staff, () => {
         const earned = Phaser.Math.Between(8, 15);
         this.money += earned;
@@ -1914,6 +1926,9 @@ export class ClubScene extends Phaser.Scene {
           staff.profile.energy - Math.max(2, Math.floor(staff.profile.energyDrainPerServe / 2))
         );
         staff.state = 'idle';
+        staff.servingDrinkId = null;
+        staff.clearServeLabel();
+        this.releaseStaffTileClaims(staff);
         staff.clearPlayerCommand();
         staff.startBob();
         this.barActionBusy = false;
@@ -1923,11 +1938,15 @@ export class ClubScene extends Phaser.Scene {
         this.emitStaffRoster();
       });
     };
-    const ok = staff.walkTo(this.staffSpot, finish);
-    if (!ok) {
-      // Path blocked — still play action in place
-      finish();
-    }
+    const go = () => {
+      if (!this.claimBarSpot(staff)) {
+        this.time.delayedCall(300, go);
+        return;
+      }
+      const ok = staff.walkTo(this.staffSpot, finish);
+      if (!ok) finish();
+    };
+    go();
   }
 
   private doBarClean(): void {
@@ -1940,6 +1959,7 @@ export class ClubScene extends Phaser.Scene {
     staff.cancelWalk();
     staff.beginPlayerCommand('clean');
     staff.state = 'busy';
+    this.claimBarSpot(staff);
     const finish = () => {
       if (staff === this.bartender) this.syncBartenderBarDepth();
       staff.stopBob();
@@ -1950,6 +1970,7 @@ export class ClubScene extends Phaser.Scene {
         staff.profile.energy = Math.max(0, staff.profile.energy - Phaser.Math.Between(8, 14));
         staff.profile.mood = Math.min(100, staff.profile.mood + Phaser.Math.Between(1, 3));
         staff.state = 'idle';
+        this.releaseStaffTileClaims(staff);
         staff.clearPlayerCommand();
         staff.startBob();
         this.barActionBusy = false;
@@ -1969,17 +1990,21 @@ export class ClubScene extends Phaser.Scene {
   private playStaffActionTween(staff: Bartender, onDone: () => void): void {
     const spr = staff.sprite;
     const baseY = spr.y;
+    const baseSX = spr.scaleX;
+    const baseSY = spr.scaleY;
     this.tweens.add({
       targets: spr,
       y: baseY - 5,
-      scaleX: spr.scaleX * 1.05,
-      scaleY: spr.scaleY * 0.95,
+      scaleX: baseSX * 1.05,
+      scaleY: baseSY * 0.95,
       duration: 220,
       yoyo: true,
       repeat: 3,
       ease: 'Sine.easeInOut',
       onComplete: () => {
         spr.y = baseY;
+        spr.setScale(baseSX, baseSY);
+        staff.reapplyDisplaySize();
         onDone();
       },
     });
@@ -2087,11 +2112,109 @@ export class ClubScene extends Phaser.Scene {
 
   /** patronId → staffId while an Atender job is in flight. */
   private serveClaim = new Map<string, string>();
+  /** Destination / job tile → staffId (bar staffSpot, sofa, wander). */
+  private staffTileClaims = new Map<string, string>();
+  /** Soft bar queue: only one staff may occupy staffSpot at a time. */
+  private barSpotHolderId: string | null = null;
 
   private releaseStaffAiClaims(staff: Bartender): void {
     for (const [pid, sid] of [...this.serveClaim.entries()]) {
       if (sid === staff.profile.id) this.serveClaim.delete(pid);
     }
+    this.releaseStaffTileClaims(staff);
+    staff.servingDrinkId = null;
+    staff.clearServeLabel();
+  }
+
+  private tileKey(pos: { col: number; row: number }): string {
+    return `${pos.col},${pos.row}`;
+  }
+
+  private releaseStaffTileClaims(staff: Bartender): void {
+    const id = staff.profile.id;
+    for (const [k, sid] of [...this.staffTileClaims.entries()]) {
+      if (sid === id) this.staffTileClaims.delete(k);
+    }
+    if (this.barSpotHolderId === id) this.barSpotHolderId = null;
+  }
+
+  /** True if another staff occupies or has reserved this tile. */
+  private isStaffTileBlocked(
+    pos: { col: number; row: number },
+    except?: Bartender
+  ): boolean {
+    const exceptId = except?.profile.id;
+    const claimed = this.staffTileClaims.get(this.tileKey(pos));
+    if (claimed && claimed !== exceptId) return true;
+    for (const s of this.allStaff()) {
+      if (except && s === except) continue;
+      if (s.grid.col === pos.col && s.grid.row === pos.row) return true;
+    }
+    return false;
+  }
+
+  private claimStaffTile(staff: Bartender, pos: { col: number; row: number }): boolean {
+    if (this.isStaffTileBlocked(pos, staff)) return false;
+    // Drop prior claims for this staff, then claim destination
+    for (const [k, sid] of [...this.staffTileClaims.entries()]) {
+      if (sid === staff.profile.id) this.staffTileClaims.delete(k);
+    }
+    this.staffTileClaims.set(this.tileKey(pos), staff.profile.id);
+    return true;
+  }
+
+  private claimBarSpot(staff: Bartender): boolean {
+    if (this.barSpotHolderId && this.barSpotHolderId !== staff.profile.id) return false;
+    this.barSpotHolderId = staff.profile.id;
+    this.claimStaffTile(staff, this.staffSpot);
+    return true;
+  }
+
+  /** Adjacent wait tile near bar when staffSpot is held. */
+  private findStaffWaitNearBar(staff: Bartender): { col: number; row: number } {
+    const c = this.staffSpot;
+    const candidates = [
+      { col: c.col - 1, row: c.row },
+      { col: c.col, row: c.row + 1 },
+      { col: c.col + 1, row: c.row },
+      { col: c.col, row: c.row - 1 },
+      { col: c.col - 1, row: c.row + 1 },
+      { col: c.col + 1, row: c.row + 1 },
+      { col: c.col - 1, row: c.row - 1 },
+      { col: c.col + 1, row: c.row - 1 },
+    ];
+    for (const pos of candidates) {
+      if (!this.pathfinder.isWalkable(pos.col, pos.row)) continue;
+      if (pos.col === c.col && pos.row === c.row) continue;
+      if (this.isStaffTileBlocked(pos, staff)) continue;
+      return pos;
+    }
+    // Last resort: stay put
+    return { col: staff.grid.col, row: staff.grid.row };
+  }
+
+  private findFreeStaffGoal(
+    staff: Bartender,
+    preferred: { col: number; row: number }
+  ): { col: number; row: number } | null {
+    if (!this.isStaffTileBlocked(preferred, staff) && this.pathfinder.isWalkable(preferred.col, preferred.row)) {
+      return preferred;
+    }
+    const candidates = [
+      preferred,
+      { col: preferred.col - 1, row: preferred.row },
+      { col: preferred.col + 1, row: preferred.row },
+      { col: preferred.col, row: preferred.row - 1 },
+      { col: preferred.col, row: preferred.row + 1 },
+      { col: preferred.col - 1, row: preferred.row + 1 },
+      { col: preferred.col + 1, row: preferred.row + 1 },
+    ];
+    for (const pos of candidates) {
+      if (!this.pathfinder.isWalkable(pos.col, pos.row)) continue;
+      if (this.isStaffTileBlocked(pos, staff)) continue;
+      return pos;
+    }
+    return null;
   }
 
   private tryAssignServeAi(patron: Patron): boolean {
@@ -2116,19 +2239,53 @@ export class ClubScene extends Phaser.Scene {
     staff.aiJob = 'serve';
     staff.playerCommanded = false;
     staff.state = 'busy';
+    staff.servingDrinkId = drink.id;
     this.serveClaim.set(patron.profile.id, staff.profile.id);
     this.game.events.emit('stats-updated', this.getHudState());
     this.emitStaffRoster();
 
     const release = () => {
       this.serveClaim.delete(patron.profile.id);
+      staff.servingDrinkId = null;
+      staff.clearServeLabel();
+      this.releaseStaffTileClaims(staff);
       staff.clearAiJob();
       staff.state = 'idle';
       staff.startBob();
       if (staff === this.bartender) this.syncBartenderBarDepth();
     };
 
-    const ok = staff.walkTo(this.staffSpot, () => {
+    const completeServe = () => {
+      if (!patron.active || this.phase !== 'open') {
+        release();
+        this.game.events.emit('stats-updated', this.getHudState());
+        this.emitStaffRoster();
+        return;
+      }
+      staff.applyServeDrain();
+      let earned = drink.price;
+      if (Math.random() < patron.profile.tipChance) {
+        earned += Math.ceil(drink.price * 0.25);
+        patron.showBubble('¡Propina!');
+      } else {
+        patron.showBubble('¡Gracias!');
+      }
+      this.money += earned;
+      this.nightEarned += earned;
+      this.servedCount++;
+      patron.served = true;
+      patron.waiting = false;
+      this.releaseTile(patron.grid);
+      staff.clearServeLabel();
+      staff.servingDrinkId = null;
+      release();
+      this.persistLayout();
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.emitStaffRoster();
+      this.time.delayedCall(600, () => this.sendPatronHome(patron));
+    };
+
+    const startPrepare = () => {
       if (staff === this.bartender) this.syncBartenderBarDepth();
       staff.stopBob();
       if (!patron.active || !patron.waiting || patron.served || this.phase !== 'open') {
@@ -2137,64 +2294,83 @@ export class ClubScene extends Phaser.Scene {
         this.emitStaffRoster();
         return;
       }
+
+      const label =
+        drink.id === 'cerveza' ? 'Sirviendo cerveza' : 'Sirviendo bebida';
+      staff.setServeLabel(label);
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.emitStaffRoster();
+
+      // Cerveza: fixed 2000ms + Luna pour anim. Others: skill-scaled serveTime.
       const skillBonus = staff.skill / 200;
-      const serveTime = drink.serveTimeMs * (1 - skillBonus * 0.3);
-      this.time.delayedCall(serveTime, () => {
-        if (!patron.active || this.phase !== 'open') {
-          release();
-          this.game.events.emit('stats-updated', this.getHudState());
-          this.emitStaffRoster();
-          return;
-        }
-        staff.applyServeDrain();
-        let earned = drink.price;
-        if (Math.random() < patron.profile.tipChance) {
-          earned += Math.ceil(drink.price * 0.25);
-          patron.showBubble('¡Propina!');
-        } else {
-          patron.showBubble('¡Gracias!');
-        }
-        this.money += earned;
-        this.nightEarned += earned;
-        this.servedCount++;
-        patron.served = true;
-        patron.waiting = false;
-        this.releaseTile(patron.grid);
-        release();
-        this.persistLayout();
-        this.game.events.emit('stats-updated', this.getHudState());
-        this.emitStaffRoster();
-        this.time.delayedCall(600, () => this.sendPatronHome(patron));
+      const prepareMs =
+        drink.id === 'cerveza'
+          ? drink.serveTimeMs
+          : drink.serveTimeMs * (1 - skillBonus * 0.3);
+
+      let playedBeer = false;
+      if (drink.id === 'cerveza') {
+        playedBeer = staff.playServeBeerAnim();
+      }
+      if (!playedBeer) {
+        // Nova (or missing sheet): keep idle/bob during prepare
+        staff.startBob();
+      }
+
+      this.time.delayedCall(prepareMs, () => {
+        completeServe();
       });
-    });
-    if (!ok) {
-      // Try serving in place near patron
-      staff.stopBob();
-      this.time.delayedCall(drink.serveTimeMs, () => {
-        if (!patron.active || this.phase !== 'open') {
-          release();
-          return;
+    };
+
+    const goToBarAndServe = () => {
+      if (!this.claimBarSpot(staff)) {
+        // Soft queue: wait nearby until spot frees
+        const wait = this.findStaffWaitNearBar(staff);
+        this.claimStaffTile(staff, wait);
+        const okWait = staff.walkTo(wait, () => {
+          const poll = () => {
+            if (!patron.active || !patron.waiting || patron.served || this.phase !== 'open') {
+              release();
+              this.game.events.emit('stats-updated', this.getHudState());
+              this.emitStaffRoster();
+              return;
+            }
+            if (this.barSpotHolderId && this.barSpotHolderId !== staff.profile.id) {
+              this.time.delayedCall(280, poll);
+              return;
+            }
+            if (!this.claimBarSpot(staff)) {
+              this.time.delayedCall(280, poll);
+              return;
+            }
+            const okBar = staff.walkTo(this.staffSpot, startPrepare);
+            if (!okBar) startPrepare();
+          };
+          poll();
+        });
+        if (!okWait) {
+          this.time.delayedCall(400, goToBarAndServe);
         }
-        staff.applyServeDrain();
-        const earned = drink.price;
-        this.money += earned;
-        this.nightEarned += earned;
-        this.servedCount++;
-        patron.served = true;
-        patron.waiting = false;
-        this.releaseTile(patron.grid);
-        patron.showBubble('¡Gracias!');
-        release();
-        this.persistLayout();
-        this.game.events.emit('stats-updated', this.getHudState());
-        this.emitStaffRoster();
-        this.time.delayedCall(600, () => this.sendPatronHome(patron));
-      });
-    }
+        return;
+      }
+      const ok = staff.walkTo(this.staffSpot, startPrepare);
+      if (!ok) startPrepare();
+    };
+
+    goToBarAndServe();
   }
 
   private beginAiClean(staff: Bartender): void {
     if (this.barActionBusy) return;
+    // Soft queue: only one cleaner/server at staffSpot
+    if (this.barSpotHolderId && this.barSpotHolderId !== staff.profile.id) {
+      staff.aiNextThinkAt = this.time.now + 600;
+      return;
+    }
+    if (!this.claimBarSpot(staff)) {
+      staff.aiNextThinkAt = this.time.now + 600;
+      return;
+    }
     staff.aiJob = 'clean';
     staff.playerCommanded = false;
     staff.state = 'busy';
@@ -2210,6 +2386,7 @@ export class ClubScene extends Phaser.Scene {
         staff.profile.energy = Math.max(0, staff.profile.energy - Phaser.Math.Between(6, 12));
         staff.profile.mood = Math.min(100, staff.profile.mood + 2);
         staff.state = 'idle';
+        this.releaseStaffTileClaims(staff);
         staff.clearAiJob();
         staff.aiNextThinkAt = this.time.now + Phaser.Math.Between(8000, 14000);
         staff.startBob();
@@ -2224,6 +2401,11 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private beginStaffRest(npc: Bartender, asPlayer: boolean): void {
+    const restGoal = this.findFreeStaffGoal(npc, this.sofaRest);
+    if (!restGoal) {
+      if (!asPlayer) npc.aiNextThinkAt = this.time.now + 800;
+      return;
+    }
     if (asPlayer) {
       this.releaseStaffAiClaims(npc);
       npc.cancelWalk();
@@ -2232,10 +2414,11 @@ export class ClubScene extends Phaser.Scene {
       npc.aiJob = 'rest';
       npc.playerCommanded = false;
     }
+    this.claimStaffTile(npc, restGoal);
     npc.state = 'busy';
     this.game.events.emit('stats-updated', this.getHudState());
     this.emitStaffRoster();
-    npc.walkTo(this.sofaRest, () => {
+    npc.walkTo(restGoal, () => {
       npc.state = 'resting';
       npc.stopBob();
       const dur = npc.profile.restDurationMs;
@@ -2244,11 +2427,15 @@ export class ClubScene extends Phaser.Scene {
       this.time.delayedCall(dur, () => {
         npc.applyRest();
         npc.state = 'idle';
+        this.releaseStaffTileClaims(npc);
         if (asPlayer) npc.clearPlayerCommand();
         else npc.clearAiJob();
         npc.startBob();
         const home = this.findFloorStaffSpawnTile();
-        npc.walkTo(home, () => {
+        const homeGoal = this.findFreeStaffGoal(npc, home) ?? home;
+        this.claimStaffTile(npc, homeGoal);
+        npc.walkTo(homeGoal, () => {
+          this.releaseStaffTileClaims(npc);
           this.syncBartenderBarDepth();
           npc.aiNextThinkAt = this.time.now + 1500;
           this.game.events.emit('stats-updated', this.getHudState());
@@ -2261,11 +2448,12 @@ export class ClubScene extends Phaser.Scene {
   private beginAiWander(staff: Bartender): void {
     const { cols, rows } = this.scenario.map;
     let goal: { col: number; row: number } | null = null;
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 16; i++) {
       const col = Phaser.Math.Between(1, cols - 2);
       const row = Phaser.Math.Between(1, rows - 2);
       if (!this.pathfinder.isWalkable(col, row)) continue;
       if (col === staff.grid.col && row === staff.grid.row) continue;
+      if (this.isStaffTileBlocked({ col, row }, staff)) continue;
       goal = { col, row };
       break;
     }
@@ -2273,6 +2461,7 @@ export class ClubScene extends Phaser.Scene {
       staff.aiNextThinkAt = this.time.now + 2000;
       return;
     }
+    this.claimStaffTile(staff, goal);
     staff.aiJob = 'wander';
     staff.playerCommanded = false;
     staff.state = 'walking';
@@ -2280,6 +2469,7 @@ export class ClubScene extends Phaser.Scene {
     this.emitStaffRoster();
     const ok = staff.walkTo(goal, () => {
       staff.state = 'idle';
+      this.releaseStaffTileClaims(staff);
       staff.clearAiJob();
       staff.startBob();
       staff.aiNextThinkAt = this.time.now + Phaser.Math.Between(2500, 5000);
@@ -2289,6 +2479,7 @@ export class ClubScene extends Phaser.Scene {
     });
     if (!ok) {
       staff.state = 'idle';
+      this.releaseStaffTileClaims(staff);
       staff.clearAiJob();
       staff.startBob();
       staff.aiNextThinkAt = this.time.now + 2000;

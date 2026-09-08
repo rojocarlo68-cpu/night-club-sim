@@ -232,7 +232,7 @@
       "id": "cerveza",
       "name": "Cerveza",
       "price": 8,
-      "serveTimeMs": 1600
+      "serveTimeMs": 2000
     },
     {
       "id": "refresco",

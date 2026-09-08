@@ -19,6 +19,9 @@ export class Character extends Phaser.GameObjects.Container {
   protected walkAnimPrefix: string | null = null;
   /** Prefix for directional idle: `${prefix}-${facing}`; falls back to idleAnimKey. */
   protected idleAnimPrefix: string | null = null;
+  /** Persist display size across texture swaps (idle ↔ walk ↔ serve). */
+  protected sheetDisplayW = 0;
+  protected sheetDisplayH = 0;
   facing: IsoFacing = 'se';
   private path: GridPos[] = [];
   private pathIndex = 0;
@@ -65,16 +68,25 @@ export class Character extends Phaser.GameObjects.Container {
         : null;
     this.walkAnimPrefix = opts.walkAnimPrefix ?? null;
     this.idleAnimPrefix = opts.idleAnimPrefix ?? null;
+    this.sheetDisplayW = opts.displayWidth;
+    this.sheetDisplayH = opts.displayHeight;
     this.bobTween?.stop();
     this.bobTween = undefined;
     this.sprite.setOrigin(opts.originX ?? 0.5, opts.originY);
-    this.sprite.setDisplaySize(opts.displayWidth, opts.displayHeight);
+    this.reapplyDisplaySize();
     this.sprite.y = opts.y ?? 0;
     this.sprite.off('animationcomplete', this.onSheetIdleComplete, this);
     if (this.idleAnimPool) {
       this.sprite.on('animationcomplete', this.onSheetIdleComplete, this);
     }
     this.playSheetIdle(true);
+  }
+
+  /** Re-apply sheet display size after setTexture/play (Phaser resets to frame size). */
+  reapplyDisplaySize(): void {
+    if (this.sheetDisplayW > 0 && this.sheetDisplayH > 0) {
+      this.sprite.setDisplaySize(this.sheetDisplayW, this.sheetDisplayH);
+    }
   }
 
   /** Pick a random idle from the pool (or the single / facing key) and play it. */
@@ -91,6 +103,7 @@ export class Character extends Phaser.GameObjects.Container {
     if (!key || !this.scene.anims.exists(key)) return;
     this.idleAnimKey = key;
     this.sprite.play(key, force);
+    this.reapplyDisplaySize();
   }
 
   private onSheetIdleComplete(
@@ -118,6 +131,7 @@ export class Character extends Phaser.GameObjects.Container {
     const key = `${this.walkAnimPrefix}-${facing}`;
     if (this.scene.anims.exists(key)) {
       this.sprite.play(key, true);
+      this.reapplyDisplaySize();
     }
   }
 

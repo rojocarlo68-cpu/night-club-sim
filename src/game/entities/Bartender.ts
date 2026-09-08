@@ -38,7 +38,10 @@ export class Bartender extends Character {
   aiJob: StaffAiJob = 'none';
   /** Next time (scene.time.now) this staff may pick a new AI job. */
   aiNextThinkAt = 0;
+  /** Drink id currently being prepared (cerveza, etc.), or null. */
+  servingDrinkId: string | null = null;
   private ring?: Phaser.GameObjects.Ellipse;
+  private serveLabel?: Phaser.GameObjects.Text;
 
   constructor(
     scene: Phaser.Scene,
@@ -150,6 +153,8 @@ export class Bartender extends Character {
   clearAiJob(): void {
     this.aiJob = 'none';
     this.playerCommanded = false;
+    this.servingDrinkId = null;
+    this.clearServeLabel();
   }
 
   /** Panel / roster state key (Spanish labels live in UIScene). */
@@ -157,6 +162,8 @@ export class Bartender extends Character {
     if (this.playerCommanded && this.state === 'walking') return 'walking';
     switch (this.aiJob) {
       case 'serve':
+        if (this.servingDrinkId === 'cerveza') return 'serving_cerveza';
+        if (this.servingDrinkId) return 'serving_drink';
         return 'serving';
       case 'clean':
         return 'cleaning';
@@ -169,6 +176,61 @@ export class Bartender extends Character {
       default:
         return this.state;
     }
+  }
+
+  /** Floating prep label above head (Spanish). */
+  setServeLabel(text: string | null): void {
+    if (!text) {
+      this.clearServeLabel();
+      return;
+    }
+    const y = -(this.sheetDisplayH || LUNA_DISPLAY_H) - 10;
+    if (!this.serveLabel) {
+      this.serveLabel = this.scene.add
+        .text(0, y, text, {
+          fontSize: '11px',
+          color: '#ffe066',
+          fontStyle: 'bold',
+          stroke: '#1a0a22',
+          strokeThickness: 3,
+        })
+        .setOrigin(0.5);
+      this.add(this.serveLabel);
+    } else {
+      this.serveLabel.setText(text);
+      this.serveLabel.setY(y);
+      this.serveLabel.setVisible(true);
+    }
+  }
+
+  clearServeLabel(): void {
+    if (this.serveLabel) {
+      this.serveLabel.destroy();
+      this.serveLabel = undefined;
+    }
+  }
+
+  /**
+   * Play Luna beer-pour sheet (~2s). Returns false if sheet/anim missing
+   * (Nova falls back to idle bob).
+   */
+  playServeBeerAnim(): boolean {
+    // Nova uses idle/bob until Carlo sends her pour sheet
+    const isLuna =
+      this.profile.id === 'bartender_luna' ||
+      this.sprite.texture.key.startsWith('luna');
+    if (!isLuna) return false;
+    const key = 'luna-serve-beer';
+    if (!this.scene.anims.exists(key) || !this.scene.textures.exists('luna_serve_beer')) {
+      return false;
+    }
+    this.bobTween?.stop();
+    this.bobTween = undefined;
+    this.sprite.play(key, true);
+    this.reapplyDisplaySize();
+    // Keep Luna feet origin (same frame layout as idle)
+    this.sprite.setOrigin(0.5, LUNA_FEET_ORIGIN_Y);
+    return true;
   }
 
   applyServeDrain(): void {

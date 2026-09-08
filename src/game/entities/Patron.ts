@@ -58,6 +58,8 @@ export class Patron extends Character {
     this.patienceRemaining = data.patience;
     this.preferredDrinkName = drinkDisplayName || data.preferredDrink;
 
+    // Force same display height as Luna/Nova (88). Walk/idle must use
+    // setDisplaySize — never raw 112×192 texture pixels (looks huge).
     const displayH = PATRON_DISPLAY_H;
     const displayW = (PATRON_FRAME_W / PATRON_FRAME_H) * displayH;
 
@@ -73,9 +75,13 @@ export class Patron extends Character {
       });
     } else {
       this.sprite.setOrigin(0.5, 0.92);
+      this.sheetDisplayW = displayW;
+      this.sheetDisplayH = displayH;
       this.sprite.setDisplaySize(displayW, displayH);
       this.sprite.y = -2;
     }
+    // Belt-and-suspenders: re-assert after any texture bind
+    this.reapplyDisplaySize();
 
     this.refreshHitArea();
     this.ring = scene.add.ellipse(0, -2, 18, 8, 0x2ad6ff, 0.0);

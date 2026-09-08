@@ -31,6 +31,8 @@ const STATE_ES: Record<string, string> = {
   leaving: 'Saliendo',
   relaxing: 'Relajándose',
   serving: 'Atendiendo',
+  serving_cerveza: 'Sirviendo cerveza',
+  serving_drink: 'Sirviendo bebida',
   cleaning: 'Limpiando',
   wandering: 'Vagando',
 };
@@ -357,7 +359,7 @@ export class UIScene extends Phaser.Scene {
       this.moodBar.setFillStyle(0xffb84d);
       this.moodBar.setVisible(true);
       this.moodLabel.setVisible(true);
-      const canRest = !['walking', 'busy', 'resting'].includes(npc.state);
+      const canRest = !['walking', 'busy', 'resting', 'serving', 'serving_cerveza', 'serving_drink', 'cleaning', 'wandering'].includes(npc.state);
       this.restBtn.setVisible(canRest);
       this.restBtn.setAlpha(canRest ? 1 : 0.4);
     } else {
