@@ -94,12 +94,8 @@ export class BootScene extends Phaser.Scene {
     this.load.image('tile_floor', 'assets/tiles/floor.png');
     this.load.image('tile_wall', 'assets/tiles/wall.png');
 
-    // Characters — Luna idle + front-bar peek spritesheets + patron PNGs
+    // Characters — Luna idle spritesheet + patron PNGs
     this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_sheet.png', {
-      frameWidth: 146,
-      frameHeight: 784,
-    });
-    this.load.spritesheet('luna_idle_peek', 'assets/characters/luna_idle_peek_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
     });
@@ -130,14 +126,6 @@ export class BootScene extends Phaser.Scene {
       this.anims.create({
         key: 'luna-idle',
         frames: this.anims.generateFrameNumbers('luna_idle', { start: 0, end: 7 }),
-        frameRate: 9,
-        repeat: -1,
-      });
-    }
-    if (!this.anims.exists('luna-idle-peek')) {
-      this.anims.create({
-        key: 'luna-idle-peek',
-        frames: this.anims.generateFrameNumbers('luna_idle_peek', { start: 0, end: 7 }),
         frameRate: 9,
         repeat: -1,
       });

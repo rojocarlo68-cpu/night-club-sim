@@ -93,31 +93,6 @@ const HUD_TOP = 56;
 const ZOOM_MIN = 0.6;
 const ZOOM_MAX = 1.7;
 const WHEEL_ZOOM_STEP = 0.08;
-/**
- * Bottom fraction of bar opaque AABB kept in barFront (counter mass over Luna).
- * SE/SW = customer FRONT: light keep so head→navel/waist clears the counter.
- * NE/NW = service BACK: Luna is fully hidden at staffSpot (keep unused for crop;
- *   still generated; hide is the authority).
- */
-const BAR_FRONT_KEEP_FRAC: Record<IsoFacing, number> = {
-  // Front: thin counter lip only — peek sheet transparent legs do the occlusion;
-  // aggressive keepFrac buried Luna's head.
-  se: 0.36,
-  sw: 0.36,
-  ne: 1.0,
-  nw: 1.0,
-};
-/** Customer-facing (front) bar angles — neon panels toward camera. */
-const BAR_FRONT_FACINGS: ReadonlySet<IsoFacing> = new Set(['se', 'sw']);
-/** Service-facing (back) bar angles — bottles toward camera. */
-const BAR_BACK_FACINGS: ReadonlySet<IsoFacing> = new Set(['ne', 'nw']);
-/** barFront depth = bartenderDepth + this (counter always above Luna). */
-const BAR_FRONT_DEPTH_ABOVE = 20;
-/** Luna sprite.y when not tucked behind a front counter. */
-const LUNA_SPRITE_Y_DEFAULT = 6;
-/** Raise Luna at front staffSpot so waist clears the counter top. */
-const LUNA_SPRITE_Y_AT_FRONT_BAR = -48;
-
 export type NightPhase = 'prep' | 'open' | 'summary';
 
 type SelectedFurniture = 'sofa' | 'bar' | null;
@@ -157,8 +132,6 @@ export class ClubScene extends Phaser.Scene {
   private barFacing: IsoFacing = 'se';
   private sofaImage!: Phaser.GameObjects.Image;
   private barImage!: Phaser.GameObjects.Image;
-  /** Counter-only overlay (lower crop of bar) drawn above Luna for occlusion. */
-  private barFrontImage!: Phaser.GameObjects.Image;
   private barGlow!: Phaser.GameObjects.Arc;
   private roomImage!: Phaser.GameObjects.Image;
 
@@ -170,7 +143,7 @@ export class ClubScene extends Phaser.Scene {
   private sofaRestOff: [number, number] = [0, 0];
   private sofaInteractOff: [number, number] = [0, -1];
   private barInteractOff: [number, number] = [-1, 0];
-  private barStaffOff: [number, number] = [0, 1];
+  private barStaffOff: [number, number] = [-1, 1];
 
   // Camera pan
   private panActive = false;
@@ -284,7 +257,6 @@ export class ClubScene extends Phaser.Scene {
     this.syncSpotsFromFurniture();
 
     this.drawRoom(cols, rows);
-    this.ensureBarFrontTextures();
     this.placeFurniture();
     this.ensureAllFurnitureInsideFloor();
     this.setupCamera();
@@ -543,50 +515,12 @@ export class ClubScene extends Phaser.Scene {
     this.sofaRest = { col: this.sofaDef.restSpot![0], row: this.sofaDef.restSpot![1] };
   }
 
-  /**
-   * Layered 2D counter occlusion by bar facing:
-   *   FRONT (SE/SW): full bar < Luna peek (head→navel); barFront hidden/soft.
-   *   BACK  (NE/NW): Luna fully hidden at staffSpot (service side / bottles to camera).
-   * Away from staffSpot (sofa/rest/walk): Luna always fully visible.
-   */
+  /** Normal character depth vs furniture — Luna always full-body visible. */
   private syncBartenderBarDepth(): void {
-    if (!this.bartender || !this.barDef) return;
+    if (!this.bartender) return;
     const g = this.bartender.grid;
-    const barD = depthForFurniture(
-      this.barDef.tile[0],
-      this.barDef.tile[1],
-      this.barDef.footprint
-    );
-    let d = depthForCharacter(g.col, g.row);
-    const atStaff = g.col === this.staffSpot.col && g.row === this.staffSpot.row;
-    const facing = this.barFacing;
-    const backAtBar = atStaff && BAR_BACK_FACINGS.has(facing);
-    const frontAtBar = atStaff && BAR_FRONT_FACINGS.has(facing);
-
-    // BACK: completely invisible behind service-side bar
-    this.bartender.setVisible(!backAtBar);
-
-    if (frontAtBar) {
-      // Between full bar and counter overlay
-      d = Math.max(d, barD + 10);
-    }
-    this.bartender.setDepth(d);
-    if (this.barFrontImage) {
-      this.barFrontImage.setDepth(Math.max(d, barD) + BAR_FRONT_DEPTH_ABOVE);
-    }
-
-    // Front: peek texture (head→navel); else full body. No setCrop shrink.
-    this.bartender.setFrontBarPeek(frontAtBar);
-    const spr = this.bartender.sprite;
-    const lunaKey = spr?.texture?.key;
-    if (lunaKey === 'luna_idle' || lunaKey === 'luna_idle_peek') {
-      spr.y = frontAtBar ? LUNA_SPRITE_Y_AT_FRONT_BAR : LUNA_SPRITE_Y_DEFAULT;
-    }
-    // Front: thin barFront lip above Luna so waist tucks under counter rim.
-    // Back: full overlay (Luna already hidden).
-    if (this.barFrontImage) {
-      this.barFrontImage.setVisible(true);
-    }
+    this.bartender.setVisible(true);
+    this.bartender.setDepth(depthForCharacter(g.col, g.row));
   }
 
   private rebuildPathfinder(): void {
@@ -715,7 +649,6 @@ export class ClubScene extends Phaser.Scene {
     if (!img) return;
     if (!valid) {
       img.setTint(0xff4466);
-      this.barFrontImage?.setTint(0xff4466);
       return;
     }
     // Restore selection tint while dragging/selected
@@ -723,7 +656,6 @@ export class ClubScene extends Phaser.Scene {
       img.setTint(0xffc0e8);
     } else {
       img.setTint(0xffe0a0);
-      this.barFrontImage?.setTint(0xffe0a0);
     }
   }
 
@@ -1049,62 +981,8 @@ export class ClubScene extends Phaser.Scene {
     this.barImage.setDisplaySize(size.w, size.h);
     this.barImage.setAlpha(1);
     this.barImage.setBlendMode(Phaser.BlendModes.NORMAL);
-    if (this.barFrontImage) {
-      this.barFrontImage.setDisplaySize(size.w, size.h);
-      this.barFrontImage.setAlpha(1);
-      this.barFrontImage.setBlendMode(Phaser.BlendModes.NORMAL);
-    }
   }
 
-  /**
-   * Build furn_bar_front_* canvases: same RGB as full bar, top of opaque AABB
-   * cleared so only the customer-facing counter mass remains for overlay draw.
-   */
-  private ensureBarFrontTextures(): void {
-    for (const facing of FACINGS) {
-      const srcKey = `furn_bar_${facing}`;
-      const frontKey = `furn_bar_front_v3_${facing}`;
-      if (this.textures.exists(frontKey)) continue;
-      this.requireTexture(srcKey);
-      const srcImg = this.textures.get(srcKey).getSourceImage() as
-        | HTMLImageElement
-        | HTMLCanvasElement;
-      const w = srcImg.width;
-      const h = srcImg.height;
-      const canvas = document.createElement('canvas');
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('2d context unavailable for bar front');
-      ctx.drawImage(srcImg, 0, 0);
-      const { data } = ctx.getImageData(0, 0, w, h);
-      let minY = h;
-      let maxY = -1;
-      for (let y = 0; y < h; y++) {
-        for (let x = 0; x < w; x++) {
-          if (data[(y * w + x) * 4 + 3] > 10) {
-            if (y < minY) minY = y;
-            if (y > maxY) maxY = y;
-          }
-        }
-      }
-      const keepFrac = BAR_FRONT_KEEP_FRAC[facing];
-      let cutY: number;
-      if (maxY < minY) {
-        cutY = Math.floor(h * (1 - keepFrac));
-      } else {
-        const aabbH = maxY - minY + 1;
-        const keepH = Math.max(1, Math.floor(aabbH * keepFrac));
-        cutY = maxY - keepH + 1;
-      }
-      if (cutY > 0) ctx.clearRect(0, 0, w, cutY);
-      this.textures.addCanvas(frontKey, canvas);
-    }
-  }
-
-  private barFrontTextureKey(facing: IsoFacing): string {
-    return `furn_bar_front_v3_${facing}`;
-  }
 
   private placeFurniture(): void {
     for (const f of this.scenario.furniture) {
@@ -1116,14 +994,9 @@ export class ClubScene extends Phaser.Scene {
         const bkey = this.furnitureTextureKey('bar', this.barFacing, f);
         this.requireTexture(bkey);
         this.barImage = this.add.image(x, y - 16, bkey);
-        const fkey = this.barFrontTextureKey(this.barFacing);
-        this.requireTexture(fkey);
-        this.barFrontImage = this.add.image(x, y - 16, fkey);
         this.applyBarDisplaySize();
         const barDepth = depthForFurniture(f.tile[0], f.tile[1], f.footprint);
         this.barImage.setDepth(barDepth);
-        // Temporary; syncBartenderBarDepth refines once Luna exists
-        this.barFrontImage.setDepth(barDepth + BAR_FRONT_DEPTH_ABOVE);
         this.barGlow = this.add.circle(x, y - 20, 36, 0xaa44ff, 0.08);
         this.barGlow.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint, 2));
         this.barImage.setInteractive({ useHandCursor: true, draggable: false });
@@ -1257,10 +1130,6 @@ export class ClubScene extends Phaser.Scene {
       );
       this.barImage.setPosition(pos.x, pos.y);
       this.barImage.setDepth(barDepth);
-      if (this.barFrontImage) {
-        this.barFrontImage.setPosition(pos.x, pos.y);
-        this.barFrontImage.setDepth(barDepth + BAR_FRONT_DEPTH_ABOVE);
-      }
       this.barGlow.setPosition(pos.x, pos.y - 4);
       this.barGlow.setDepth(
         depthForFurniture(this.barDef.tile[0], this.barDef.tile[1], this.barDef.footprint, 2)
@@ -1315,7 +1184,6 @@ export class ClubScene extends Phaser.Scene {
       this.buildHint.setText('Arrastra el sofá · Girar ⟲ ⟳').setVisible(true);
     } else {
       this.barImage.setTint(0xffe0a0);
-      this.barFrontImage?.setTint(0xffe0a0);
       this.rotateUi.setVisible(true);
       const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
       this.rotateUi.setPosition(x, y - 86);
@@ -1329,7 +1197,6 @@ export class ClubScene extends Phaser.Scene {
     }
     if (this.selectedFurniture === 'bar' && this.barImage) {
       this.barImage.clearTint();
-      this.barFrontImage?.clearTint();
     }
     this.selectedFurniture = null;
     if (this.rotateUi) this.rotateUi.setVisible(false);
@@ -1461,14 +1328,12 @@ export class ClubScene extends Phaser.Scene {
     this.barFacing = next;
     this.barDef.facing = next;
     this.barImage.setTexture(this.furnitureTextureKey('bar', next));
-    this.barFrontImage.setTexture(this.barFrontTextureKey(next));
     this.applyBarDisplaySize();
     this.syncSpotsFromFurniture();
     if (this.bartender) {
       if (this.phase !== 'open') {
         this.bartender.snapTo(this.staffSpot);
       }
-      // Occlusion (front keep / back hide) must update immediately on rotate
       this.syncBartenderBarDepth();
     }
     this.persistLayout();
@@ -1924,7 +1789,6 @@ export class ClubScene extends Phaser.Scene {
   }
 
   update(_t: number, dt: number): void {
-    // Keep bar < Luna < barFront occlusion stack (any facing / rotate)
     this.syncBartenderBarDepth();
     if (this.phase !== 'open') return;
     const dtSec = dt / 1000;
