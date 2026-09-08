@@ -1,0 +1,22 @@
+{
+  "candidates": [
+    {
+      "id": "staff_nova",
+      "name": "Nova",
+      "roleLabel": "Camarera",
+      "role": "waitress",
+      "cost": 80,
+      "sprite": "nova",
+      "portrait": "nova_portrait",
+      "energy": 100,
+      "mood": 70,
+      "skill": 48,
+      "energyDrainPerServe": 6,
+      "energyRegenOnRest": 18,
+      "restDurationMs": 3500,
+      "serveDurationMs": 1800,
+      "moveSpeed": 88,
+      "blurb": "Maid de pelo negro/azul. Lista para la barra."
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import { Pathfinder } from '../systems/Pathfinding';
 import { Bartender, BartenderData } from '../entities/Bartender';
 import { Patron, PatronData } from '../entities/Patron';
 import { NpcInfo } from '../types/Npc';
+import { StaffCandidate, StaffPoolFile, StaffRosterEntry, StaffRosterPayload } from '../types/Staff';
 
 interface Drink {
   id: string;
@@ -55,8 +56,17 @@ interface Scenario {
 }
 
 interface CharactersFile {
-  bartender: BartenderData & { sprite: string; role: string };
+  bartender: BartenderData & { sprite: string; role: string; portrait?: string };
   patrons: PatronData[];
+  staff?: Array<
+    BartenderData & {
+      sprite: string;
+      role: string;
+      roleLabel?: string;
+      portrait?: string;
+      starter?: boolean;
+    }
+  >;
 }
 
 interface SavedLayoutItem {
@@ -67,6 +77,10 @@ interface SavedLayoutItem {
 
 interface SavedLayout {
   furniture: SavedLayoutItem[];
+  /** Hired staff ids from staff_pool (excludes starter Luna). */
+  hiredStaff?: string[];
+  /** Persist cash so hires survive reload. */
+  money?: number;
 }
 
 const FACINGS: IsoFacing[] = ['se', 'sw', 'nw', 'ne'];
@@ -102,7 +116,7 @@ const BAR_FRONT_DEPTH_ABOVE = 20;
 /** Luna sprite.y when not tucked behind a front counter. */
 const LUNA_SPRITE_Y_DEFAULT = 6;
 /** Raise Luna at front staffSpot so waist clears the counter top. */
-const LUNA_SPRITE_Y_AT_FRONT_BAR = -26;
+const LUNA_SPRITE_Y_AT_FRONT_BAR = -48;
 
 export type NightPhase = 'prep' | 'open' | 'summary';
 
@@ -114,6 +128,10 @@ export class ClubScene extends Phaser.Scene {
   scenario!: Scenario;
   chars!: CharactersFile;
   bartender!: Bartender;
+  /** Extra hired staff NPCs (not the primary serving bartender). */
+  extraStaff: Bartender[] = [];
+  private staffPool: StaffCandidate[] = [];
+  private hiredStaffIds: string[] = [];
   patrons: Patron[] = [];
   money = 0;
   nightEarned = 0;
@@ -290,8 +308,11 @@ export class ClubScene extends Phaser.Scene {
       if (this.buildMode) return;
       p.event.stopPropagation();
       this.npcTapHandled = true;
-      this.selectNpcStaff();
+      this.selectNpcStaff(this.bartender.profile.id);
     });
+
+    this.loadStaffPool();
+    this.spawnHiredExtraStaff();
 
     this.setupPointerPan();
     this.setupZoom();
@@ -315,9 +336,14 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-open-night', this.openNight, this);
     this.game.events.on('cmd-close-night', this.closeNight, this);
     this.game.events.on('cmd-rest', this.orderRest, this);
+    this.game.events.on('cmd-rest-staff', this.orderRestStaff, this);
+    this.game.events.on('cmd-select-staff', this.onCmdSelectStaff, this);
+    this.game.events.on('cmd-hire-staff', this.onCmdHireStaff, this);
+    this.game.events.on('cmd-request-staff-roster', this.emitStaffRoster, this);
     this.game.events.on('cmd-set-build-mode', this.setBuildMode, this);
     this.game.events.on('cmd-deselect-npc', this.deselectNpc, this);
     this.game.events.on('cmd-deselect-bartender', this.deselectNpc, this);
+    this.emitStaffRoster();
   }
 
   private drinkDisplayName(id: string): string {
@@ -351,23 +377,49 @@ export class ClubScene extends Phaser.Scene {
 
   private getSelectedNpcInfo(): NpcInfo | null {
     if (!this.selectedNpcId) return null;
-    if (this.bartender && this.selectedNpcId === this.bartender.profile.id) {
-      return this.bartenderNpcInfo();
-    }
+    const staff = this.findStaffById(this.selectedNpcId);
+    if (staff) return this.staffNpcInfo(staff);
     const patron = this.patrons.find((p) => p.profile.id === this.selectedNpcId);
     if (patron) return this.patronNpcInfo(patron);
     return null;
   }
 
-  private selectNpcStaff(): void {
+  private findStaffById(id: string): Bartender | null {
+    if (this.bartender && this.bartender.profile.id === id) return this.bartender;
+    return this.extraStaff.find((s) => s.profile.id === id) ?? null;
+  }
+
+  private staffNpcInfo(b: Bartender): NpcInfo {
+    return {
+      id: b.profile.id,
+      name: b.displayName,
+      role: 'staff',
+      energy: Math.round(b.energy),
+      mood: Math.round(b.mood),
+      skill: Math.round(b.skill),
+      state: b.state,
+    };
+  }
+
+  private selectNpcStaff(id?: string): void {
+    const target = id ? this.findStaffById(id) : this.bartender;
+    if (!target) return;
     this.clearFurnitureSelection();
     this.patrons.forEach((p) => p.setSelected(false));
-    this.bartender.setSelected(true);
-    this.selectedNpcId = this.bartender.profile.id;
-    const info = this.bartenderNpcInfo();
+    this.bartender.setSelected(target === this.bartender);
+    this.extraStaff.forEach((s) => s.setSelected(s === target));
+    this.selectedNpcId = target.profile.id;
+    const info = this.staffNpcInfo(target);
     this.game.events.emit('select-npc', info);
-    this.game.events.emit('select-bartender', this.bartender);
+    if (target === this.bartender) {
+      this.game.events.emit('select-bartender', this.bartender);
+    }
   }
+
+  private onCmdSelectStaff = (id: string): void => {
+    if (this.buildMode) return;
+    this.selectNpcStaff(id);
+  };
 
   private selectNpcPatron(patron: Patron): void {
     this.clearFurnitureSelection();
@@ -380,6 +432,7 @@ export class ClubScene extends Phaser.Scene {
   deselectNpc = (): void => {
     this.selectedNpcId = null;
     if (this.bartender) this.bartender.setSelected(false);
+    this.extraStaff.forEach((s) => s.setSelected(false));
     this.patrons.forEach((p) => p.setSelected(false));
   };
 
@@ -419,6 +472,12 @@ export class ClubScene extends Phaser.Scene {
       const raw = localStorage.getItem(LAYOUT_KEY);
       if (!raw) return;
       const saved = JSON.parse(raw) as SavedLayout;
+      if (Array.isArray(saved?.hiredStaff)) {
+        this.hiredStaffIds = saved.hiredStaff.filter((id) => typeof id === 'string');
+      }
+      if (typeof saved?.money === 'number' && Number.isFinite(saved.money)) {
+        this.money = Math.max(0, Math.floor(saved.money));
+      }
       if (!saved?.furniture?.length) return;
       for (const item of saved.furniture) {
         const def = this.scenario.furniture.find((f) => f.id === item.id);
@@ -466,6 +525,8 @@ export class ClubScene extends Phaser.Scene {
         tile: [...f.tile] as [number, number],
         facing: f.facing as IsoFacing | undefined,
       })),
+      hiredStaff: [...this.hiredStaffIds],
+      money: this.money,
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -1565,7 +1626,9 @@ export class ClubScene extends Phaser.Scene {
         this.releaseTile(patron.grid);
         this.bartender.state = 'idle';
         this.bartender.startBob();
+        this.persistLayout();
         this.game.events.emit('stats-updated', this.getHudState());
+        this.emitStaffRoster();
 
         this.time.delayedCall(600, () => this.sendPatronHome(patron));
       });
@@ -1591,31 +1654,221 @@ export class ClubScene extends Phaser.Scene {
     });
   }
 
-  orderRest = (): void => {
+
+  private loadStaffPool(): void {
+    const pool = this.cache.json.get('staff_pool') as StaffPoolFile | undefined;
+    this.staffPool = Array.isArray(pool?.candidates) ? pool!.candidates : [];
+  }
+
+  private candidateToBartenderData(c: StaffCandidate): BartenderData {
+    return {
+      id: c.id,
+      name: c.name,
+      energy: c.energy,
+      mood: c.mood,
+      skill: c.skill,
+      energyDrainPerServe: c.energyDrainPerServe,
+      energyRegenOnRest: c.energyRegenOnRest,
+      restDurationMs: c.restDurationMs,
+      serveDurationMs: c.serveDurationMs,
+      moveSpeed: c.moveSpeed,
+    };
+  }
+
+  /** Pick a free walkable tile near the bar/staff area for a newly hired NPC. */
+  private findStaffSpawnTile(): { col: number; row: number } {
+    const base = this.staffSpot ?? { col: this.barDef.tile[0], row: this.barDef.tile[1] };
+    const offsets: [number, number][] = [
+      [1, 1],
+      [-1, 1],
+      [1, 0],
+      [-1, 0],
+      [0, 2],
+      [2, 1],
+      [-2, 1],
+      [0, -1],
+    ];
+    for (const [dc, dr] of offsets) {
+      const col = base.col + dc;
+      const row = base.row + dr;
+      if (this.isTileFreeForStaff(col, row)) return { col, row };
+    }
+    return { col: base.col, row: Math.min(base.row + 1, this.scenario.map.rows - 2) };
+  }
+
+  private isTileFreeForStaff(col: number, row: number): boolean {
+    if (!this.pathfinder?.isWalkable(col, row)) return false;
+    if (this.bartender && this.bartender.grid.col === col && this.bartender.grid.row === row) return false;
+    if (this.extraStaff.some((s) => s.grid.col === col && s.grid.row === row)) return false;
+    if (this.staffSpot && this.staffSpot.col === col && this.staffSpot.row === row) return false;
+    return true;
+  }
+
+  private wireStaffClick(npc: Bartender): void {
+    npc.sprite.on('pointerdown', () => {
+      if (!this.buildMode) this.npcTapHandled = true;
+    });
+    npc.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (this.panDragging || this.furnDragging || this.skipNextTap) return;
+      if (p.getDistance() > TAP_THRESH) return;
+      if (this.buildMode) return;
+      p.event.stopPropagation();
+      this.npcTapHandled = true;
+      this.selectNpcStaff(npc.profile.id);
+    });
+  }
+
+  private spawnHiredExtraStaff(): void {
+    for (const id of this.hiredStaffIds) {
+      if (this.findStaffById(id)) continue;
+      const cand = this.staffPool.find((c) => c.id === id);
+      if (!cand) continue;
+      this.spawnExtraStaffFromCandidate(cand, false);
+    }
+  }
+
+  private spawnExtraStaffFromCandidate(cand: StaffCandidate, walkIn: boolean): Bartender {
+    const tile = this.findStaffSpawnTile();
+    const tex = this.textures.exists(cand.sprite) ? cand.sprite : 'bartender';
+    const npc = new Bartender(
+      this,
+      tex,
+      tile,
+      this.iso,
+      this.pathfinder,
+      this.candidateToBartenderData(cand)
+    );
+    this.wireStaffClick(npc);
+    this.extraStaff.push(npc);
+    if (walkIn) {
+      const near = this.findStaffSpawnTile();
+      npc.state = 'walking';
+      npc.walkTo(near, () => {
+        npc.state = 'idle';
+        npc.startBob();
+      });
+    }
+    return npc;
+  }
+
+  private onCmdHireStaff = (id: string): void => {
     if (this.buildMode) return;
-    if (!this.bartender || this.bartender.state === 'walking' || this.bartender.state === 'busy') {
+    if (this.hiredStaffIds.includes(id) || this.findStaffById(id)) {
+      this.emitStaffRoster();
       return;
     }
-    if (this.bartender.state === 'resting') return;
-    this.clearFurnitureSelection();
-    this.selectNpcStaff();
-    this.bartender.state = 'busy';
-    this.bartender.walkTo(this.sofaRest, () => {
-      this.bartender.state = 'resting';
-      this.bartender.stopBob();
-      const dur = this.bartender.profile.restDurationMs;
-      this.game.events.emit('bartender-resting', true);
+    const cand = this.staffPool.find((c) => c.id === id);
+    if (!cand) return;
+    if (this.money < cand.cost) {
+      this.game.events.emit('staff-hire-failed', { id, reason: 'money' });
+      this.emitStaffRoster();
+      return;
+    }
+    this.money -= cand.cost;
+    this.hiredStaffIds.push(id);
+    this.spawnExtraStaffFromCandidate(cand, true);
+    this.persistLayout();
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.emitStaffRoster();
+  };
+
+  private orderRestStaff = (id?: string): void => {
+    if (this.buildMode) return;
+    const targetId = id || this.selectedNpcId || this.bartender?.profile.id;
+    if (!targetId) return;
+    const npc = this.findStaffById(targetId);
+    if (!npc) return;
+    if (npc.state === 'walking' || npc.state === 'busy' || npc.state === 'resting') return;
+    this.selectNpcStaff(npc.profile.id);
+    npc.state = 'busy';
+    npc.walkTo(this.sofaRest, () => {
+      npc.state = 'resting';
+      npc.stopBob();
+      const dur = npc.profile.restDurationMs;
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.emitStaffRoster();
       this.time.delayedCall(dur, () => {
-        this.bartender.applyRest();
-        this.bartender.state = 'idle';
-        this.bartender.startBob();
-        this.bartender.walkTo(this.staffSpot, () => {
-          this.syncBartenderBarDepth();
+        npc.applyRest();
+        npc.state = 'idle';
+        npc.startBob();
+        const home =
+          npc === this.bartender
+            ? this.staffSpot
+            : this.findStaffSpawnTile();
+        npc.walkTo(home, () => {
+          if (npc === this.bartender) this.syncBartenderBarDepth();
           this.game.events.emit('stats-updated', this.getHudState());
-          this.game.events.emit('bartender-resting', false);
+          this.emitStaffRoster();
         });
       });
     });
+  };
+
+  emitStaffRoster = (): void => {
+    const lunaPortrait =
+      this.chars?.bartender?.portrait ||
+      (this.textures.exists('luna_portrait') ? 'luna_portrait' : 'bartender');
+    const current: StaffRosterEntry[] = [];
+    if (this.bartender) {
+      current.push({
+        id: this.bartender.profile.id,
+        name: this.bartender.displayName,
+        roleLabel: 'Barman',
+        portrait: lunaPortrait,
+        energy: Math.round(this.bartender.energy),
+        mood: Math.round(this.bartender.mood),
+        skill: Math.round(this.bartender.skill),
+        state: this.bartender.state,
+        hired: true,
+        starter: true,
+        canRest: !['walking', 'busy', 'resting'].includes(this.bartender.state),
+      });
+    }
+    for (const s of this.extraStaff) {
+      const cand = this.staffPool.find((c) => c.id === s.profile.id);
+      current.push({
+        id: s.profile.id,
+        name: s.displayName,
+        roleLabel: cand?.roleLabel ?? 'Personal',
+        portrait: cand?.portrait ?? s.sprite.texture.key,
+        energy: Math.round(s.energy),
+        mood: Math.round(s.mood),
+        skill: Math.round(s.skill),
+        state: s.state,
+        hired: true,
+        canRest: !['walking', 'busy', 'resting'].includes(s.state),
+      });
+    }
+    const hireable: StaffRosterEntry[] = this.staffPool
+      .filter((c) => !this.hiredStaffIds.includes(c.id) && !this.findStaffById(c.id))
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        roleLabel: c.roleLabel,
+        portrait: c.portrait,
+        energy: c.energy,
+        mood: c.mood,
+        skill: c.skill,
+        state: 'idle',
+        hired: false,
+        cost: c.cost,
+        blurb: c.blurb,
+        canHire: this.money >= c.cost,
+      }));
+    const payload: StaffRosterPayload = {
+      money: this.money,
+      current,
+      hireable,
+    };
+    this.game.events.emit('staff-roster', payload);
+  };
+
+  orderRest = (): void => {
+    const id =
+      this.selectedNpcId && this.findStaffById(this.selectedNpcId)
+        ? this.selectedNpcId
+        : this.bartender?.profile.id;
+    this.orderRestStaff(id);
   };
 
   closeNight = (): void => {
@@ -1640,11 +1893,13 @@ export class ClubScene extends Phaser.Scene {
     this.bartender.snapTo(this.staffSpot);
     this.syncBartenderBarDepth();
     this.bartender.startBob();
+    this.persistLayout();
     this.game.events.emit('night-summary', {
       ...this.getHudState(),
       nightEarned: this.nightEarned,
       servedCount: this.servedCount,
     });
+    this.emitStaffRoster();
   }
 
   getHudState() {
@@ -1697,6 +1952,10 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-open-night', this.openNight, this);
     this.game.events.off('cmd-close-night', this.closeNight, this);
     this.game.events.off('cmd-rest', this.orderRest, this);
+    this.game.events.off('cmd-rest-staff', this.orderRestStaff, this);
+    this.game.events.off('cmd-select-staff', this.onCmdSelectStaff, this);
+    this.game.events.off('cmd-hire-staff', this.onCmdHireStaff, this);
+    this.game.events.off('cmd-request-staff-roster', this.emitStaffRoster, this);
     this.game.events.off('cmd-set-build-mode', this.setBuildMode, this);
     this.game.events.off('cmd-deselect-npc', this.deselectNpc, this);
     this.game.events.off('cmd-deselect-bartender', this.deselectNpc, this);

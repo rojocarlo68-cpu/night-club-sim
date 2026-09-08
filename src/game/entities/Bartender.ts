@@ -58,6 +58,13 @@ export class Bartender extends Character {
       });
       this.ring.setPosition(0, -2);
       this.ring.setSize(18, 8);
+    } else if (texture === 'nova') {
+      // Hireable maid standing sprite — furniture-matched height
+      this.sprite.setOrigin(0.5, 0.92);
+      this.sprite.setDisplaySize(36, LUNA_DISPLAY_H);
+      this.sprite.y = -2;
+      this.ring.setPosition(0, -2);
+      this.ring.setSize(18, 8);
     }
   }
 

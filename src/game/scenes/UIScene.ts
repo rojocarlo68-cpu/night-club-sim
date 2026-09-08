@@ -1,5 +1,6 @@
 import Phaser from 'phaser';
 import { NpcInfo } from '../types/Npc';
+import { StaffRosterEntry, StaffRosterPayload } from '../types/Staff';
 
 interface HudBartender {
   name: string;
@@ -54,6 +55,12 @@ export class UIScene extends Phaser.Scene {
   private buildMode = false;
   private selectedNpc: NpcInfo | null = null;
 
+  private staffBtn!: Phaser.GameObjects.Container;
+  private staffPanel!: Phaser.GameObjects.Container;
+  private staffPanelVisible = false;
+  private staffRoster: StaffRosterPayload | null = null;
+  private staffRows: Phaser.GameObjects.GameObject[] = [];
+
   constructor() {
     super({ key: 'UIScene', active: false });
   }
@@ -99,6 +106,10 @@ export class UIScene extends Phaser.Scene {
       this.game.events.emit('cmd-set-build-mode', false);
     });
     this.doneBuildBtn.setVisible(false);
+
+    this.staffBtn = this.makeButton(136, cam.height - 48, 100, 36, 'Staff', () => {
+      this.toggleStaffPanel();
+    });
 
     // Side panel (unified NPC)
     this.panel = this.add.container(cam.width - 20, 70).setScrollFactor(0).setVisible(false);
@@ -148,7 +159,8 @@ export class UIScene extends Phaser.Scene {
     const kb = this.input.keyboard;
     if (kb) {
       kb.on('keydown-ESC', () => {
-        if (this.panelVisible) this.hidePanel();
+        if (this.staffPanelVisible) this.hideStaffPanel();
+        else if (this.panelVisible) this.hidePanel();
         else if (this.buildMode) this.game.events.emit('cmd-set-build-mode', false);
       });
     }
@@ -182,6 +194,8 @@ export class UIScene extends Phaser.Scene {
     });
     this.summary.add([sumBg, sumTitle, sumBody, again]);
 
+    this.createStaffPanel();
+
     this.game.events.on('club-ready', this.onStats, this);
     this.game.events.on('stats-updated', this.onStats, this);
     this.game.events.on('night-started', this.onNightStarted, this);
@@ -191,9 +205,12 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('select-bartender', this.onSelectBartenderLegacy, this);
     this.game.events.on('npc-deselected', this.onNpcDeselected, this);
     this.game.events.on('build-mode-changed', this.onBuildModeChanged, this);
+    this.game.events.on('staff-roster', this.onStaffRoster, this);
+    this.game.events.on('staff-hire-failed', this.onHireFailed, this);
 
     this.scale.on('resize', this.onResize, this);
     this.refreshBuildButtons();
+    this.game.events.emit('cmd-request-staff-roster');
   }
 
   private makeButton(
@@ -251,8 +268,13 @@ export class UIScene extends Phaser.Scene {
     const w = this.cameras.main.width;
     const h = this.cameras.main.height;
     if (p.y < 56) return true;
-    if (p.x < 140 && p.y > h - 60) return true;
+    if (p.x < 250 && p.y > h - 60) return true;
     if (this.panelVisible && p.x > w - 280 && p.y > 60 && p.y < 400) return true;
+    if (this.staffPanelVisible) {
+      const cx = w / 2;
+      const cy = h / 2;
+      if (Math.abs(p.x - cx) < 210 && Math.abs(p.y - cy) < 250) return true;
+    }
     if (this.summary.visible) {
       const cx = w / 2;
       const cy = h / 2;
@@ -343,7 +365,10 @@ export class UIScene extends Phaser.Scene {
 
   private onBuildModeChanged = (on: boolean): void => {
     this.buildMode = on;
-    if (on) this.hidePanel();
+    if (on) {
+      this.hidePanel();
+      this.hideStaffPanel();
+    }
     this.refreshBuildButtons();
   };
 
@@ -351,6 +376,7 @@ export class UIScene extends Phaser.Scene {
     const canBuild = this.phase !== 'open';
     this.buildBtn.setVisible(canBuild && !this.buildMode);
     this.doneBuildBtn.setVisible(canBuild && this.buildMode);
+    this.staffBtn.setVisible(!this.buildMode);
     this.openBtn.setAlpha(this.buildMode ? 0.35 : 1);
     if (this.buildMode) {
       this.openBtn.setVisible(this.phase !== 'open');
@@ -428,8 +454,207 @@ export class UIScene extends Phaser.Scene {
     this.closeBtn.setX(w - 150);
     this.buildBtn.setPosition(16, h - 48);
     this.doneBuildBtn.setPosition(16, h - 48);
+    this.staffBtn.setPosition(136, h - 48);
     this.panel.setX(w - 20);
     this.timerText.setX(w / 2);
     this.summary.setPosition(w / 2, h / 2);
+    this.staffPanel.setPosition(w / 2, h / 2);
   };
+
+  private createStaffPanel(): void {
+    const cam = this.cameras.main;
+    this.staffPanel = this.add.container(cam.width / 2, cam.height / 2).setScrollFactor(0).setVisible(false).setDepth(9600);
+    const bg = this.add.rectangle(0, 0, 400, 460, 0x140a22, 0.96);
+    bg.setStrokeStyle(2, 0xff3ca0);
+    bg.setInteractive();
+    const title = this.add
+      .text(0, -210, 'Personal', {
+        fontSize: '22px',
+        color: '#ff9ad5',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5)
+      .setName('staffTitle');
+    const close = this.makeLocalButton(160, -220, 36, 32, '✕', () => this.hideStaffPanel());
+    this.staffPanel.add([bg, title, close]);
+  }
+
+  private toggleStaffPanel(): void {
+    if (this.staffPanelVisible) this.hideStaffPanel();
+    else this.showStaffPanel();
+  }
+
+  private showStaffPanel(): void {
+    this.hidePanel();
+    this.staffPanelVisible = true;
+    this.staffPanel.setVisible(true);
+    this.game.events.emit('cmd-request-staff-roster');
+    this.rebuildStaffPanel();
+  }
+
+  private hideStaffPanel(): void {
+    if (!this.staffPanelVisible) return;
+    this.staffPanelVisible = false;
+    this.staffPanel.setVisible(false);
+  }
+
+  private onStaffRoster = (payload: StaffRosterPayload): void => {
+    this.staffRoster = payload;
+    if (this.staffPanelVisible) this.rebuildStaffPanel();
+  };
+
+  private onHireFailed = (info: { id: string; reason: string }): void => {
+    if (info.reason === 'money') {
+      // brief flash via title color
+      const title = this.staffPanel.getByName('staffTitle') as Phaser.GameObjects.Text | null;
+      if (title) {
+        title.setText('Personal — sin dinero');
+        title.setColor('#ff6688');
+        this.time.delayedCall(1600, () => {
+          title.setText('Personal');
+          title.setColor('#ff9ad5');
+        });
+      }
+    }
+  };
+
+  private clearStaffRows(): void {
+    for (const g of this.staffRows) g.destroy();
+    this.staffRows = [];
+  }
+
+  private rebuildStaffPanel(): void {
+    if (!this.staffPanel) return;
+    this.clearStaffRows();
+    const roster = this.staffRoster;
+    if (!roster) {
+      const wait = this.add
+        .text(0, 0, 'Cargando…', { fontSize: '14px', color: '#c8a0e0' })
+        .setOrigin(0.5);
+      this.staffPanel.add(wait);
+      this.staffRows.push(wait);
+      return;
+    }
+
+    let y = -175;
+    const section = (label: string) => {
+      const t = this.add
+        .text(-180, y, label, { fontSize: '14px', color: '#2ad6ff', fontStyle: 'bold' })
+        .setOrigin(0, 0);
+      this.staffPanel.add(t);
+      this.staffRows.push(t);
+      y += 22;
+    };
+
+    section('Plantilla actual');
+    for (const e of roster.current) {
+      y = this.addStaffCurrentRow(e, y);
+      y += 8;
+    }
+
+    y += 6;
+    section('Contratar');
+    if (!roster.hireable.length) {
+      const empty = this.add
+        .text(-180, y, 'No hay candidatos disponibles.', {
+          fontSize: '13px',
+          color: '#a080c0',
+        })
+        .setOrigin(0, 0);
+      this.staffPanel.add(empty);
+      this.staffRows.push(empty);
+    } else {
+      for (const e of roster.hireable) {
+        y = this.addStaffHireRow(e, y, roster.money);
+        y += 8;
+      }
+    }
+  }
+
+  private addStaffCurrentRow(e: StaffRosterEntry, y: number): number {
+    const rowH = 86;
+    const card = this.add.rectangle(0, y + rowH / 2, 360, rowH, 0x1a0e28, 0.95).setOrigin(0.5);
+    card.setStrokeStyle(1, 0x6a3a78);
+    this.staffPanel.add(card);
+    this.staffRows.push(card);
+
+    const px = -160;
+    if (this.textures.exists(e.portrait)) {
+      const img = this.add.image(px, y + rowH / 2, e.portrait).setDisplaySize(56, 56);
+      this.staffPanel.add(img);
+      this.staffRows.push(img);
+    } else {
+      const ph = this.add.rectangle(px, y + rowH / 2, 56, 56, 0x2a1838).setOrigin(0.5);
+      this.staffPanel.add(ph);
+      this.staffRows.push(ph);
+    }
+
+    const estado = STATE_ES[e.state] || e.state;
+    const info = this.add
+      .text(
+        -120,
+        y + 8,
+        `${e.name}  ·  ${e.roleLabel}\nEnergía ${e.energy}  ·  Ánimo ${e.mood}  ·  Hab. ${e.skill}\nEstado: ${estado}`,
+        { fontSize: '12px', color: '#e8d0ff', lineSpacing: 4 }
+      )
+      .setOrigin(0, 0);
+    this.staffPanel.add(info);
+    this.staffRows.push(info);
+
+    const sel = this.makeLocalButton(70, y + 48, 100, 28, 'Seleccionar', () => {
+      this.game.events.emit('cmd-select-staff', e.id);
+      this.hideStaffPanel();
+    });
+    // shrink font via children
+    this.staffPanel.add(sel);
+    this.staffRows.push(sel);
+
+    if (e.canRest) {
+      const rest = this.makeLocalButton(178, y + 48, 90, 28, 'Descansar', () => {
+        this.game.events.emit('cmd-rest-staff', e.id);
+        this.game.events.emit('cmd-request-staff-roster');
+      });
+      this.staffPanel.add(rest);
+      this.staffRows.push(rest);
+    }
+
+    return y + rowH;
+  }
+
+  private addStaffHireRow(e: StaffRosterEntry, y: number, money: number): number {
+    const rowH = 92;
+    const card = this.add.rectangle(0, y + rowH / 2, 360, rowH, 0x1a0e28, 0.95).setOrigin(0.5);
+    card.setStrokeStyle(1, 0x3a6a88);
+    this.staffPanel.add(card);
+    this.staffRows.push(card);
+
+    const px = -160;
+    if (this.textures.exists(e.portrait)) {
+      const img = this.add.image(px, y + rowH / 2, e.portrait).setDisplaySize(56, 56);
+      this.staffPanel.add(img);
+      this.staffRows.push(img);
+    }
+
+    const cost = e.cost ?? 0;
+    const can = money >= cost;
+    const info = this.add
+      .text(
+        -120,
+        y + 8,
+        `${e.name}  ·  ${e.roleLabel}\nCosto: $${cost}  ·  Hab. ${e.skill}\n${e.blurb ?? ''}`,
+        { fontSize: '12px', color: '#e8d0ff', lineSpacing: 4 }
+      )
+      .setOrigin(0, 0);
+    this.staffPanel.add(info);
+    this.staffRows.push(info);
+
+    const hire = this.makeLocalButton(120, y + 52, 110, 28, 'Contratar', () => {
+      this.game.events.emit('cmd-hire-staff', e.id);
+    });
+    hire.setAlpha(can ? 1 : 0.4);
+    this.staffPanel.add(hire);
+    this.staffRows.push(hire);
+
+    return y + rowH;
+  }
 }

@@ -107,9 +107,13 @@ export class BootScene extends Phaser.Scene {
     this.load.image('patron_a', 'assets/characters/patron_a.png');
     this.load.image('patron_b', 'assets/characters/patron_b.png');
     this.load.image('patron_c', 'assets/characters/patron_c.png');
+    this.load.image('nova', 'assets/characters/nova.png');
+    this.load.image('nova_portrait', 'assets/characters/nova_portrait.png');
+    this.load.image('luna_portrait', 'assets/characters/luna_portrait.png');
 
     this.load.json('characters', 'data/characters.json');
     this.load.json('scenario', 'data/scenario.json');
+    this.load.json('staff_pool', 'data/staff_pool.json');
 
     // Silence unused locals (bar kept for visual track)
     void bar;

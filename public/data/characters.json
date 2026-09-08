@@ -11,7 +11,8 @@
     "energyRegenOnRest": 18,
     "restDurationMs": 3500,
     "serveDurationMs": 1800,
-    "moveSpeed": 90
+    "moveSpeed": 90,
+    "portrait": "luna_portrait"
   },
   "patrons": [
     {
@@ -45,6 +46,25 @@
       "preferredDrink": "cerveza",
       "tipChance": 0.3,
       "patience": 13
+    }
+  ],
+  "staff": [
+    {
+      "id": "bartender_luna",
+      "name": "Luna",
+      "roleLabel": "Barman",
+      "role": "bartender",
+      "sprite": "luna_idle",
+      "portrait": "luna_portrait",
+      "energy": 100,
+      "mood": 75,
+      "skill": 55,
+      "energyDrainPerServe": 6,
+      "energyRegenOnRest": 18,
+      "restDurationMs": 3500,
+      "serveDurationMs": 1800,
+      "moveSpeed": 90,
+      "starter": true
     }
   ]
 }
