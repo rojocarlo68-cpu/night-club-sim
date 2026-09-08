@@ -115,6 +115,10 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 146,
       frameHeight: 784,
     });
+    this.load.spritesheet('nova_serve_beer', 'assets/characters/nova_serve_beer_sheet.png', {
+      frameWidth: 146,
+      frameHeight: 784,
+    });
     this.load.image('nova', 'assets/characters/nova.png');
     this.load.image('nova_portrait', 'assets/characters/nova_portrait.png');
     this.load.image('luna_portrait', 'assets/characters/luna_portrait.png');
@@ -154,6 +158,15 @@ export class BootScene extends Phaser.Scene {
         frames: this.anims.generateFrameNumbers('nova_idle', { start: 0, end: 7 }),
         frameRate: 9,
         repeat: -1,
+      });
+    }
+    // 8 frames over 2.0s — match Luna cerveza pour
+    if (!this.anims.exists('nova-serve-beer') && this.textures.exists('nova_serve_beer')) {
+      this.anims.create({
+        key: 'nova-serve-beer',
+        frames: this.anims.generateFrameNumbers('nova_serve_beer', { start: 0, end: 7 }),
+        frameRate: 4,
+        repeat: 0,
       });
     }
 

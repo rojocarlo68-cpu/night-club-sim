@@ -2301,7 +2301,7 @@ export class ClubScene extends Phaser.Scene {
       this.game.events.emit('stats-updated', this.getHudState());
       this.emitStaffRoster();
 
-      // Cerveza: fixed 2000ms + Luna pour anim. Others: skill-scaled serveTime.
+      // Cerveza: fixed 2000ms + Luna/Nova pour anim. Others: skill-scaled serveTime.
       const skillBonus = staff.skill / 200;
       const prepareMs =
         drink.id === 'cerveza'
@@ -2313,7 +2313,7 @@ export class ClubScene extends Phaser.Scene {
         playedBeer = staff.playServeBeerAnim();
       }
       if (!playedBeer) {
-        // Nova (or missing sheet): keep idle/bob during prepare
+        // Missing pour sheet: keep idle/bob during prepare
         staff.startBob();
       }
 

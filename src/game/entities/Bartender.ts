@@ -211,25 +211,40 @@ export class Bartender extends Character {
   }
 
   /**
-   * Play Luna beer-pour sheet (~2s). Returns false if sheet/anim missing
-   * (Nova falls back to idle bob).
+   * Play beer-pour sheet (~2s) for Luna or Nova. Returns false if sheet/anim
+   * missing (falls back to idle bob).
    */
   playServeBeerAnim(): boolean {
-    // Nova uses idle/bob until Carlo sends her pour sheet
+    const tex = this.sprite.texture.key;
     const isLuna =
-      this.profile.id === 'bartender_luna' ||
-      this.sprite.texture.key.startsWith('luna');
-    if (!isLuna) return false;
-    const key = 'luna-serve-beer';
-    if (!this.scene.anims.exists(key) || !this.scene.textures.exists('luna_serve_beer')) {
+      this.profile.id === 'bartender_luna' || tex.startsWith('luna');
+    const isNova =
+      this.profile.id === 'staff_nova' || tex.startsWith('nova');
+
+    let key: string | null = null;
+    let originY = LUNA_FEET_ORIGIN_Y;
+    if (isLuna) {
+      key = 'luna-serve-beer';
+      if (!this.scene.anims.exists(key) || !this.scene.textures.exists('luna_serve_beer')) {
+        return false;
+      }
+      originY = LUNA_FEET_ORIGIN_Y;
+    } else if (isNova) {
+      key = 'nova-serve-beer';
+      if (!this.scene.anims.exists(key) || !this.scene.textures.exists('nova_serve_beer')) {
+        return false;
+      }
+      // Same idle-tuned feet origin (~610/784); displayH 88
+      originY = NOVA_FEET_ORIGIN_Y;
+    } else {
       return false;
     }
+
     this.bobTween?.stop();
     this.bobTween = undefined;
     this.sprite.play(key, true);
     this.reapplyDisplaySize();
-    // Keep Luna feet origin (same frame layout as idle)
-    this.sprite.setOrigin(0.5, LUNA_FEET_ORIGIN_Y);
+    this.sprite.setOrigin(0.5, originY);
     return true;
   }
 
