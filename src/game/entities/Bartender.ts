@@ -86,17 +86,20 @@ export class Bartender extends Character {
   }
 
   /**
-   * Tight body hitbox in sprite-local space (origin-aware).
-   * Fixes Luna not receiving taps when standing near the bar.
+   * Phaser hit tests use unscaled frame space with (0,0)=top-left
+   * (after adding displayOrigin). Do NOT use displayWidth/origin offsets —
+   * that misaligns the rect and makes staff untappable.
+   * Expand in source pixels so the on-screen zone is fat-finger friendly.
    */
   refreshHitArea(): void {
-    const w = this.sprite.displayWidth;
-    const h = this.sprite.displayHeight;
-    const ox = this.sprite.originX;
-    const oy = this.sprite.originY;
-    // Slightly generous horizontal padding for fat-finger taps
-    const padX = 6;
-    const hit = new Phaser.Geom.Rectangle(-w * ox - padX, -h * oy, w + padX * 2, h);
+    const fw = this.sprite.width;
+    const fh = this.sprite.height;
+    const sx = Math.abs(this.sprite.scaleX) || 1;
+    const sy = Math.abs(this.sprite.scaleY) || 1;
+    // Target ~64×120 screen px (generous mobile hit)
+    const padX = Math.max(0, (64 / sx - fw) / 2);
+    const padY = Math.max(0, (120 / sy - fh) / 2);
+    const hit = new Phaser.Geom.Rectangle(-padX, -padY, fw + padX * 2, fh + padY * 2);
     this.sprite.setInteractive({
       hitArea: hit,
       hitAreaCallback: Phaser.Geom.Rectangle.Contains,

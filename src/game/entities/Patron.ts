@@ -92,14 +92,15 @@ export class Patron extends Character {
     this.add(this.label);
   }
 
-  /** Match Luna/Nova: tight body hitbox in sprite-local space. */
+  /** Same Phaser frame-space hit area as Luna/Nova (generous mobile). */
   refreshHitArea(): void {
-    const w = this.sprite.displayWidth;
-    const h = this.sprite.displayHeight;
-    const ox = this.sprite.originX;
-    const oy = this.sprite.originY;
-    const padX = 6;
-    const hit = new Phaser.Geom.Rectangle(-w * ox - padX, -h * oy, w + padX * 2, h);
+    const fw = this.sprite.width;
+    const fh = this.sprite.height;
+    const sx = Math.abs(this.sprite.scaleX) || 1;
+    const sy = Math.abs(this.sprite.scaleY) || 1;
+    const padX = Math.max(0, (64 / sx - fw) / 2);
+    const padY = Math.max(0, (120 / sy - fh) / 2);
+    const hit = new Phaser.Geom.Rectangle(-padX, -padY, fw + padX * 2, fh + padY * 2);
     this.sprite.setInteractive({
       hitArea: hit,
       hitAreaCallback: Phaser.Geom.Rectangle.Contains,

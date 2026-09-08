@@ -14,4 +14,6 @@ export interface NpcInfo {
   preferredDrink?: string;
   /** Internal state key (idle, walking, busy, resting, waiting, drinking, leaving, relaxing). */
   state: string;
+  /** Texture key for small panel portrait (staff / patrons). */
+  portrait?: string;
 }

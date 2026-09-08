@@ -16,6 +16,8 @@ export interface StaffCandidate {
   serveDurationMs: number;
   moveSpeed: number;
   blurb?: string;
+  /** Free staff that auto-spawns (e.g. Nova). */
+  starter?: boolean;
 }
 
 export interface StaffPoolFile {

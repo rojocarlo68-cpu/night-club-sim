@@ -279,11 +279,10 @@ export class ClubScene extends Phaser.Scene {
     );
     this.syncBartenderBarDepth();
     this.wireStaffClick(this.bartender);
-    // Ensure Luna receives taps above furniture / world (same path as Nova).
-    this.bartender.sprite.setDepth(1);
     this.bartender.refreshHitArea();
 
     this.loadStaffPool();
+    this.ensureFreeStarterStaff();
     this.spawnHiredExtraStaff();
 
     this.setupPointerPan();
@@ -346,6 +345,7 @@ export class ClubScene extends Phaser.Scene {
       preferredDrink: p.preferredDrinkName,
       mood: p.nightMood,
       state: p.getActionKey(),
+      portrait: this.textures.exists('patron_portrait') ? 'patron_portrait' : undefined,
     };
   }
 
@@ -364,6 +364,14 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private staffNpcInfo(b: Bartender): NpcInfo {
+    let portrait: string | undefined;
+    if (b === this.bartender) {
+      portrait =
+        this.chars?.bartender?.portrait ||
+        (this.textures.exists('luna_portrait') ? 'luna_portrait' : undefined);
+    } else {
+      portrait = this.staffPool.find((c) => c.id === b.profile.id)?.portrait;
+    }
     return {
       id: b.profile.id,
       name: b.displayName,
@@ -372,6 +380,7 @@ export class ClubScene extends Phaser.Scene {
       mood: Math.round(b.mood),
       skill: Math.round(b.skill),
       state: b.state,
+      portrait,
     };
   }
 
@@ -1524,6 +1533,15 @@ export class ClubScene extends Phaser.Scene {
     this.staffPool = Array.isArray(pool?.candidates) ? pool!.candidates : [];
   }
 
+  /** Nova (and any cost-0 / starter candidates) always spawn as free staff. */
+  private ensureFreeStarterStaff(): void {
+    for (const c of this.staffPool) {
+      if (!(c.starter || c.cost <= 0)) continue;
+      if (this.hiredStaffIds.includes(c.id) || this.findStaffById(c.id)) continue;
+      this.hiredStaffIds.push(c.id);
+    }
+  }
+
   private candidateToBartenderData(c: StaffCandidate): BartenderData {
     return {
       id: c.id,
@@ -1597,15 +1615,19 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private wireStaffClick(npc: Bartender): void {
-    npc.sprite.on('pointerdown', () => {
-      if (!this.buildMode) this.npcTapHandled = true;
+    npc.refreshHitArea();
+    npc.sprite.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (this.buildMode) return;
+      this.npcTapHandled = true;
+      p.event?.stopPropagation?.();
     });
     npc.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
       if (this.panDragging || this.furnDragging || this.skipNextTap) return;
       if (p.getDistance() > TAP_THRESH) return;
       if (this.buildMode) return;
-      p.event.stopPropagation();
+      p.event?.stopPropagation?.();
       this.npcTapHandled = true;
+      // Keep selection; do not deselect before a subsequent floor walk.
       this.selectNpcStaff(npc.profile.id);
     });
   }
@@ -1726,6 +1748,7 @@ export class ClubScene extends Phaser.Scene {
         skill: Math.round(s.skill),
         state: s.state,
         hired: true,
+        starter: !!(cand?.starter || (cand && cand.cost <= 0)),
         canRest: !['walking', 'busy', 'resting'].includes(s.state),
       });
     }

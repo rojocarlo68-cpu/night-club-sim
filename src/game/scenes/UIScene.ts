@@ -51,6 +51,7 @@ export class UIScene extends Phaser.Scene {
   private panelName!: Phaser.GameObjects.Text;
   private panelRole!: Phaser.GameObjects.Text;
   private panelStats!: Phaser.GameObjects.Text;
+  private panelPortrait!: Phaser.GameObjects.Image;
   private phase: string = 'prep';
   private buildMode = false;
   private selectedNpc: NpcInfo | null = null;
@@ -127,6 +128,11 @@ export class UIScene extends Phaser.Scene {
       .text(-250, 58, '', { fontSize: '14px', color: '#e8d0ff', lineSpacing: 6 })
       .setOrigin(0, 0);
 
+    this.panelPortrait = this.add
+      .image(-60, 78, 'luna_portrait')
+      .setDisplaySize(56, 56)
+      .setVisible(false);
+
     this.energyLabel = this.add.text(-250, 130, 'Energía', { fontSize: '12px', color: '#a080c0' });
     this.moodLabel = this.add.text(-250, 170, 'Ánimo', { fontSize: '12px', color: '#a080c0' });
     const eBg = this.add.rectangle(-250, 150, 220, 12, 0x2a1838).setOrigin(0, 0.5);
@@ -146,6 +152,7 @@ export class UIScene extends Phaser.Scene {
       this.panelName,
       this.panelRole,
       this.panelStats,
+      this.panelPortrait,
       this.energyLabel,
       this.moodLabel,
       eBg,
@@ -323,7 +330,14 @@ export class UIScene extends Phaser.Scene {
   private refreshPanel(npc: NpcInfo): void {
     this.panelName.setText(npc.name);
     const isStaff = npc.role === 'staff';
-    this.panelRole.setText(`Rol: ${isStaff ? 'Barman' : 'Cliente'}`);
+    this.panelRole.setText(`Rol: ${isStaff ? 'Camarera' : 'Cliente'}`);
+    if (npc.portrait && this.textures.exists(npc.portrait)) {
+      this.panelPortrait.setTexture(npc.portrait);
+      this.panelPortrait.setDisplaySize(56, 56);
+      this.panelPortrait.setVisible(true);
+    } else {
+      this.panelPortrait.setVisible(false);
+    }
 
     const estado = STATE_ES[npc.state] || npc.state;
     if (isStaff) {

@@ -5,7 +5,7 @@
       "name": "Nova",
       "roleLabel": "Camarera",
       "role": "waitress",
-      "cost": 80,
+      "cost": 0,
       "sprite": "nova_idle",
       "portrait": "nova_portrait",
       "energy": 100,
@@ -16,7 +16,8 @@
       "restDurationMs": 3500,
       "serveDurationMs": 1800,
       "moveSpeed": 88,
-      "blurb": "Maid de pelo negro/azul. Lista para la barra."
+      "blurb": "Maid de pelo negro/azul. Camarera gratis junto a Luna.",
+      "starter": true
     }
   ]
 }
