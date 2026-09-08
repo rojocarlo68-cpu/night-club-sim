@@ -30,6 +30,9 @@ const STATE_ES: Record<string, string> = {
   drinking: 'Bebiendo',
   leaving: 'Saliendo',
   relaxing: 'Relajándose',
+  serving: 'Atendiendo',
+  cleaning: 'Limpiando',
+  wandering: 'Vagando',
 };
 
 export class UIScene extends Phaser.Scene {

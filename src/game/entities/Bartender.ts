@@ -28,9 +28,16 @@ export const NOVA_IDLE_FRAME_W = 146;
 export const NOVA_IDLE_FRAME_H = 784;
 export const NOVA_FEET_ORIGIN_Y = 610 / 784;
 
+export type StaffAiJob = 'none' | 'serve' | 'clean' | 'rest' | 'wander' | 'player';
+
 export class Bartender extends Character {
   profile: BartenderData;
   selected = false;
+  /** Player tap-move / bar menu / Descansar — AI pauses until cleared. */
+  playerCommanded = false;
+  aiJob: StaffAiJob = 'none';
+  /** Next time (scene.time.now) this staff may pick a new AI job. */
+  aiNextThinkAt = 0;
   private ring?: Phaser.GameObjects.Ellipse;
 
   constructor(
@@ -113,7 +120,55 @@ export class Bartender extends Character {
   }
 
   canServe(): boolean {
-    return this.state === 'idle' && this.profile.energy >= this.profile.energyDrainPerServe;
+    return (
+      !this.playerCommanded &&
+      this.state === 'idle' &&
+      this.aiJob === 'none' &&
+      this.profile.energy >= this.profile.energyDrainPerServe
+    );
+  }
+
+  /** True when AI may assign a new autonomous job. */
+  isAiAvailable(): boolean {
+    return (
+      !this.playerCommanded &&
+      this.aiJob === 'none' &&
+      (this.state === 'idle' || this.state === 'walking')
+    );
+  }
+
+  beginPlayerCommand(job: StaffAiJob = 'player'): void {
+    this.playerCommanded = true;
+    this.aiJob = job;
+  }
+
+  clearPlayerCommand(): void {
+    this.playerCommanded = false;
+    if (this.aiJob === 'player') this.aiJob = 'none';
+  }
+
+  clearAiJob(): void {
+    this.aiJob = 'none';
+    this.playerCommanded = false;
+  }
+
+  /** Panel / roster state key (Spanish labels live in UIScene). */
+  getAiStateKey(): string {
+    if (this.playerCommanded && this.state === 'walking') return 'walking';
+    switch (this.aiJob) {
+      case 'serve':
+        return 'serving';
+      case 'clean':
+        return 'cleaning';
+      case 'rest':
+        return this.state === 'resting' ? 'resting' : 'walking';
+      case 'wander':
+        return 'wandering';
+      case 'player':
+        return this.state === 'walking' ? 'walking' : this.state;
+      default:
+        return this.state;
+    }
   }
 
   applyServeDrain(): void {
