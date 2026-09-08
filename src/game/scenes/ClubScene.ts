@@ -88,8 +88,8 @@ const WHEEL_ZOOM_STEP = 0.08;
 const BAR_FRONT_KEEP_FRAC: Record<IsoFacing, number> = {
   // Front: thin counter lip only — peek sheet transparent legs do the occlusion;
   // aggressive keepFrac buried Luna's head.
-  se: 0.22,
-  sw: 0.22,
+  se: 0.36,
+  sw: 0.36,
   ne: 1.0,
   nw: 1.0,
 };
@@ -102,7 +102,7 @@ const BAR_FRONT_DEPTH_ABOVE = 20;
 /** Luna sprite.y when not tucked behind a front counter. */
 const LUNA_SPRITE_Y_DEFAULT = 6;
 /** Raise Luna at front staffSpot so waist clears the counter top. */
-const LUNA_SPRITE_Y_AT_FRONT_BAR = -2;
+const LUNA_SPRITE_Y_AT_FRONT_BAR = -26;
 
 export type NightPhase = 'prep' | 'open' | 'summary';
 
@@ -521,10 +521,10 @@ export class ClubScene extends Phaser.Scene {
     if (lunaKey === 'luna_idle' || lunaKey === 'luna_idle_peek') {
       spr.y = frontAtBar ? LUNA_SPRITE_Y_AT_FRONT_BAR : LUNA_SPRITE_Y_DEFAULT;
     }
-    // SE/SW: hide barFront — peek transparency + full bar behind are enough;
-    // aggressive overlay buried her head. NE/NW keep overlay (Luna already hidden).
+    // Front: thin barFront lip above Luna so waist tucks under counter rim.
+    // Back: full overlay (Luna already hidden).
     if (this.barFrontImage) {
-      this.barFrontImage.setVisible(!BAR_FRONT_FACINGS.has(facing));
+      this.barFrontImage.setVisible(true);
     }
   }
 
@@ -1002,7 +1002,7 @@ export class ClubScene extends Phaser.Scene {
   private ensureBarFrontTextures(): void {
     for (const facing of FACINGS) {
       const srcKey = `furn_bar_${facing}`;
-      const frontKey = `furn_bar_front_v2_${facing}`;
+      const frontKey = `furn_bar_front_v3_${facing}`;
       if (this.textures.exists(frontKey)) continue;
       this.requireTexture(srcKey);
       const srcImg = this.textures.get(srcKey).getSourceImage() as
@@ -1042,7 +1042,7 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private barFrontTextureKey(facing: IsoFacing): string {
-    return `furn_bar_front_v2_${facing}`;
+    return `furn_bar_front_v3_${facing}`;
   }
 
   private placeFurniture(): void {
