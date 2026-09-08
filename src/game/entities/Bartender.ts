@@ -43,7 +43,6 @@ export class Bartender extends Character {
   ) {
     super(scene, texture, grid, iso, pathfinder, data.moveSpeed);
     this.profile = { ...data };
-    this.sprite.setInteractive({ useHandCursor: true });
     this.ring = scene.add.ellipse(0, -4, 36, 14, 0xff3ca0, 0.0);
     this.add(this.ring);
     this.ring.setDepth(-1);
@@ -82,6 +81,28 @@ export class Bartender extends Character {
       this.ring.setPosition(0, -2);
       this.ring.setSize(18, 8);
     }
+    // Hit area must match display size (sheet frames are ~146×784 — raw hitbox
+    // was huge / misaligned). Call after setupSheetIdle / setDisplaySize.
+    this.refreshHitArea();
+  }
+
+  /**
+   * Tight body hitbox in sprite-local space (origin-aware).
+   * Fixes Luna not receiving taps when standing near the bar.
+   */
+  refreshHitArea(): void {
+    const w = this.sprite.displayWidth;
+    const h = this.sprite.displayHeight;
+    const ox = this.sprite.originX;
+    const oy = this.sprite.originY;
+    // Slightly generous horizontal padding for fat-finger taps
+    const padX = 6;
+    const hit = new Phaser.Geom.Rectangle(-w * ox - padX, -h * oy, w + padX * 2, h);
+    this.sprite.setInteractive({
+      hitArea: hit,
+      hitAreaCallback: Phaser.Geom.Rectangle.Contains,
+      useHandCursor: true,
+    });
   }
 
   setSelected(v: boolean): void {

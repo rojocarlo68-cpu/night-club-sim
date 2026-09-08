@@ -116,8 +116,13 @@ export class ClubScene extends Phaser.Scene {
   buildMode = false;
   /** Currently selected NPC id (bartender profile id or patron runtime id). */
   private selectedNpcId: string | null = null;
-  /** Set by NPC sprite handlers so empty-world tap can deselect. */
+  /** Set by NPC sprite handlers so empty-world tap can deselect / move. */
   private npcTapHandled = false;
+  /** Floating bar action menu (Pedir bebidas / Limpiar barra). */
+  private barMenu: Phaser.GameObjects.Container | null = null;
+  private barMenuVisible = false;
+  private barActionBusy = false;
+  private statusFloat?: Phaser.GameObjects.Text;
 
   private spawnLeft = 0;
   private queueTiles: Set<string> = new Set();
@@ -289,6 +294,8 @@ export class ClubScene extends Phaser.Scene {
     this.setupPointerPan();
     this.setupZoom();
     this.input.mouse?.disableContextMenu();
+    this.buildBarMenu();
+    this.syncFurnitureInteractive();
 
     this.buildHint = this.add
       .text(this.cameras.main.width / 2, this.cameras.main.height - 28, '', {
@@ -376,6 +383,7 @@ export class ClubScene extends Phaser.Scene {
   private selectNpcStaff(id?: string): void {
     const target = id ? this.findStaffById(id) : this.bartender;
     if (!target) return;
+    this.hideBarMenu();
     this.clearFurnitureSelection();
     this.patrons.forEach((p) => p.setSelected(false));
     this.bartender.setSelected(target === this.bartender);
@@ -406,6 +414,7 @@ export class ClubScene extends Phaser.Scene {
     if (this.bartender) this.bartender.setSelected(false);
     this.extraStaff.forEach((s) => s.setSelected(false));
     this.patrons.forEach((p) => p.setSelected(false));
+    this.hideBarMenu();
   };
 
   private wirePatronClick(patron: Patron): void {
@@ -536,6 +545,9 @@ export class ClubScene extends Phaser.Scene {
     this.pathfinder = new Pathfinder(cols, rows, blocked);
     if (this.bartender) {
       this.bartender.setPathfinder(this.pathfinder);
+    }
+    for (const s of this.extraStaff) {
+      s.setPathfinder(this.pathfinder);
     }
   }
 
@@ -935,17 +947,18 @@ export class ClubScene extends Phaser.Scene {
       this.panDragging = false;
       this.blockPanGesture = false;
 
-      // Empty-world tap deselects NPC (NPC handlers set npcTapHandled first)
+      // World tap with staff selected: bar menu / walk / ignore scenery
+      // (NPC handlers set npcTapHandled first; ✕ still deselects via panel)
       if (
         !wasPanDrag &&
         !this.npcTapHandled &&
         !this.buildMode &&
         p.getDistance() <= TAP_THRESH &&
-        !this.isPointerOverHud(p) &&
-        this.selectedNpcId
+        !this.isPointerOverHud(p)
       ) {
-        this.deselectNpc();
-        this.game.events.emit('npc-deselected');
+        this.handleWorldTap(p);
+      } else if (!wasPanDrag && !this.npcTapHandled) {
+        this.hideBarMenu();
       }
       this.npcTapHandled = false;
     });
@@ -1209,8 +1222,10 @@ export class ClubScene extends Phaser.Scene {
     }
     this.buildMode = on;
     this.clearFurnitureSelection();
+    this.hideBarMenu();
     this.deselectNpc();
     this.game.events.emit('npc-deselected');
+    this.syncFurnitureInteractive();
     if (on) {
       this.buildHint
         .setText('Modo Construir: toca y arrastra muebles')
@@ -1735,6 +1750,264 @@ export class ClubScene extends Phaser.Scene {
         : this.bartender?.profile.id;
     this.orderRestStaff(id);
   };
+
+
+  /** Furniture is interactive only in Construir — otherwise it steals staff taps (Luna under bar). */
+  private syncFurnitureInteractive(): void {
+    if (this.barImage) {
+      if (this.buildMode) {
+        this.barImage.setInteractive({ useHandCursor: true, draggable: false });
+      } else if (this.barImage.input) {
+        this.barImage.disableInteractive();
+      }
+    }
+    if (this.sofaImage) {
+      if (this.buildMode) {
+        this.sofaImage.setInteractive({ useHandCursor: true });
+      } else if (this.sofaImage.input) {
+        this.sofaImage.disableInteractive();
+      }
+    }
+  }
+
+  private buildBarMenu(): void {
+    this.barMenu = this.add.container(0, 0).setDepth(9200).setVisible(false);
+    const bg = this.add.rectangle(0, 0, 168, 78, 0x1a0e28, 0.94);
+    bg.setStrokeStyle(1, 0xff3ca0);
+    const mk = (oy: number, label: string, action: 'serve' | 'clean') => {
+      const c = this.add.container(0, oy);
+      const b = this.add.rectangle(0, 0, 148, 28, 0xb43282, 1);
+      b.setStrokeStyle(1, 0xff7ac8);
+      b.setInteractive({ useHandCursor: true });
+      const t = this.add
+        .text(0, 0, label, { fontSize: '12px', color: '#ffffff', fontStyle: 'bold' })
+        .setOrigin(0.5);
+      b.on('pointerover', () => b.setFillStyle(0xd44a9a));
+      b.on('pointerout', () => b.setFillStyle(0xb43282));
+      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
+        p.event.stopPropagation();
+        this.blockPanGesture = true;
+        this.panActive = false;
+        this.npcTapHandled = true;
+        if (action === 'serve') this.doBarServeDrinks();
+        else this.doBarClean();
+      });
+      c.add([b, t]);
+      return c;
+    };
+    this.barMenu.add([bg, mk(-18, 'Pedir bebidas', 'serve'), mk(18, 'Limpiar barra', 'clean')]);
+  }
+
+  private showBarMenu(): void {
+    if (!this.barMenu || !this.barImage) return;
+    const x = this.barImage.x;
+    const y = this.barImage.y - 78;
+    this.barMenu.setPosition(x, y);
+    this.barMenu.setVisible(true);
+    this.barMenuVisible = true;
+  }
+
+  private hideBarMenu(): void {
+    if (this.barMenu) this.barMenu.setVisible(false);
+    this.barMenuVisible = false;
+  }
+
+  private isPointerOverGameObject(
+    p: Phaser.Input.Pointer,
+    go: Phaser.GameObjects.Image | undefined
+  ): boolean {
+    if (!go || !go.active) return false;
+    const world = this.cameras.main.getWorldPoint(p.x, p.y);
+    const b = go.getBounds();
+    return b.contains(world.x, world.y);
+  }
+
+  private handleWorldTap(p: Phaser.Input.Pointer): void {
+    const staff =
+      this.selectedNpcId && this.findStaffById(this.selectedNpcId)
+        ? this.findStaffById(this.selectedNpcId)
+        : null;
+
+    if (staff) {
+      // Interactive scenery: bar → menu; sofa → no move
+      if (this.isPointerOverGameObject(p, this.barImage)) {
+        this.showBarMenu();
+        return;
+      }
+      if (this.isPointerOverGameObject(p, this.sofaImage)) {
+        this.hideBarMenu();
+        return;
+      }
+      this.hideBarMenu();
+      this.moveSelectedStaffToPointer(p, staff);
+      return;
+    }
+
+    // No staff selected: empty tap deselects any leftover selection / closes menu
+    this.hideBarMenu();
+    if (this.selectedNpcId) {
+      this.deselectNpc();
+      this.game.events.emit('npc-deselected');
+    }
+  }
+
+  private moveSelectedStaffToPointer(p: Phaser.Input.Pointer, staff: Bartender): void {
+    if (this.barActionBusy) return;
+    if (staff.state === 'busy' || staff.state === 'resting') return;
+    const world = this.cameras.main.getWorldPoint(p.x, p.y);
+    const tile = screenToTile(world.x, world.y, this.iso);
+    if (!this.pathfinder.isWalkable(tile.col, tile.row)) {
+      // Try nearest walkable via pathfinder goal snap
+      const path = this.pathfinder.findPath(staff.grid, tile);
+      if (!path.length) return;
+      const goal = path[path.length - 1];
+      this.issueStaffWalk(staff, goal);
+      return;
+    }
+    this.issueStaffWalk(staff, { col: tile.col, row: tile.row });
+  }
+
+  private issueStaffWalk(staff: Bartender, goal: { col: number; row: number }): void {
+    if (staff.grid.col === goal.col && staff.grid.row === goal.row) return;
+    // Interrupt idle bob / cancel prior walk by walking again
+    staff.state = 'walking';
+    const ok = staff.walkTo(goal, () => {
+      staff.state = 'idle';
+      staff.startBob();
+      if (staff === this.bartender) this.syncBartenderBarDepth();
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.emitStaffRoster();
+    });
+    if (!ok) {
+      staff.state = 'idle';
+      staff.startBob();
+    } else {
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.emitStaffRoster();
+    }
+  }
+
+  private selectedStaffOrNull(): Bartender | null {
+    if (!this.selectedNpcId) return null;
+    return this.findStaffById(this.selectedNpcId);
+  }
+
+  private doBarServeDrinks(): void {
+    const staff = this.selectedStaffOrNull();
+    if (!staff || this.barActionBusy || this.buildMode) return;
+    if (staff.state === 'resting') return;
+    this.hideBarMenu();
+    this.barActionBusy = true;
+    staff.state = 'busy';
+    const finish = () => {
+      if (staff === this.bartender) this.syncBartenderBarDepth();
+      staff.stopBob();
+      this.playStaffActionTween(staff, () => {
+        const earned = Phaser.Math.Between(8, 15);
+        this.money += earned;
+        this.nightEarned += earned;
+        staff.profile.mood = Math.min(100, staff.profile.mood + Phaser.Math.Between(2, 5));
+        staff.profile.energy = Math.max(
+          0,
+          staff.profile.energy - Math.max(2, Math.floor(staff.profile.energyDrainPerServe / 2))
+        );
+        staff.state = 'idle';
+        staff.startBob();
+        this.barActionBusy = false;
+        this.showStatusFloat(`+$${earned} · Bebidas`);
+        this.persistLayout();
+        this.game.events.emit('stats-updated', this.getHudState());
+        this.emitStaffRoster();
+      });
+    };
+    const ok = staff.walkTo(this.staffSpot, finish);
+    if (!ok) {
+      // Path blocked — still play action in place
+      finish();
+    }
+  }
+
+  private doBarClean(): void {
+    const staff = this.selectedStaffOrNull();
+    if (!staff || this.barActionBusy || this.buildMode) return;
+    if (staff.state === 'resting') return;
+    this.hideBarMenu();
+    this.barActionBusy = true;
+    staff.state = 'busy';
+    const finish = () => {
+      if (staff === this.bartender) this.syncBartenderBarDepth();
+      staff.stopBob();
+      this.playStaffActionTween(staff, () => {
+        const tip = Phaser.Math.Between(3, 6);
+        this.money += tip;
+        this.nightEarned += tip;
+        staff.profile.energy = Math.max(0, staff.profile.energy - Phaser.Math.Between(8, 14));
+        staff.profile.mood = Math.min(100, staff.profile.mood + Phaser.Math.Between(1, 3));
+        staff.state = 'idle';
+        staff.startBob();
+        this.barActionBusy = false;
+        this.showStatusFloat(`Barra limpia · +$${tip}`);
+        this.persistLayout();
+        this.game.events.emit('stats-updated', this.getHudState());
+        this.emitStaffRoster();
+      });
+    };
+    const ok = staff.walkTo(this.staffSpot, finish);
+    if (!ok) {
+      finish();
+    }
+  }
+
+  /** Short bob / scale tween while serving or cleaning (no new sheets required). */
+  private playStaffActionTween(staff: Bartender, onDone: () => void): void {
+    const spr = staff.sprite;
+    const baseY = spr.y;
+    this.tweens.add({
+      targets: spr,
+      y: baseY - 5,
+      scaleX: spr.scaleX * 1.05,
+      scaleY: spr.scaleY * 0.95,
+      duration: 220,
+      yoyo: true,
+      repeat: 3,
+      ease: 'Sine.easeInOut',
+      onComplete: () => {
+        spr.y = baseY;
+        onDone();
+      },
+    });
+  }
+
+  private showStatusFloat(msg: string): void {
+    if (this.statusFloat) {
+      this.statusFloat.destroy();
+      this.statusFloat = undefined;
+    }
+    const x = this.barImage?.x ?? this.cameras.main.centerX;
+    const y = (this.barImage?.y ?? 120) - 100;
+    this.statusFloat = this.add
+      .text(x, y, msg, {
+        fontSize: '14px',
+        color: '#ffe066',
+        fontStyle: 'bold',
+        backgroundColor: '#12081ecc',
+        padding: { x: 8, y: 4 },
+      })
+      .setOrigin(0.5)
+      .setDepth(9300);
+    this.tweens.add({
+      targets: this.statusFloat,
+      y: y - 28,
+      alpha: 0,
+      duration: 1400,
+      ease: 'Cubic.easeOut',
+      onComplete: () => {
+        this.statusFloat?.destroy();
+        this.statusFloat = undefined;
+      },
+    });
+  }
+
 
   closeNight = (): void => {
     if (this.phase !== 'open') return;

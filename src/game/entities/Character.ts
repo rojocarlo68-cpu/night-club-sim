@@ -116,10 +116,20 @@ export class Character extends Phaser.GameObjects.Container {
     this.sprite.y = -20;
   }
 
+  /** Cancel in-flight path tweens so a new walkTo can take over. */
+  cancelWalk(): void {
+    this.path = [];
+    this.pathIndex = 0;
+    this.onArrive = undefined;
+    this.scene.tweens.killTweensOf(this);
+  }
+
   walkTo(target: GridPos, onArrive?: () => void): boolean {
+    this.cancelWalk();
     const path = this.pathfinder.findPath(this.grid, target);
     if (path.length < 2) {
-      if (path.length === 1 && path[0].col === target.col && path[0].row === target.row) {
+      if (path.length === 1) {
+        // Already there (or snapped to same tile)
         onArrive?.();
         return true;
       }
