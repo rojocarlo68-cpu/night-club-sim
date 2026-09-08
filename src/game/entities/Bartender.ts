@@ -50,7 +50,8 @@ export class Bartender extends Character {
         originY: LUNA_FEET_ORIGIN_Y,
         displayWidth: displayW,
         displayHeight: displayH,
-        y: 0,
+        // Sink slightly so feet sit in the counter trough (barFront occludes legs)
+        y: 6,
       });
       this.ring.setPosition(0, -2);
       this.ring.setSize(18, 8);
