@@ -3,6 +3,7 @@ import { Character } from './Character';
 import { IsoConfig } from '../systems/IsoUtils';
 import { Pathfinder, GridPos } from '../systems/Pathfinding';
 import { STAFF_DISPLAY_H } from './Bartender';
+import { AI_TUNABLES, scaledPatienceSeconds, STATUS_ES } from '../systems/AiTunables';
 
 export interface PatronData {
   id: string;
@@ -40,11 +41,25 @@ export class Patron extends Character {
   goal: PatronGoal = 'bar';
   waiting = false;
   served = false;
-  /** Remaining patience while waiting (seconds). */
+  /** Sitting on a claimed sofa/chair seat. */
+  seated = false;
+  /** Left angry after patience ran out (no pay / low tip). */
+  angry = false;
+  /** Waiting too long — tip penalty + Impaciente label. */
+  impatient = false;
+  /** Claimed seat/queue tile key `col,row`. */
+  claimedSlotKey: string | null = null;
+  /** Furniture id when seated. */
+  seatedFurnitureId: string | null = null;
+  /** Remaining patience while waiting at bar (seconds, scaled). */
   patienceRemaining: number;
+  /** Max patience this visit (scaled from profile). */
+  patienceMax: number;
   preferredDrinkName: string;
   selected = false;
   label?: Phaser.GameObjects.Text;
+  /** Persistent Spanish status (Esperando, Impaciente, Sentado, …). */
+  statusLabel?: Phaser.GameObjects.Text;
   private ring?: Phaser.GameObjects.Ellipse;
 
   constructor(
@@ -65,7 +80,8 @@ export class Patron extends Character {
           : texture;
     super(scene, startTex, grid, iso, pathfinder, 75);
     this.profile = { ...data };
-    this.patienceRemaining = data.patience;
+    this.patienceMax = scaledPatienceSeconds(data.patience);
+    this.patienceRemaining = this.patienceMax;
     this.preferredDrinkName = drinkDisplayName || data.preferredDrink;
 
     // Content-matched height vs Luna (~84 visible), not raw STAFF_DISPLAY_H (158).
@@ -114,6 +130,18 @@ export class Patron extends Character {
       })
       .setOrigin(0.5);
     this.add(this.label);
+
+    this.statusLabel = scene.add
+      .text(0, -displayH + 6, '', {
+        fontSize: '10px',
+        color: '#9ef0ff',
+        fontStyle: 'bold',
+        stroke: '#1a0a22',
+        strokeThickness: 3,
+      })
+      .setOrigin(0.5)
+      .setVisible(false);
+    this.add(this.statusLabel);
   }
 
   /** Same Phaser frame-space hit area as Luna/Nova (generous mobile). */
@@ -145,16 +173,31 @@ export class Patron extends Character {
     });
   }
 
-  /** Drain patience while waiting; returns true if patience ran out. */
+  /**
+   * Drain patience while waiting for bar service (not seated / served / leaving).
+   * Marks Impaciente below ratio; returns true when patience hits 0 (Enfadado).
+   */
   tickPatience(dtSec: number): boolean {
-    if (!this.waiting || this.served) return false;
+    if (!this.waiting || this.served || this.seated || this.angry || this.goal === 'leave') {
+      return false;
+    }
     this.patienceRemaining = Math.max(0, this.patienceRemaining - dtSec);
-    return this.patienceRemaining <= 0;
+    const ratio = this.patienceRemaining / Math.max(0.01, this.patienceMax);
+    if (this.patienceRemaining <= 0) {
+      this.angry = true;
+      this.impatient = true;
+      this.refreshStatusLabel();
+      return true;
+    }
+    this.impatient = ratio < AI_TUNABLES.impatientAtRatio;
+    this.refreshStatusLabel();
+    return false;
   }
 
   /** 0–100 “ánimo de la noche” from remaining patience. */
   get nightMood(): number {
-    const max = Math.max(1, this.profile.patience);
+    if (this.angry) return 12;
+    const max = Math.max(1, this.patienceMax);
     return Math.round((this.patienceRemaining / max) * 100);
   }
 
@@ -162,15 +205,43 @@ export class Patron extends Character {
     return this.profile.name;
   }
 
-  /** Spanish-friendly action key for the info panel. */
+  /** Spanish-friendly action key for the info panel / floating status. */
   getActionKey(): string {
+    if (this.angry) return 'angry';
     if (this.goal === 'leave') return 'leaving';
-    if (this.state === 'walking') return 'walking';
+    if (this.state === 'walking' && !this.waiting && !this.seated) return 'walking';
     if (this.served) return 'drinking';
+    if (this.seated) return 'seated';
     if (this.waiting) {
-      return this.goal === 'sofa' ? 'relaxing' : 'waiting';
+      if (this.impatient) return 'impatient';
+      return this.goal === 'sofa' ? 'seated' : 'waiting';
     }
-    if (this.state === 'busy') return 'busy';
+    if (this.state === 'busy') return 'waiting';
     return 'idle';
+  }
+
+  /** Update floating Spanish status under the name. */
+  refreshStatusLabel(): void {
+    if (!this.statusLabel) return;
+    const key = this.getActionKey();
+    const text = STATUS_ES[key] || '';
+    const show =
+      key === 'waiting' ||
+      key === 'impatient' ||
+      key === 'angry' ||
+      key === 'seated' ||
+      key === 'drinking' ||
+      key === 'relaxing';
+    if (!show || !text) {
+      this.statusLabel.setVisible(false);
+      return;
+    }
+    this.statusLabel.setText(text);
+    this.statusLabel.setVisible(true);
+    if (key === 'angry') this.statusLabel.setColor('#ff6b6b');
+    else if (key === 'impatient') this.statusLabel.setColor('#ffb347');
+    else if (key === 'seated' || key === 'relaxing') this.statusLabel.setColor('#b8f7c0');
+    else if (key === 'waiting') this.statusLabel.setColor('#9ef0ff');
+    else this.statusLabel.setColor('#ffe066');
   }
 }

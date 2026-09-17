@@ -29,14 +29,17 @@ const STATE_ES: Record<string, string> = {
   busy: 'Ocupada',
   resting: 'Descansando',
   waiting: 'Esperando',
+  impatient: 'Impaciente',
+  angry: 'Enfadado',
+  seated: 'Sentado',
   drinking: 'Bebiendo',
   leaving: 'Saliendo',
-  relaxing: 'Relajándose',
+  relaxing: 'Sentado',
   serving: 'Atendiendo',
   serving_cerveza: 'Sirviendo cerveza',
   serving_drink: 'Sirviendo bebida',
   cleaning: 'Limpiando',
-  wandering: 'Vagando',
+  wandering: 'Deambulando',
 };
 
 const PANEL_W = 260;
