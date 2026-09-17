@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { NpcInfo } from '../types/Npc';
 import { StaffRosterEntry, StaffRosterPayload } from '../types/Staff';
 import { ShopCatalogPayload } from '../types/Shop';
+import { FurnitureInspectPayload } from '../systems/FurnitureStats';
 
 interface HudBartender {
   name: string;
@@ -79,6 +80,21 @@ export class UIScene extends Phaser.Scene {
   private shopCatalog: ShopCatalogPayload | null = null;
   private shopRows: Phaser.GameObjects.GameObject[] = [];
   private shopTab: 'muebles' | 'decoracion' = 'muebles';
+
+  private furnPanel!: Phaser.GameObjects.Container;
+  private furnPanelVisible = false;
+  private furnName!: Phaser.GameObjects.Text;
+  private furnCondition!: Phaser.GameObjects.Text;
+  private furnDurLabel!: Phaser.GameObjects.Text;
+  private furnComLabel!: Phaser.GameObjects.Text;
+  private furnCleLabel!: Phaser.GameObjects.Text;
+  private furnDurBar!: Phaser.GameObjects.Rectangle;
+  private furnComBar!: Phaser.GameObjects.Rectangle;
+  private furnCleBar!: Phaser.GameObjects.Rectangle;
+  private furnDurVal!: Phaser.GameObjects.Text;
+  private furnComVal!: Phaser.GameObjects.Text;
+  private furnCleVal!: Phaser.GameObjects.Text;
+  private inspectedFurniture: FurnitureInspectPayload | null = null;
 
   constructor() {
     super({ key: 'UIScene', active: false });
@@ -189,12 +205,66 @@ export class UIScene extends Phaser.Scene {
       this.panelDismissBtn,
     ]);
 
+    // Furniture inspect panel (bottom-right, same pattern as staff panel)
+    const FURN_H = 280;
+    this.furnPanel = this.add
+      .container(cam.width - 20, cam.height - PANEL_BOTTOM_MARGIN - FURN_H)
+      .setScrollFactor(0)
+      .setVisible(false)
+      .setDepth(9500);
+    const fBg = this.add.rectangle(0, 0, PANEL_W, FURN_H, 0x1a0e28, 0.92).setOrigin(1, 0);
+    fBg.setStrokeStyle(2, 0x2ad6ff);
+    fBg.setInteractive();
+    this.furnName = this.add
+      .text(-250, 12, '', { fontSize: '20px', color: '#7ad7ff', fontStyle: 'bold' })
+      .setOrigin(0, 0);
+    this.furnCondition = this.add
+      .text(-250, 40, '', { fontSize: '14px', color: '#ffe066' })
+      .setOrigin(0, 0);
+    this.furnDurLabel = this.add.text(-250, 78, 'Durabilidad', { fontSize: '12px', color: '#a080c0' });
+    this.furnComLabel = this.add.text(-250, 128, 'Confort', { fontSize: '12px', color: '#a080c0' });
+    this.furnCleLabel = this.add.text(-250, 178, 'Limpieza', { fontSize: '12px', color: '#a080c0' });
+    const fdBg = this.add.rectangle(-250, 98, 220, 12, 0x2a1838).setOrigin(0, 0.5);
+    const fcBg = this.add.rectangle(-250, 148, 220, 12, 0x2a1838).setOrigin(0, 0.5);
+    const flBg = this.add.rectangle(-250, 198, 220, 12, 0x2a1838).setOrigin(0, 0.5);
+    this.furnDurBar = this.add.rectangle(-250, 98, 220, 12, 0x3cff9a).setOrigin(0, 0.5);
+    this.furnComBar = this.add.rectangle(-250, 148, 220, 12, 0xffb84d).setOrigin(0, 0.5);
+    this.furnCleBar = this.add.rectangle(-250, 198, 220, 12, 0x2ad6ff).setOrigin(0, 0.5);
+    this.furnDurVal = this.add.text(-30, 98, '', { fontSize: '11px', color: '#e8d0ff' }).setOrigin(1, 0.5);
+    this.furnComVal = this.add.text(-30, 148, '', { fontSize: '11px', color: '#e8d0ff' }).setOrigin(1, 0.5);
+    this.furnCleVal = this.add.text(-30, 198, '', { fontSize: '11px', color: '#e8d0ff' }).setOrigin(1, 0.5);
+    const furnDismiss = this.makeLocalButton(-56, 8, 36, 32, '✕', () => {
+      this.hideFurnPanel();
+      this.game.events.emit('cmd-deselect-furniture');
+    });
+    this.furnPanel.add([
+      fBg,
+      this.furnName,
+      this.furnCondition,
+      this.furnDurLabel,
+      this.furnComLabel,
+      this.furnCleLabel,
+      fdBg,
+      fcBg,
+      flBg,
+      this.furnDurBar,
+      this.furnComBar,
+      this.furnCleBar,
+      this.furnDurVal,
+      this.furnComVal,
+      this.furnCleVal,
+      furnDismiss,
+    ]);
+
     const kb = this.input.keyboard;
     if (kb) {
       kb.on('keydown-ESC', () => {
         if (this.shopPanelVisible) this.hideShopPanel();
         else if (this.staffPanelVisible) this.hideStaffPanel();
-        else if (this.panelVisible) this.hidePanel();
+        else if (this.furnPanelVisible) {
+          this.hideFurnPanel();
+          this.game.events.emit('cmd-deselect-furniture');
+        } else if (this.panelVisible) this.hidePanel();
         else if (this.buildMode) this.game.events.emit('cmd-set-build-mode', false);
       });
     }
@@ -247,6 +317,8 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('staff-hire-failed', this.onHireFailed, this);
     this.game.events.on('shop-catalog', this.onShopCatalog, this);
     this.game.events.on('shop-buy-failed', this.onShopBuyFailed, this);
+    this.game.events.on('select-furniture', this.onSelectFurniture, this);
+    this.game.events.on('furniture-deselected', this.onFurnitureDeselected, this);
 
     this.scale.on('resize', this.onResize, this);
     this.refreshBuildButtons();
@@ -320,6 +392,12 @@ export class UIScene extends Phaser.Scene {
       const panelBottom = h - PANEL_BOTTOM_MARGIN + 8;
       if (p.x > w - PANEL_W - 24 && p.y > panelTop - 8 && p.y < panelBottom) return true;
     }
+    if (this.furnPanelVisible) {
+      const furnH = 280;
+      const panelTop = h - PANEL_BOTTOM_MARGIN - furnH;
+      const panelBottom = h - PANEL_BOTTOM_MARGIN + 8;
+      if (p.x > w - PANEL_W - 24 && p.y > panelTop - 8 && p.y < panelBottom) return true;
+    }
     if (this.staffPanelVisible) {
       const cx = w / 2;
       const cy = h / 2;
@@ -347,6 +425,49 @@ export class UIScene extends Phaser.Scene {
     this.game.events.emit('cmd-deselect-npc');
   }
 
+  private hideFurnPanel(): void {
+    if (!this.furnPanelVisible) return;
+    this.furnPanelVisible = false;
+    this.furnPanel.setVisible(false);
+    this.inspectedFurniture = null;
+  }
+
+  private onSelectFurniture = (payload: FurnitureInspectPayload): void => {
+    if (this.buildMode) return;
+    this.hidePanel();
+    this.inspectedFurniture = payload;
+    this.furnPanelVisible = true;
+    const cam = this.cameras.main;
+    this.furnPanel.setPosition(cam.width - 20, cam.height - PANEL_BOTTOM_MARGIN - 280);
+    this.furnPanel.setVisible(true);
+    this.refreshFurnPanel(payload);
+  };
+
+  private onFurnitureDeselected = (): void => {
+    this.hideFurnPanel();
+  };
+
+  private refreshFurnPanel(f: FurnitureInspectPayload): void {
+    this.furnName.setText(f.name);
+    this.furnCondition.setText(`Condición: ${f.condition}`);
+    const setBar = (
+      bar: Phaser.GameObjects.Rectangle,
+      valText: Phaser.GameObjects.Text,
+      cur: number,
+      max: number,
+      okColor: number
+    ) => {
+      const m = Math.max(1, max);
+      const ratio = Phaser.Math.Clamp(cur / m, 0, 1);
+      bar.width = 220 * ratio;
+      bar.setFillStyle(ratio < 0.3 ? 0xff4466 : ratio < 0.55 ? 0xffb84d : okColor);
+      valText.setText(`${Math.round(cur)}/${Math.round(max)}`);
+    };
+    setBar(this.furnDurBar, this.furnDurVal, f.durability, f.maxDurability, 0x3cff9a);
+    setBar(this.furnComBar, this.furnComVal, f.comfort, f.maxComfort, 0xffb84d);
+    setBar(this.furnCleBar, this.furnCleVal, f.cleanliness, f.maxCleanliness, 0x2ad6ff);
+  }
+
   /** ClubScene cleared selection (empty tap / patron left) — close panel only. */
   private onNpcDeselected = (): void => {
     if (!this.panelVisible) return;
@@ -357,6 +478,7 @@ export class UIScene extends Phaser.Scene {
 
   private onSelectNpc = (npc: NpcInfo): void => {
     if (this.buildMode) return;
+    this.hideFurnPanel();
     this.selectedNpc = npc;
     this.panelVisible = true;
     this.layoutNpcPanel(this.cameras.main.width, this.cameras.main.height);
@@ -431,6 +553,7 @@ export class UIScene extends Phaser.Scene {
     this.buildMode = on;
     if (on) {
       this.hidePanel();
+      this.hideFurnPanel();
       this.hideStaffPanel();
       this.game.events.emit('cmd-request-shop-catalog');
     } else {
@@ -525,6 +648,9 @@ export class UIScene extends Phaser.Scene {
     this.staffBtn.setPosition(136, h - 48);
     this.shopBtn.setPosition(136, h - 48);
     this.layoutNpcPanel(w, h);
+    if (this.furnPanel) {
+      this.furnPanel.setPosition(w - 20, h - PANEL_BOTTOM_MARGIN - 280);
+    }
     this.timerText.setX(w / 2);
     this.summary.setPosition(w / 2, h / 2);
     this.staffPanel.setPosition(w / 2, h / 2);

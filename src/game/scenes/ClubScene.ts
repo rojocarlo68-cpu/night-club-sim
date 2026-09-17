@@ -18,6 +18,19 @@ import { Patron, PatronData } from '../entities/Patron';
 import { NpcInfo } from '../types/Npc';
 import { StaffCandidate, StaffPoolFile, StaffRosterEntry, StaffRosterPayload } from '../types/Staff';
 import { ShopCatalogPayload, ShopFurnitureFile, ShopFurnitureItem } from '../types/Shop';
+import {
+  FurnitureInspectPayload,
+  FurnitureRuntimeStats,
+  STARTER_FURNITURE_PRICE,
+  CLEAN_THRESHOLD,
+  DIRT_VISUAL_THRESHOLD,
+  CLEAN_DURATION_MS,
+  applyDecay,
+  applyCleanRestore,
+  conditionFromDurability,
+  freshStatsForPrice,
+  mergeSavedStats,
+} from '../systems/FurnitureStats';
 
 interface Drink {
   id: string;
@@ -48,6 +61,14 @@ interface FurnitureDef {
   displayH?: number;
   yBias?: number;
   facingSupport?: 'full' | 'flip' | 'none';
+  /** Catalog price used for max stats / decay (starters use STARTER_FURNITURE_PRICE). */
+  price?: number;
+  durability?: number;
+  comfort?: number;
+  cleanliness?: number;
+  maxDurability?: number;
+  maxComfort?: number;
+  maxCleanliness?: number;
 }
 
 interface Scenario {
@@ -86,6 +107,12 @@ interface SavedLayoutItem {
   catalogId?: string;
   flipX?: boolean;
   footprint?: [number, number];
+  durability?: number;
+  comfort?: number;
+  cleanliness?: number;
+  maxDurability?: number;
+  maxComfort?: number;
+  maxCleanliness?: number;
 }
 
 interface SavedLayout {
@@ -158,6 +185,12 @@ export class ClubScene extends Phaser.Scene {
   private shopCatalog: ShopFurnitureItem[] = [];
   private shopCatalogById = new Map<string, ShopFurnitureItem>();
   private shopInstanceSeq = 0;
+  /** Procedural dirt Graphics overlays keyed by furniture instance id. */
+  private dirtOverlays = new Map<string, Phaser.GameObjects.Graphics>();
+  /** furnitureId → staffId while Limpiar AI job runs. */
+  private cleanClaim = new Map<string, string>();
+  /** Inspect panel selection outside Construir. */
+  private inspectedFurnitureId: string | null = null;
 
   private selectedFurniture: SelectedFurniture = null;
   private rotateUi!: Phaser.GameObjects.Container;
@@ -302,6 +335,8 @@ export class ClubScene extends Phaser.Scene {
     this.drawRoom(cols, rows);
     this.placeFurniture();
     this.ensureAllFurnitureInsideFloor();
+    this.ensureAllFurnitureStats();
+    this.refreshAllDirtOverlays();
     this.setupCamera();
 
     const bd = this.chars.bartender;
@@ -357,6 +392,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-deselect-bartender', this.deselectNpc, this);
     this.game.events.on('cmd-request-shop-catalog', this.emitShopCatalog, this);
     this.game.events.on('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
+    this.game.events.on('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
     this.emitStaffRoster();
     this.emitShopCatalog();
   }
@@ -536,6 +572,7 @@ export class ClubScene extends Phaser.Scene {
         if (typeof item.flipX === 'boolean') {
           def.flipX = item.flipX;
         }
+        this.applyStatsFromSaved(def, item);
       }
       // Saved list is authoritative: deleted pieces stay gone across reload
       const savedIds = new Set(saved.furniture.map((i) => i.id));
@@ -578,6 +615,12 @@ export class ClubScene extends Phaser.Scene {
         catalogId: f.catalogId,
         flipX: f.flipX,
         footprint: [...f.footprint] as [number, number],
+        durability: f.durability,
+        comfort: f.comfort,
+        cleanliness: f.cleanliness,
+        maxDurability: f.maxDurability,
+        maxComfort: f.maxComfort,
+        maxCleanliness: f.maxCleanliness,
       })),
       hiredStaff: [...this.hiredStaffIds],
       money: this.money,
@@ -618,19 +661,26 @@ export class ClubScene extends Phaser.Scene {
   private rebuildPathfinder(): void {
     const { cols, rows } = this.scenario.map;
     const blocked = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
-    this.scenario.furniture.forEach((f) => {
-      for (let dc = 0; dc < f.footprint[0]; dc++) {
-        for (let dr = 0; dr < f.footprint[1]; dr++) {
+    // Solid collision: every placed piece footprint (sofa/bar/shop) blocks pathfinding.
+    for (const f of this.scenario.furniture) {
+      const fw = Math.max(1, f.footprint?.[0] ?? 1);
+      const fh = Math.max(1, f.footprint?.[1] ?? 1);
+      for (let dc = 0; dc < fw; dc++) {
+        for (let dr = 0; dr < fh; dr++) {
           blocked.add(`${f.tile[0] + dc},${f.tile[1] + dr}`);
         }
       }
-    });
+    }
     this.pathfinder = new Pathfinder(cols, rows, blocked);
     if (this.bartender) {
       this.bartender.setPathfinder(this.pathfinder);
     }
     for (const s of this.extraStaff) {
       s.setPathfinder(this.pathfinder);
+    }
+    // Critical: patrons kept stale pathfinders and could walk through moved/shop furniture.
+    for (const p of this.patrons) {
+      p.setPathfinder(this.pathfinder);
     }
   }
 
@@ -1284,6 +1334,8 @@ export class ClubScene extends Phaser.Scene {
         this.rotateUi.setPosition(pos.x, pos.y - 78);
       }
     }
+    const moved = this.getFurnitureDef(id);
+    if (moved) this.refreshDirtOverlay(moved);
   }
 
   private buildRotateUi(x: number, y: number): void {
@@ -1435,6 +1487,8 @@ export class ClubScene extends Phaser.Scene {
     }
 
     // Destroy visual
+    this.destroyDirtOverlay(def.id);
+    if (this.inspectedFurnitureId === def.id) this.closeFurnitureInspect();
     if (id === 'sofa') {
       this.sofaImage?.destroy();
       this.sofaImage = null;
@@ -1531,6 +1585,7 @@ export class ClubScene extends Phaser.Scene {
     this.clearFurnitureSelection();
     if (this.deleteConfirmUi) this.deleteConfirmUi.setVisible(false);
     this.hideBarMenu();
+    this.closeFurnitureInspect();
     this.deselectNpc();
     this.game.events.emit('npc-deselected');
     this.syncFurnitureInteractive();
@@ -2124,23 +2179,32 @@ export class ClubScene extends Phaser.Scene {
         ? this.findStaffById(this.selectedNpcId)
         : null;
 
+    const furnId = this.furnitureIdAtPointer(p);
+
     if (staff) {
-      // Interactive scenery: bar → menu; sofa → no move
+      // Interactive scenery: bar → menu; other furniture → inspect (no walk-through)
       if (this.isPointerOverGameObject(p, this.barImage)) {
         this.showBarMenu();
         return;
       }
-      if (this.isPointerOverGameObject(p, this.sofaImage)) {
+      if (furnId) {
         this.hideBarMenu();
+        this.openFurnitureInspect(furnId);
         return;
       }
       this.hideBarMenu();
+      this.closeFurnitureInspect();
       this.moveSelectedStaffToPointer(p, staff);
       return;
     }
 
-    // No staff selected: empty tap deselects any leftover selection / closes menu
+    // No staff selected: tap furniture → inspect panel; empty → deselect
     this.hideBarMenu();
+    if (furnId) {
+      this.openFurnitureInspect(furnId);
+      return;
+    }
+    this.closeFurnitureInspect();
     if (this.selectedNpcId) {
       this.deselectNpc();
       this.game.events.emit('npc-deselected');
@@ -2291,6 +2355,12 @@ export class ClubScene extends Phaser.Scene {
         this.nightEarned += tip;
         staff.profile.energy = Math.max(0, staff.profile.energy - Phaser.Math.Between(8, 14));
         staff.profile.mood = Math.min(100, staff.profile.mood + Phaser.Math.Between(1, 3));
+        if (this.barDef) {
+          this.ensureFurnitureStats(this.barDef);
+          applyCleanRestore(this.statsOf(this.barDef));
+          this.writeStatsToDef(this.barDef, this.statsOf(this.barDef));
+          this.refreshDirtOverlay(this.barDef);
+        }
         staff.state = 'idle';
         this.releaseStaffTileClaims(staff);
         staff.clearPlayerCommand();
@@ -2300,7 +2370,8 @@ export class ClubScene extends Phaser.Scene {
         this.persistLayout();
         this.game.events.emit('stats-updated', this.getHudState());
         this.emitStaffRoster();
-      });
+        this.reemitFurnitureInspectIf(this.barDef?.id);
+      }, CLEAN_DURATION_MS);
     };
     const ok = staff.walkTo(this.staffSpot, finish);
     if (!ok) {
@@ -2309,19 +2380,20 @@ export class ClubScene extends Phaser.Scene {
   }
 
   /** Short bob / scale tween while serving or cleaning (no new sheets required). */
-  private playStaffActionTween(staff: Bartender, onDone: () => void): void {
+  private playStaffActionTween(staff: Bartender, onDone: () => void, totalMs = 900): void {
     const spr = staff.sprite;
     const baseY = spr.y;
     const baseSX = spr.scaleX;
     const baseSY = spr.scaleY;
+    const cycles = Math.max(2, Math.round(totalMs / 450));
     this.tweens.add({
       targets: spr,
       y: baseY - 5,
       scaleX: baseSX * 1.05,
       scaleY: baseSY * 0.95,
-      duration: 220,
+      duration: Math.max(180, Math.floor(totalMs / (cycles * 2))),
       yoyo: true,
-      repeat: 3,
+      repeat: cycles - 1,
       ease: 'Sine.easeInOut',
       onComplete: () => {
         spr.y = baseY;
@@ -2442,6 +2514,9 @@ export class ClubScene extends Phaser.Scene {
   private releaseStaffAiClaims(staff: Bartender): void {
     for (const [pid, sid] of [...this.serveClaim.entries()]) {
       if (sid === staff.profile.id) this.serveClaim.delete(pid);
+    }
+    for (const [fid, sid] of [...this.cleanClaim.entries()]) {
+      if (sid === staff.profile.id) this.cleanClaim.delete(fid);
     }
     this.releaseStaffTileClaims(staff);
     staff.servingDrinkId = null;
@@ -2683,42 +2758,75 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private beginAiClean(staff: Bartender): void {
-    if (this.barActionBusy) return;
-    // Soft queue: only one cleaner/server at staffSpot
-    if (this.barSpotHolderId && this.barSpotHolderId !== staff.profile.id) {
-      staff.aiNextThinkAt = this.time.now + 600;
+    // Prefer any dirty piece; fall back to bar polish at staffSpot
+    const dirty = this.findDirtiestFurniture(CLEAN_THRESHOLD);
+    if (dirty) {
+      this.beginAiCleanFurniture(staff, dirty);
       return;
     }
-    if (!this.claimBarSpot(staff)) {
-      staff.aiNextThinkAt = this.time.now + 600;
+    if (!this.barDef) {
+      staff.aiNextThinkAt = this.time.now + 2000;
       return;
     }
+    this.beginAiCleanFurniture(staff, this.barDef);
+  }
+
+  /** Walk adjacent to furniture, bob 2–3s, restore cleanliness (+bit comfort). */
+  private beginAiCleanFurniture(staff: Bartender, def: FurnitureDef): void {
+    if (this.cleanClaim.has(def.id) && this.cleanClaim.get(def.id) !== staff.profile.id) {
+      staff.aiNextThinkAt = this.time.now + 700;
+      return;
+    }
+    this.ensureFurnitureStats(def);
+    const adj = this.findAdjacentWalkable(def, staff);
+    if (!adj) {
+      staff.aiNextThinkAt = this.time.now + 900;
+      return;
+    }
+    this.cleanClaim.set(def.id, staff.profile.id);
     staff.aiJob = 'clean';
     staff.playerCommanded = false;
     staff.state = 'busy';
+    staff.setServeLabel('Limpiando');
+    this.claimStaffTile(staff, adj);
     this.game.events.emit('stats-updated', this.getHudState());
     this.emitStaffRoster();
+
+    const release = () => {
+      if (this.cleanClaim.get(def.id) === staff.profile.id) this.cleanClaim.delete(def.id);
+      this.releaseStaffTileClaims(staff);
+      staff.clearServeLabel();
+      staff.clearAiJob();
+      staff.state = 'idle';
+      staff.startBob();
+    };
+
     const finish = () => {
       if (staff === this.bartender) this.syncBartenderBarDepth();
       staff.stopBob();
-      this.playStaffActionTween(staff, () => {
-        const tip = Phaser.Math.Between(2, 5);
-        this.money += tip;
-        this.nightEarned += tip;
-        staff.profile.energy = Math.max(0, staff.profile.energy - Phaser.Math.Between(6, 12));
-        staff.profile.mood = Math.min(100, staff.profile.mood + 2);
-        staff.state = 'idle';
-        this.releaseStaffTileClaims(staff);
-        staff.clearAiJob();
-        staff.aiNextThinkAt = this.time.now + Phaser.Math.Between(8000, 14000);
-        staff.startBob();
-        this.showStatusFloat(`Limpieza · +$${tip}`);
-        this.persistLayout();
-        this.game.events.emit('stats-updated', this.getHudState());
-        this.emitStaffRoster();
-      });
+      staff.setServeLabel('Limpiando');
+      this.playStaffActionTween(
+        staff,
+        () => {
+          this.ensureFurnitureStats(def);
+          const st = this.statsOf(def);
+          applyCleanRestore(st);
+          this.writeStatsToDef(def, st);
+          this.refreshDirtOverlay(def);
+          staff.profile.energy = Math.max(0, staff.profile.energy - Phaser.Math.Between(5, 10));
+          staff.profile.mood = Math.min(100, staff.profile.mood + 2);
+          staff.aiNextThinkAt = this.time.now + Phaser.Math.Between(5000, 9000);
+          release();
+          this.showStatusFloat(`Limpió ${this.furnitureDisplayName(def)}`);
+          this.persistLayout();
+          this.game.events.emit('stats-updated', this.getHudState());
+          this.emitStaffRoster();
+          this.reemitFurnitureInspectIf(def.id);
+        },
+        CLEAN_DURATION_MS
+      );
     };
-    const ok = staff.walkTo(this.staffSpot, finish);
+    const ok = staff.walkTo(adj, finish);
     if (!ok) finish();
   }
 
@@ -2841,8 +2949,13 @@ export class ClubScene extends Phaser.Scene {
         continue;
       }
 
-      // 2) Limpiar — occasionally when nobody is waiting
-      if (this.phase === 'open' && Math.random() < 0.22) {
+      // 2) Limpiar — dirty furniture (cleanliness < ~70), or occasional bar polish when open
+      const dirty = this.findDirtiestFurniture(CLEAN_THRESHOLD);
+      if (dirty && !this.cleanClaim.has(dirty.id)) {
+        this.beginAiCleanFurniture(staff, dirty);
+        continue;
+      }
+      if (this.phase === 'open' && Math.random() < 0.12) {
         this.beginAiClean(staff);
         continue;
       }
@@ -2866,8 +2979,11 @@ export class ClubScene extends Phaser.Scene {
     this.syncBartenderBarDepth();
     // AI runs in prep + open (wander/rest/clean); serve only when open.
     if (!this.buildMode) this.tickStaffAi();
-    if (this.phase !== 'open') return;
     const dtSec = dt / 1000;
+    if (!this.buildMode && (this.phase === 'open' || this.phase === 'prep')) {
+      this.tickFurnitureDecay(dtSec);
+    }
+    if (this.phase !== 'open') return;
     this.nightTimer -= dtSec;
 
     for (const patron of [...this.patrons]) {
@@ -2939,6 +3055,8 @@ export class ClubScene extends Phaser.Scene {
     if (!cat) return null;
     const id = instanceId || this.nextShopInstanceId(catalogId);
     const facing = (cat.defaultFacing as IsoFacing) || 'se';
+    const price = cat.price ?? STARTER_FURNITURE_PRICE;
+    const stats = freshStatsForPrice(price);
     return {
       id,
       type: cat.id,
@@ -2954,6 +3072,8 @@ export class ClubScene extends Phaser.Scene {
       displayH: cat.displaySize[1],
       yBias: cat.yBias ?? -8,
       facingSupport: cat.facingSupport,
+      price,
+      ...stats,
     };
   }
 
@@ -3159,6 +3279,267 @@ export class ClubScene extends Phaser.Scene {
       .setVisible(true);
   };
 
+
+  // --- Furniture runtime stats / dirt / inspect / clean helpers ---
+
+  private furniturePrice(def: FurnitureDef): number {
+    if (typeof def.price === 'number' && def.price > 0) return def.price;
+    if (def.catalogId) {
+      const cat = this.shopCatalogById.get(def.catalogId);
+      if (cat) return cat.price;
+    }
+    if (def.type === 'sofa' || def.type === 'bar') return STARTER_FURNITURE_PRICE;
+    const cat = this.shopCatalogById.get(def.type);
+    return cat?.price ?? STARTER_FURNITURE_PRICE;
+  }
+
+  private furnitureDisplayName(def: FurnitureDef): string {
+    if (def.type === 'sofa') return 'Sofá';
+    if (def.type === 'bar') return 'Barra';
+    const cat =
+      this.shopCatalogById.get(def.catalogId ?? '') || this.shopCatalogById.get(def.type);
+    return cat?.name ?? 'Mueble';
+  }
+
+  private statsOf(def: FurnitureDef): FurnitureRuntimeStats {
+    this.ensureFurnitureStats(def);
+    return {
+      durability: def.durability!,
+      comfort: def.comfort!,
+      cleanliness: def.cleanliness!,
+      maxDurability: def.maxDurability!,
+      maxComfort: def.maxComfort!,
+      maxCleanliness: def.maxCleanliness!,
+    };
+  }
+
+  private writeStatsToDef(def: FurnitureDef, st: FurnitureRuntimeStats): void {
+    def.durability = st.durability;
+    def.comfort = st.comfort;
+    def.cleanliness = st.cleanliness;
+    def.maxDurability = st.maxDurability;
+    def.maxComfort = st.maxComfort;
+    def.maxCleanliness = st.maxCleanliness;
+  }
+
+  private ensureFurnitureStats(def: FurnitureDef): void {
+    const price = this.furniturePrice(def);
+    def.price = price;
+    if (
+      typeof def.durability === 'number' &&
+      typeof def.comfort === 'number' &&
+      typeof def.cleanliness === 'number' &&
+      typeof def.maxDurability === 'number' &&
+      typeof def.maxComfort === 'number' &&
+      typeof def.maxCleanliness === 'number'
+    ) {
+      return;
+    }
+    const st = freshStatsForPrice(price);
+    this.writeStatsToDef(def, st);
+  }
+
+  private ensureAllFurnitureStats(): void {
+    for (const f of this.scenario.furniture) this.ensureFurnitureStats(f);
+  }
+
+  private applyStatsFromSaved(def: FurnitureDef, item: SavedLayoutItem): void {
+    const price = this.furniturePrice(def);
+    def.price = price;
+    const st = mergeSavedStats(price, item);
+    this.writeStatsToDef(def, st);
+  }
+
+  private tickFurnitureDecay(dtSec: number): void {
+    if (dtSec <= 0) return;
+    for (const f of this.scenario.furniture) {
+      this.ensureFurnitureStats(f);
+      const before = f.cleanliness ?? 100;
+      const st = this.statsOf(f);
+      applyDecay(st, dtSec, this.furniturePrice(f));
+      this.writeStatsToDef(f, st);
+      const crossed =
+        (before >= DIRT_VISUAL_THRESHOLD) !== (st.cleanliness >= DIRT_VISUAL_THRESHOLD) ||
+        Math.floor(before / 10) !== Math.floor(st.cleanliness / 10);
+      if (crossed) this.refreshDirtOverlay(f);
+    }
+    if (Math.random() < 0.012) this.persistLayout();
+    if (this.inspectedFurnitureId) this.reemitFurnitureInspectIf(this.inspectedFurnitureId);
+  }
+
+  private findDirtiestFurniture(below: number): FurnitureDef | null {
+    let best: FurnitureDef | null = null;
+    let bestClean = Infinity;
+    for (const f of this.scenario.furniture) {
+      this.ensureFurnitureStats(f);
+      const c = f.cleanliness ?? 100;
+      if (c >= below) continue;
+      if (this.cleanClaim.has(f.id)) continue;
+      if (c < bestClean) {
+        bestClean = c;
+        best = f;
+      }
+    }
+    return best;
+  }
+
+  /** Walkable tile adjacent to any cell of the furniture footprint. */
+  private findAdjacentWalkable(
+    def: FurnitureDef,
+    staff: Bartender
+  ): { col: number; row: number } | null {
+    const fw = Math.max(1, def.footprint[0]);
+    const fh = Math.max(1, def.footprint[1]);
+    const candidates: Array<{ col: number; row: number }> = [];
+    for (let dc = 0; dc < fw; dc++) {
+      for (let dr = 0; dr < fh; dr++) {
+        const bc = def.tile[0] + dc;
+        const br = def.tile[1] + dr;
+        for (const [oc, or_] of [
+          [1, 0],
+          [-1, 0],
+          [0, 1],
+          [0, -1],
+          [1, 1],
+          [1, -1],
+          [-1, 1],
+          [-1, -1],
+        ] as Array<[number, number]>) {
+          candidates.push({ col: bc + oc, row: br + or_ });
+        }
+      }
+    }
+    candidates.sort((a, b) => {
+      const da = Math.abs(a.col - staff.grid.col) + Math.abs(a.row - staff.grid.row);
+      const db = Math.abs(b.col - staff.grid.col) + Math.abs(b.row - staff.grid.row);
+      return da - db;
+    });
+    const seen = new Set<string>();
+    for (const pos of candidates) {
+      const k = `${pos.col},${pos.row}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      if (!this.pathfinder.isWalkable(pos.col, pos.row)) continue;
+      if (this.isStaffTileBlocked(pos, staff)) continue;
+      return pos;
+    }
+    return null;
+  }
+
+  private furnitureIdAtPointer(p: Phaser.Input.Pointer): string | null {
+    type Hit = { id: string; depth: number };
+    const hits: Hit[] = [];
+    if (this.isPointerOverGameObject(p, this.barImage) && this.barDef) {
+      hits.push({ id: this.barDef.id, depth: this.barImage!.depth });
+    }
+    if (this.isPointerOverGameObject(p, this.sofaImage) && this.sofaDef) {
+      hits.push({ id: this.sofaDef.id, depth: this.sofaImage!.depth });
+    }
+    for (const [id, img] of this.shopImages) {
+      if (this.isPointerOverGameObject(p, img)) hits.push({ id, depth: img.depth });
+    }
+    if (!hits.length) return null;
+    hits.sort((a, b) => b.depth - a.depth);
+    return hits[0].id;
+  }
+
+  private openFurnitureInspect(id: string): void {
+    const def = this.getFurnitureDef(id);
+    if (!def) return;
+    if (this.selectedNpcId) {
+      this.deselectNpc();
+      this.game.events.emit('npc-deselected');
+    }
+    this.inspectedFurnitureId = id;
+    this.game.events.emit('select-furniture', this.buildFurnitureInspectPayload(def));
+  }
+
+  private closeFurnitureInspect(): void {
+    if (!this.inspectedFurnitureId) return;
+    this.inspectedFurnitureId = null;
+    this.game.events.emit('furniture-deselected');
+  }
+
+  private reemitFurnitureInspectIf(id: string | undefined | null): void {
+    if (!id || this.inspectedFurnitureId !== id) return;
+    const def = this.getFurnitureDef(id);
+    if (!def) return;
+    this.game.events.emit('select-furniture', this.buildFurnitureInspectPayload(def));
+  }
+
+  private buildFurnitureInspectPayload(def: FurnitureDef): FurnitureInspectPayload {
+    this.ensureFurnitureStats(def);
+    const st = this.statsOf(def);
+    return {
+      id: def.id,
+      name: this.furnitureDisplayName(def),
+      condition: conditionFromDurability(st.durability, st.maxDurability),
+      durability: Math.round(st.durability),
+      comfort: Math.round(st.comfort),
+      cleanliness: Math.round(st.cleanliness),
+      maxDurability: Math.round(st.maxDurability),
+      maxComfort: Math.round(st.maxComfort),
+      maxCleanliness: Math.round(st.maxCleanliness),
+    };
+  }
+
+  private destroyDirtOverlay(id: string): void {
+    const g = this.dirtOverlays.get(id);
+    if (g) {
+      g.destroy();
+      this.dirtOverlays.delete(id);
+    }
+  }
+
+  private refreshAllDirtOverlays(): void {
+    for (const f of this.scenario.furniture) this.refreshDirtOverlay(f);
+  }
+
+  /** Procedural blotches when cleanliness < 60; denser when dirtier. */
+  private refreshDirtOverlay(def: FurnitureDef): void {
+    this.ensureFurnitureStats(def);
+    const clean = def.cleanliness ?? 100;
+    const img = this.getFurnitureImage(def.id);
+    if (!img) {
+      this.destroyDirtOverlay(def.id);
+      return;
+    }
+    if (clean >= DIRT_VISUAL_THRESHOLD) {
+      this.destroyDirtOverlay(def.id);
+      return;
+    }
+    let g = this.dirtOverlays.get(def.id);
+    if (!g) {
+      g = this.add.graphics();
+      this.dirtOverlays.set(def.id, g);
+    }
+    g.clear();
+    const dirtiness = 1 - clean / DIRT_VISUAL_THRESHOLD;
+    const n = Math.max(2, Math.min(9, Math.round(2 + dirtiness * 7)));
+    const alpha = 0.22 + dirtiness * 0.45;
+    const size = this.furnitureDisplaySize(def.type, def);
+    let seed = 0;
+    for (let i = 0; i < def.id.length; i++) seed = (seed * 31 + def.id.charCodeAt(i)) >>> 0;
+    const rnd = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 0xffffffff;
+    };
+    for (let i = 0; i < n; i++) {
+      const ox = (rnd() - 0.5) * size.w * 0.55;
+      const oy = (rnd() - 0.55) * size.h * 0.4;
+      const rw = 4 + rnd() * 10 * (0.6 + dirtiness);
+      const rh = 3 + rnd() * 7 * (0.6 + dirtiness);
+      g.fillStyle(0x3a2818, alpha);
+      g.fillEllipse(img.x + ox, img.y + oy, rw, rh);
+      if (rnd() > 0.55) {
+        g.fillStyle(0x2a1a10, alpha * 0.85);
+        g.fillEllipse(img.x + ox + 2, img.y + oy + 1, rw * 0.6, rh * 0.55);
+      }
+    }
+    g.setDepth(img.depth + 0.5);
+  }
+
+
   shutdown(): void {
     this.game.events.off('cmd-open-night', this.openNight, this);
     this.game.events.off('cmd-close-night', this.closeNight, this);
@@ -3172,5 +3553,11 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-deselect-bartender', this.deselectNpc, this);
     this.game.events.off('cmd-request-shop-catalog', this.emitShopCatalog, this);
     this.game.events.off('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
+    this.game.events.off('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
   }
+
+  private onCmdDeselectFurniture = (): void => {
+    this.closeFurnitureInspect();
+  };
 }
+

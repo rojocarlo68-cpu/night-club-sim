@@ -70,6 +70,7 @@ export class BootScene extends Phaser.Scene {
       }
       this.statusText.setText('Cargando 100%…');
       this.ensureCharacterAnims();
+      this.ensurePlaceholderFurniture();
       this.scene.start('ClubScene');
       this.scene.launch('UIScene');
     });
@@ -276,4 +277,128 @@ export class BootScene extends Phaser.Scene {
       }
     }
   }
+  /** Procedural iso placeholders for shop decor (no new art sheets). */
+  private ensurePlaceholderFurniture(): void {
+    const specs: Array<{
+      key: string;
+      color: number;
+      accent: number;
+      w: number;
+      h: number;
+      kind: 'box' | 'tall' | 'plant' | 'light' | 'speaker' | 'chair' | 'table';
+    }> = [
+      { key: 'furn_mesa_cocktail', color: 0x6b3d2e, accent: 0xc4a574, w: 96, h: 110, kind: 'table' },
+      { key: 'furn_silla', color: 0x3a2a4a, accent: 0xb48cff, w: 80, h: 100, kind: 'chair' },
+      { key: 'furn_banqueta', color: 0x2a2238, accent: 0xff9ad5, w: 84, h: 92, kind: 'chair' },
+      { key: 'furn_mesa_vip', color: 0x4a3058, accent: 0xffe066, w: 160, h: 120, kind: 'table' },
+      { key: 'furn_planta', color: 0x1e5c38, accent: 0x6dff9a, w: 72, h: 120, kind: 'plant' },
+      { key: 'furn_altavoz', color: 0x222028, accent: 0x2ad6ff, w: 88, h: 118, kind: 'speaker' },
+      { key: 'furn_luz_pista', color: 0x3a1048, accent: 0xff3ca0, w: 80, h: 108, kind: 'light' },
+    ];
+    for (const s of specs) {
+      if (this.textures.exists(s.key)) continue;
+      const g = this.add.graphics();
+g.setVisible(false);
+      const cx = s.w / 2;
+      const cy = s.h * 0.62;
+      const hw = Math.min(s.w, s.h) * 0.38;
+      const hh = hw * 0.5;
+      // Floor diamond shadow
+      g.fillStyle(0x000000, 0.35);
+      g.fillPoints(
+        [
+          { x: cx, y: cy + hh + 4 },
+          { x: cx + hw, y: cy + 4 },
+          { x: cx, y: cy - hh + 4 },
+          { x: cx - hw, y: cy + 4 },
+        ],
+        true
+      );
+      if (s.kind === 'plant') {
+        g.fillStyle(0x4a3020, 1);
+        g.fillRect(cx - 10, cy - 8, 20, 18);
+        g.fillStyle(s.color, 1);
+        g.fillEllipse(cx, cy - 36, 36, 48);
+        g.fillStyle(s.accent, 0.85);
+        g.fillEllipse(cx - 8, cy - 48, 18, 22);
+        g.fillEllipse(cx + 10, cy - 40, 16, 20);
+      } else if (s.kind === 'light') {
+        g.fillStyle(0x2a1838, 1);
+        g.fillRect(cx - 4, cy - 50, 8, 54);
+        g.fillStyle(s.accent, 0.95);
+        g.fillCircle(cx, cy - 56, 14);
+        g.fillStyle(0xffffff, 0.55);
+        g.fillCircle(cx - 3, cy - 59, 4);
+      } else if (s.kind === 'speaker') {
+        g.fillStyle(s.color, 1);
+        g.fillRoundedRect(cx - 22, cy - 58, 44, 70, 6);
+        g.lineStyle(2, s.accent, 1);
+        g.strokeRoundedRect(cx - 22, cy - 58, 44, 70, 6);
+        g.fillStyle(s.accent, 0.7);
+        g.fillCircle(cx, cy - 36, 12);
+        g.fillCircle(cx, cy - 10, 8);
+      } else if (s.kind === 'chair') {
+        g.fillStyle(s.color, 1);
+        g.fillPoints(
+          [
+            { x: cx, y: cy + hh * 0.7 },
+            { x: cx + hw * 0.7, y: cy },
+            { x: cx, y: cy - hh * 0.7 },
+            { x: cx - hw * 0.7, y: cy },
+          ],
+          true
+        );
+        g.fillStyle(s.accent, 0.9);
+        g.fillRect(cx - 14, cy - 48, 28, 34);
+        g.fillStyle(s.color, 1);
+        g.fillRect(cx - 16, cy - 52, 6, 40);
+      } else {
+        // table / box: iso diamond top + sides
+        const topY = cy - hh * 0.85;
+        g.fillStyle(s.accent, 1);
+        g.fillPoints(
+          [
+            { x: cx, y: topY - hh },
+            { x: cx + hw, y: topY },
+            { x: cx, y: topY + hh },
+            { x: cx - hw, y: topY },
+          ],
+          true
+        );
+        g.fillStyle(s.color, 1);
+        g.fillPoints(
+          [
+            { x: cx - hw, y: topY },
+            { x: cx, y: topY + hh },
+            { x: cx, y: cy + hh * 0.35 },
+            { x: cx - hw, y: cy - hh * 0.35 },
+          ],
+          true
+        );
+        g.fillStyle(0x1a1018, 1);
+        g.fillPoints(
+          [
+            { x: cx + hw, y: topY },
+            { x: cx, y: topY + hh },
+            { x: cx, y: cy + hh * 0.35 },
+            { x: cx + hw, y: cy - hh * 0.35 },
+          ],
+          true
+        );
+        g.lineStyle(1, 0xffffff, 0.25);
+        g.strokePoints(
+          [
+            { x: cx, y: topY - hh },
+            { x: cx + hw, y: topY },
+            { x: cx, y: topY + hh },
+            { x: cx - hw, y: topY },
+          ],
+          true
+        );
+      }
+      g.generateTexture(s.key, s.w, s.h);
+      g.destroy();
+    }
+  }
+
 }
