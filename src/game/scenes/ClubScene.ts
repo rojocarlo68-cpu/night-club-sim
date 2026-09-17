@@ -651,13 +651,18 @@ export class ClubScene extends Phaser.Scene {
     return true;
   }
 
-  /** Display size for any furniture type (extend when adding shop items). */
+  /**
+   * Display size for any furniture type.
+   * Sofa/bar defaults sized so SE opaque ground-contact width (bottom ~20% of
+   * opaque bbox, PIL) ≈ 96px — matching a 2×1 footprint on 64×32 tiles (96×48).
+   * Shop items (DJ) use catalog displaySize; prefer booth base → footprint.
+   */
   private furnitureDisplaySize(kind: string, def?: FurnitureDef): { w: number; h: number } {
     if (def?.displayW && def?.displayH) return { w: def.displayW, h: def.displayH };
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
     if (cat) return { w: cat.displaySize[0], h: cat.displaySize[1] };
-    if (kind === 'bar') return { w: 168, h: 124 };
-    if (kind === 'sofa') return { w: 110, h: 84 };
+    if (kind === 'bar') return { w: 154, h: 120 };
+    if (kind === 'sofa') return { w: 190, h: 145 };
     return { w: 96, h: 72 };
   }
 
@@ -672,8 +677,8 @@ export class ClubScene extends Phaser.Scene {
     if (typeof def?.yBias === 'number') return { x, y: y + def.yBias };
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
     if (cat) return { x, y: y + (cat.yBias ?? -8) };
-    if (kind === 'bar') return { x, y: y - 16 };
-    if (kind === 'sofa') return { x, y: y - 6 };
+    if (kind === 'bar') return { x, y: y - 18 };
+    if (kind === 'sofa') return { x, y: y - 8 };
     return { x, y: y - 8 };
   }
 
@@ -1087,7 +1092,7 @@ export class ClubScene extends Phaser.Scene {
         if (!FACINGS.includes(this.barFacing)) this.barFacing = 'se';
         const bkey = this.furnitureTextureKey('bar', this.barFacing, f);
         this.requireTexture(bkey);
-        this.barImage = this.add.image(x, y - 16, bkey);
+        this.barImage = this.add.image(x, y - 18, bkey);
         this.applyBarDisplaySize();
         const barDepth = depthForFurniture(f.tile[0], f.tile[1], f.footprint);
         this.barImage.setDepth(barDepth);
@@ -1113,8 +1118,9 @@ export class ClubScene extends Phaser.Scene {
         if (!FACINGS.includes(this.sofaFacing)) this.sofaFacing = 'se';
         const key = this.furnitureTextureKey('sofa', this.sofaFacing, f);
         this.requireTexture(key);
-        this.sofaImage = this.add.image(x, y - 6, key);
-        this.sofaImage.setDisplaySize(110, 84);
+        this.sofaImage = this.add.image(x, y - 8, key);
+        const sofaSize = this.furnitureDisplaySize('sofa', f);
+        this.sofaImage.setDisplaySize(sofaSize.w, sofaSize.h);
         this.sofaImage.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint));
         this.sofaImage.setInteractive({ useHandCursor: true });
         this.sofaImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
