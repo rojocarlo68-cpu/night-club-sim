@@ -198,7 +198,8 @@ export class ClubScene extends Phaser.Scene {
   private rotateRightBtn!: Phaser.GameObjects.Container;
   private deleteBtn!: Phaser.GameObjects.Container;
   private rotateUiBg!: Phaser.GameObjects.Rectangle;
-  private deleteConfirmUi!: Phaser.GameObjects.Container;
+  /** True while UIScene delete-confirm modal is open (blocks Club input). */
+  private deleteConfirmOpen = false;
   private buildHint!: Phaser.GameObjects.Text;
 
   // Relative offsets from furniture tile (computed on load / after layout apply)
@@ -393,6 +394,8 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-request-shop-catalog', this.emitShopCatalog, this);
     this.game.events.on('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
     this.game.events.on('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
+    this.game.events.on('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
+    this.game.events.on('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
     this.emitStaffRoster();
     this.emitShopCatalog();
   }
@@ -1115,6 +1118,7 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private isPointerOverHud(p: Phaser.Input.Pointer): boolean {
+    if (this.deleteConfirmOpen) return true;
     if (p.y < HUD_TOP) return true;
     const ui = this.scene.get('UIScene') as Phaser.Scene & {
       isPointerOnUi?: (p: Phaser.Input.Pointer) => boolean;
@@ -1221,11 +1225,11 @@ export class ClubScene extends Phaser.Scene {
       ? tileToScreen(anchor.tile[0], anchor.tile[1], this.iso)
       : { x: this.iso.originX, y: this.iso.originY + 120 };
     this.buildRotateUi(pos.x, pos.y);
-    this.buildDeleteConfirmUi();
   }
 
   private beginFurniturePointer(p: Phaser.Input.Pointer, id: SelectedFurniture): void {
     if (!this.buildMode || !id) return;
+    if (this.deleteConfirmOpen || this.isPointerOverHud(p)) return;
     this.selectFurniture(id);
     this.furnDragging = true;
     this.furnDragId = id;
@@ -1376,6 +1380,7 @@ export class ClubScene extends Phaser.Scene {
       b.on('pointerout', () => b.setFillStyle(0x8a2048));
       b.on('pointerdown', (p: Phaser.Input.Pointer) => {
         p.event.stopPropagation();
+        if (this.deleteConfirmOpen) return;
         this.blockPanGesture = true;
         this.panActive = false;
         this.requestDeleteSelected();
@@ -1395,47 +1400,6 @@ export class ClubScene extends Phaser.Scene {
     ]);
   }
 
-  private buildDeleteConfirmUi(): void {
-    this.deleteConfirmUi = this.add.container(0, 0).setDepth(9500).setVisible(false).setScrollFactor(0);
-    const cam = this.cameras.main;
-    const dim = this.add.rectangle(cam.width / 2, cam.height / 2, cam.width * 2, cam.height * 2, 0x000000, 0.45);
-    dim.setInteractive();
-    dim.on('pointerdown', (p: Phaser.Input.Pointer) => p.event.stopPropagation());
-    const panel = this.add.rectangle(cam.width / 2, cam.height / 2, 280, 120, 0x1a0e28, 0.96);
-    panel.setStrokeStyle(2, 0xff3ca0);
-    const msg = this.add
-      .text(cam.width / 2, cam.height / 2 - 28, '¿Quitar este mueble?', {
-        fontSize: '15px',
-        color: '#ffe8f8',
-        fontStyle: 'bold',
-        align: 'center',
-      })
-      .setOrigin(0.5)
-      .setName('deleteConfirmMsg');
-    const mk = (ox: number, label: string, yes: boolean) => {
-      const c = this.add.container(cam.width / 2 + ox, cam.height / 2 + 28);
-      const fill = yes ? 0xb43282 : 0x3a2a48;
-      const b = this.add.rectangle(0, 0, 88, 32, fill, 1);
-      b.setStrokeStyle(1, yes ? 0xff7ac8 : 0x8870a0);
-      b.setInteractive({ useHandCursor: true });
-      const t = this.add
-        .text(0, 0, label, { fontSize: '14px', color: '#ffffff', fontStyle: 'bold' })
-        .setOrigin(0.5);
-      b.on('pointerover', () => b.setFillStyle(yes ? 0xd44a9a : 0x4a3a58));
-      b.on('pointerout', () => b.setFillStyle(fill));
-      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
-        p.event.stopPropagation();
-        this.blockPanGesture = true;
-        this.panActive = false;
-        this.deleteConfirmUi.setVisible(false);
-        if (yes) this.confirmDeleteSelected();
-      });
-      c.add([b, t]);
-      return c;
-    };
-    this.deleteConfirmUi.add([dim, panel, msg, mk(-52, 'Sí', true), mk(52, 'No', false)]);
-  }
-
   private layoutSelectionHud(canRotate: boolean): void {
     if (!this.rotateUi) return;
     if (canRotate) {
@@ -1452,17 +1416,16 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private requestDeleteSelected(): void {
-    if (!this.buildMode || !this.selectedFurniture || !this.deleteConfirmUi) return;
+    if (!this.buildMode || !this.selectedFurniture || this.deleteConfirmOpen) return;
     const def = this.getFurnitureDef(this.selectedFurniture);
     if (!def) return;
     const refund = this.refundForFurniture(def);
-    const msg = this.deleteConfirmUi.getByName('deleteConfirmMsg') as Phaser.GameObjects.Text | null;
-    if (msg) {
-      msg.setText(
-        refund > 0 ? `¿Quitar este mueble?\n(+$${refund})` : '¿Quitar este mueble?'
-      );
-    }
-    this.deleteConfirmUi.setVisible(true);
+    this.deleteConfirmOpen = true;
+    this.blockPanGesture = true;
+    this.panActive = false;
+    this.furnDragging = false;
+    this.furnDragId = null;
+    this.game.events.emit('ui-delete-confirm', { refund });
   }
 
   private refundForFurniture(def: FurnitureDef): number {
@@ -1470,6 +1433,21 @@ export class ClubScene extends Phaser.Scene {
     const cat = this.shopCatalogById.get(def.catalogId ?? def.type);
     return cat && cat.price > 0 ? cat.price : 0;
   }
+
+  private hideDeleteConfirmUi(): void {
+    const wasOpen = this.deleteConfirmOpen;
+    this.deleteConfirmOpen = false;
+    if (wasOpen) this.game.events.emit('ui-delete-confirm-hide');
+  }
+
+  private onCmdConfirmDeleteFurniture = (): void => {
+    this.deleteConfirmOpen = false;
+    this.confirmDeleteSelected();
+  };
+
+  private onCmdCancelDeleteFurniture = (): void => {
+    this.deleteConfirmOpen = false;
+  };
 
   private confirmDeleteSelected(): void {
     if (!this.buildMode || !this.selectedFurniture) return;
@@ -1573,7 +1551,7 @@ export class ClubScene extends Phaser.Scene {
     }
     this.selectedFurniture = null;
     if (this.rotateUi) this.rotateUi.setVisible(false);
-    if (this.deleteConfirmUi) this.deleteConfirmUi.setVisible(false);
+    this.hideDeleteConfirmUi();
   }
 
   setBuildMode = (on: boolean): void => {
@@ -1583,7 +1561,6 @@ export class ClubScene extends Phaser.Scene {
     }
     this.buildMode = on;
     this.clearFurnitureSelection();
-    if (this.deleteConfirmUi) this.deleteConfirmUi.setVisible(false);
     this.hideBarMenu();
     this.closeFurnitureInspect();
     this.deselectNpc();
@@ -3554,6 +3531,8 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-request-shop-catalog', this.emitShopCatalog, this);
     this.game.events.off('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
     this.game.events.off('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
+    this.game.events.off('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
+    this.game.events.off('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
   }
 
   private onCmdDeselectFurniture = (): void => {

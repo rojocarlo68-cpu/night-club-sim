@@ -81,6 +81,10 @@ export class UIScene extends Phaser.Scene {
   private shopRows: Phaser.GameObjects.GameObject[] = [];
   private shopTab: 'muebles' | 'decoracion' = 'muebles';
 
+  private deleteConfirm!: Phaser.GameObjects.Container;
+  private deleteConfirmVisible = false;
+  private deleteConfirmMsg!: Phaser.GameObjects.Text;
+
   private furnPanel!: Phaser.GameObjects.Container;
   private furnPanelVisible = false;
   private furnName!: Phaser.GameObjects.Text;
@@ -303,6 +307,7 @@ export class UIScene extends Phaser.Scene {
 
     this.createStaffPanel();
     this.createShopPanel();
+    this.createDeleteConfirm();
 
     this.game.events.on('club-ready', this.onStats, this);
     this.game.events.on('stats-updated', this.onStats, this);
@@ -319,6 +324,8 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('shop-buy-failed', this.onShopBuyFailed, this);
     this.game.events.on('select-furniture', this.onSelectFurniture, this);
     this.game.events.on('furniture-deselected', this.onFurnitureDeselected, this);
+    this.game.events.on('ui-delete-confirm', this.onDeleteConfirm, this);
+    this.game.events.on('ui-delete-confirm-hide', this.hideDeleteConfirm, this);
 
     this.scale.on('resize', this.onResize, this);
     this.refreshBuildButtons();
@@ -385,6 +392,8 @@ export class UIScene extends Phaser.Scene {
   isPointerOnUi(p: Phaser.Input.Pointer): boolean {
     const w = this.cameras.main.width;
     const h = this.cameras.main.height;
+    // Full-screen modal: block all ClubScene gestures underneath
+    if (this.deleteConfirmVisible) return true;
     if (p.y < 56) return true;
     if (p.x < 250 && p.y > h - 60) return true;
     if (this.panelVisible) {
@@ -558,6 +567,7 @@ export class UIScene extends Phaser.Scene {
       this.game.events.emit('cmd-request-shop-catalog');
     } else {
       this.hideShopPanel();
+      this.hideDeleteConfirm();
     }
     this.refreshBuildButtons();
   };
@@ -655,6 +665,7 @@ export class UIScene extends Phaser.Scene {
     this.summary.setPosition(w / 2, h / 2);
     this.staffPanel.setPosition(w / 2, h / 2);
     if (this.shopPanel) this.shopPanel.setPosition(w / 2, h / 2);
+    this.layoutDeleteConfirm(w, h);
   };
 
   private createStaffPanel(): void {
@@ -875,6 +886,106 @@ export class UIScene extends Phaser.Scene {
     const close = this.makeLocalButton(170, -228, 36, 32, '✕', () => this.hideShopPanel());
     this.shopPanel.add([bg, title, close]);
   }
+
+  private createDeleteConfirm(): void {
+    const cam = this.cameras.main;
+    // Screen-space modal in UIScene (zoom=1) so Sí/No hit areas match visuals on mobile.
+    this.deleteConfirm = this.add
+      .container(0, 0)
+      .setScrollFactor(0)
+      .setVisible(false)
+      .setDepth(9800);
+
+    const dim = this.add
+      .rectangle(cam.width / 2, cam.height / 2, cam.width + 40, cam.height + 40, 0x000000, 0.5)
+      .setName('deleteDim')
+      .setInteractive();
+    dim.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      p.event.stopPropagation();
+    });
+
+    const panel = this.add
+      .rectangle(cam.width / 2, cam.height / 2, 280, 130, 0x1a0e28, 0.96)
+      .setName('deletePanel');
+    panel.setStrokeStyle(2, 0xff3ca0);
+    // Absorb taps on panel chrome so they do not fall through to ClubScene
+    panel.setInteractive();
+    panel.on('pointerdown', (p: Phaser.Input.Pointer) => p.event.stopPropagation());
+
+    this.deleteConfirmMsg = this.add
+      .text(cam.width / 2, cam.height / 2 - 28, '¿Quitar este mueble?', {
+        fontSize: '15px',
+        color: '#ffe8f8',
+        fontStyle: 'bold',
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setName('deleteConfirmMsg');
+
+    const mk = (ox: number, label: string, yes: boolean) => {
+      const c = this.add.container(cam.width / 2 + ox, cam.height / 2 + 32).setName(yes ? 'deleteYes' : 'deleteNo');
+      const fill = yes ? 0xb43282 : 0x3a2a48;
+      const b = this.add.rectangle(0, 0, 96, 40, fill, 1);
+      b.setStrokeStyle(1, yes ? 0xff7ac8 : 0x8870a0);
+      // Explicit hit area — reliable on touch / mobile
+      b.setInteractive({ useHandCursor: true, hitArea: new Phaser.Geom.Rectangle(-48, -20, 96, 40), hitAreaCallback: Phaser.Geom.Rectangle.Contains });
+      const t = this.add
+        .text(0, 0, label, { fontSize: '16px', color: '#ffffff', fontStyle: 'bold' })
+        .setOrigin(0.5);
+      b.on('pointerover', () => b.setFillStyle(yes ? 0xd44a9a : 0x4a3a58));
+      b.on('pointerout', () => b.setFillStyle(fill));
+      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
+        p.event.stopPropagation();
+        if (!this.deleteConfirmVisible) return;
+        this.hideDeleteConfirm();
+        if (yes) this.game.events.emit('cmd-confirm-delete-furniture');
+        else this.game.events.emit('cmd-cancel-delete-furniture');
+      });
+      c.add([b, t]);
+      return c;
+    };
+
+    this.deleteConfirm.add([dim, panel, this.deleteConfirmMsg, mk(-56, 'Sí', true), mk(56, 'No', false)]);
+  }
+
+  private layoutDeleteConfirm(w: number, h: number): void {
+    if (!this.deleteConfirm) return;
+    const dim = this.deleteConfirm.getByName('deleteDim') as Phaser.GameObjects.Rectangle | null;
+    const panel = this.deleteConfirm.getByName('deletePanel') as Phaser.GameObjects.Rectangle | null;
+    const yes = this.deleteConfirm.getByName('deleteYes') as Phaser.GameObjects.Container | null;
+    const no = this.deleteConfirm.getByName('deleteNo') as Phaser.GameObjects.Container | null;
+    if (dim) {
+      dim.setPosition(w / 2, h / 2);
+      dim.setSize(w + 40, h + 40);
+    }
+    if (panel) panel.setPosition(w / 2, h / 2);
+    if (this.deleteConfirmMsg) this.deleteConfirmMsg.setPosition(w / 2, h / 2 - 28);
+    if (yes) yes.setPosition(w / 2 - 56, h / 2 + 32);
+    if (no) no.setPosition(w / 2 + 56, h / 2 + 32);
+  }
+
+  private onDeleteConfirm = (payload: { refund?: number }): void => {
+    if (!this.deleteConfirm) return;
+    this.hideShopPanel();
+    this.hideStaffPanel();
+    const refund = typeof payload?.refund === 'number' ? payload.refund : 0;
+    this.deleteConfirmMsg.setText(
+      refund > 0 ? `¿Quitar este mueble?\n(+$${refund})` : '¿Quitar este mueble?'
+    );
+    const cam = this.cameras.main;
+    this.layoutDeleteConfirm(cam.width, cam.height);
+    this.deleteConfirmVisible = true;
+    this.deleteConfirm.setVisible(true);
+    // Ensure on top of other UI panels
+    this.deleteConfirm.setDepth(9800);
+  };
+
+  private hideDeleteConfirm = (): void => {
+    if (!this.deleteConfirm) return;
+    this.deleteConfirmVisible = false;
+    this.deleteConfirm.setVisible(false);
+  };
+
 
   private toggleShopPanel(): void {
     if (this.shopPanelVisible) this.hideShopPanel();
