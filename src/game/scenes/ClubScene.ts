@@ -145,13 +145,13 @@ export class ClubScene extends Phaser.Scene {
   private staffSpot!: { col: number; row: number };
   private drinks: Drink[] = [];
 
-  private sofaDef!: FurnitureDef;
-  private barDef!: FurnitureDef;
+  private sofaDef: FurnitureDef | null = null;
+  private barDef: FurnitureDef | null = null;
   private sofaFacing: IsoFacing = 'se';
   private barFacing: IsoFacing = 'se';
-  private sofaImage!: Phaser.GameObjects.Image;
-  private barImage!: Phaser.GameObjects.Image;
-  private barGlow!: Phaser.GameObjects.Arc;
+  private sofaImage: Phaser.GameObjects.Image | null = null;
+  private barImage: Phaser.GameObjects.Image | null = null;
+  private barGlow: Phaser.GameObjects.Arc | null = null;
   private roomImage!: Phaser.GameObjects.Image;
   /** Purchased / decor furniture images keyed by instance id. */
   private shopImages = new Map<string, Phaser.GameObjects.Image>();
@@ -161,6 +161,11 @@ export class ClubScene extends Phaser.Scene {
 
   private selectedFurniture: SelectedFurniture = null;
   private rotateUi!: Phaser.GameObjects.Container;
+  private rotateLeftBtn!: Phaser.GameObjects.Container;
+  private rotateRightBtn!: Phaser.GameObjects.Container;
+  private deleteBtn!: Phaser.GameObjects.Container;
+  private rotateUiBg!: Phaser.GameObjects.Rectangle;
+  private deleteConfirmUi!: Phaser.GameObjects.Container;
   private buildHint!: Phaser.GameObjects.Text;
 
   // Relative offsets from furniture tile (computed on load / after layout apply)
@@ -267,6 +272,8 @@ export class ClubScene extends Phaser.Scene {
     this.barDef = bar;
     this.sofaDef = sofa;
     this.captureOffsets();
+    // Spots first so a saved layout that deleted sofa/bar still leaves AI fallbacks
+    this.syncSpotsFromFurniture();
 
     this.applySavedLayout();
 
@@ -474,6 +481,7 @@ export class ClubScene extends Phaser.Scene {
   private captureOffsets(): void {
     const s = this.sofaDef;
     const b = this.barDef;
+    if (!s || !b) return;
     if (s.restSpot) {
       this.sofaRestOff = [s.restSpot[0] - s.tile[0], s.restSpot[1] - s.tile[1]];
     }
@@ -499,7 +507,7 @@ export class ClubScene extends Phaser.Scene {
       if (typeof saved?.money === 'number' && Number.isFinite(saved.money)) {
         this.money = Math.max(0, Math.floor(saved.money));
       }
-      if (!saved?.furniture?.length) return;
+      if (!Array.isArray(saved?.furniture)) return;
       // Ensure shop catalog available before restoring purchased pieces
       this.loadShopCatalog();
       for (const item of saved.furniture) {
@@ -529,11 +537,18 @@ export class ClubScene extends Phaser.Scene {
           def.flipX = item.flipX;
         }
       }
-      // Re-apply relative spots from offsets
-      this.sofaDef = this.scenario.furniture.find((f) => f.type === 'sofa')!;
-      this.barDef = this.scenario.furniture.find((f) => f.type === 'bar')!;
-      this.applyOffsetsToDef(this.sofaDef, this.sofaRestOff, this.sofaInteractOff, 'sofa');
-      this.applyOffsetsToDef(this.barDef, this.barStaffOff, this.barInteractOff, 'bar');
+      // Saved list is authoritative: deleted pieces stay gone across reload
+      const savedIds = new Set(saved.furniture.map((i) => i.id));
+      this.scenario.furniture = this.scenario.furniture.filter((f) => savedIds.has(f.id));
+      // Re-apply relative spots from offsets (sofa/bar may have been deleted)
+      this.sofaDef = this.scenario.furniture.find((f) => f.type === 'sofa') ?? null;
+      this.barDef = this.scenario.furniture.find((f) => f.type === 'bar') ?? null;
+      if (this.sofaDef) {
+        this.applyOffsetsToDef(this.sofaDef, this.sofaRestOff, this.sofaInteractOff, 'sofa');
+      }
+      if (this.barDef) {
+        this.applyOffsetsToDef(this.barDef, this.barStaffOff, this.barInteractOff, 'bar');
+      }
     } catch {
       // ignore corrupt layout
     }
@@ -575,11 +590,21 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private syncSpotsFromFurniture(): void {
-    this.applyOffsetsToDef(this.sofaDef, this.sofaRestOff, this.sofaInteractOff, 'sofa');
-    this.applyOffsetsToDef(this.barDef, this.barStaffOff, this.barInteractOff, 'bar');
-    this.barInteract = { col: this.barDef.interact![0], row: this.barDef.interact![1] };
-    this.staffSpot = { col: this.barDef.staffSpot![0], row: this.barDef.staffSpot![1] };
-    this.sofaRest = { col: this.sofaDef.restSpot![0], row: this.sofaDef.restSpot![1] };
+    if (this.sofaDef) {
+      this.applyOffsetsToDef(this.sofaDef, this.sofaRestOff, this.sofaInteractOff, 'sofa');
+      if (this.sofaDef.restSpot) {
+        this.sofaRest = { col: this.sofaDef.restSpot[0], row: this.sofaDef.restSpot[1] };
+      }
+    }
+    if (this.barDef) {
+      this.applyOffsetsToDef(this.barDef, this.barStaffOff, this.barInteractOff, 'bar');
+      if (this.barDef.interact) {
+        this.barInteract = { col: this.barDef.interact[0], row: this.barDef.interact[1] };
+      }
+      if (this.barDef.staffSpot) {
+        this.staffSpot = { col: this.barDef.staffSpot[0], row: this.barDef.staffSpot[1] };
+      }
+    }
   }
 
   /** Normal character depth vs furniture — Luna always full-body visible. */
@@ -1076,6 +1101,7 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private applyBarDisplaySize(): void {
+    if (!this.barImage) return;
     const size = this.furnitureDisplaySize('bar');
     this.barImage.setDisplaySize(size.w, size.h);
     this.barImage.setAlpha(1);
@@ -1140,9 +1166,12 @@ export class ClubScene extends Phaser.Scene {
         this.spawnShopFurnitureVisual(f);
       }
     }
-    const anchor = this.sofaDef || this.barDef;
-    const pos = tileToScreen(anchor.tile[0], anchor.tile[1], this.iso);
+    const anchor = this.sofaDef || this.barDef || this.scenario.furniture[0];
+    const pos = anchor
+      ? tileToScreen(anchor.tile[0], anchor.tile[1], this.iso)
+      : { x: this.iso.originX, y: this.iso.originY + 120 };
     this.buildRotateUi(pos.x, pos.y);
+    this.buildDeleteConfirmUi();
   }
 
   private beginFurniturePointer(p: Phaser.Input.Pointer, id: SelectedFurniture): void {
@@ -1212,6 +1241,7 @@ export class ClubScene extends Phaser.Scene {
   private repositionFurnitureVisual(id: SelectedFurniture): void {
     if (!id) return;
     if (id === 'sofa') {
+      if (!this.sofaDef || !this.sofaImage) return;
       const pos = this.furnitureWorldPos('sofa', this.sofaDef.tile[0], this.sofaDef.tile[1]);
       this.sofaImage.setPosition(pos.x, pos.y);
       this.sofaImage.setDepth(
@@ -1221,6 +1251,7 @@ export class ClubScene extends Phaser.Scene {
         this.rotateUi.setPosition(pos.x, pos.y - 66);
       }
     } else if (id === 'bar') {
+      if (!this.barDef || !this.barImage) return;
       const pos = this.furnitureWorldPos('bar', this.barDef.tile[0], this.barDef.tile[1]);
       const barDepth = depthForFurniture(
         this.barDef.tile[0],
@@ -1229,10 +1260,12 @@ export class ClubScene extends Phaser.Scene {
       );
       this.barImage.setPosition(pos.x, pos.y);
       this.barImage.setDepth(barDepth);
-      this.barGlow.setPosition(pos.x, pos.y - 4);
-      this.barGlow.setDepth(
-        depthForFurniture(this.barDef.tile[0], this.barDef.tile[1], this.barDef.footprint, 2)
-      );
+      if (this.barGlow) {
+        this.barGlow.setPosition(pos.x, pos.y - 4);
+        this.barGlow.setDepth(
+          depthForFurniture(this.barDef.tile[0], this.barDef.tile[1], this.barDef.footprint, 2)
+        );
+      }
       if (this.selectedFurniture === 'bar') {
         this.rotateUi.setPosition(pos.x, pos.y - 70);
       }
@@ -1256,10 +1289,10 @@ export class ClubScene extends Phaser.Scene {
   private buildRotateUi(x: number, y: number): void {
     this.rotateUi = this.add.container(x, y - 70).setDepth(9000).setVisible(false);
 
-    const bg = this.add.rectangle(0, 0, 168, 40, 0x1a0e28, 0.92);
-    bg.setStrokeStyle(1, 0xff3ca0);
+    this.rotateUiBg = this.add.rectangle(0, 0, 260, 40, 0x1a0e28, 0.92);
+    this.rotateUiBg.setStrokeStyle(1, 0xff3ca0);
 
-    const mk = (ox: number, label: string, dir: number) => {
+    const mkRotate = (ox: number, label: string, dir: number) => {
       const c = this.add.container(ox, 0);
       const b = this.add.rectangle(0, 0, 72, 28, 0xb43282, 1);
       b.setStrokeStyle(1, 0xff7ac8);
@@ -1279,7 +1312,158 @@ export class ClubScene extends Phaser.Scene {
       return c;
     };
 
-    this.rotateUi.add([bg, mk(-40, 'Girar ⟲', -1), mk(40, 'Girar ⟳', 1)]);
+    const mkDelete = (ox: number) => {
+      const c = this.add.container(ox, 0);
+      const b = this.add.rectangle(0, 0, 84, 28, 0x8a2048, 1);
+      b.setStrokeStyle(1, 0xff6a9a);
+      b.setInteractive({ useHandCursor: true });
+      const t = this.add
+        .text(0, 0, 'Eliminar', { fontSize: '12px', color: '#ffffff', fontStyle: 'bold' })
+        .setOrigin(0.5);
+      b.on('pointerover', () => b.setFillStyle(0xaa3060));
+      b.on('pointerout', () => b.setFillStyle(0x8a2048));
+      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
+        p.event.stopPropagation();
+        this.blockPanGesture = true;
+        this.panActive = false;
+        this.requestDeleteSelected();
+      });
+      c.add([b, t]);
+      return c;
+    };
+
+    this.rotateLeftBtn = mkRotate(-86, 'Girar ⟲', -1);
+    this.rotateRightBtn = mkRotate(-8, 'Girar ⟳', 1);
+    this.deleteBtn = mkDelete(88);
+    this.rotateUi.add([
+      this.rotateUiBg,
+      this.rotateLeftBtn,
+      this.rotateRightBtn,
+      this.deleteBtn,
+    ]);
+  }
+
+  private buildDeleteConfirmUi(): void {
+    this.deleteConfirmUi = this.add.container(0, 0).setDepth(9500).setVisible(false).setScrollFactor(0);
+    const cam = this.cameras.main;
+    const dim = this.add.rectangle(cam.width / 2, cam.height / 2, cam.width * 2, cam.height * 2, 0x000000, 0.45);
+    dim.setInteractive();
+    dim.on('pointerdown', (p: Phaser.Input.Pointer) => p.event.stopPropagation());
+    const panel = this.add.rectangle(cam.width / 2, cam.height / 2, 280, 120, 0x1a0e28, 0.96);
+    panel.setStrokeStyle(2, 0xff3ca0);
+    const msg = this.add
+      .text(cam.width / 2, cam.height / 2 - 28, '¿Quitar este mueble?', {
+        fontSize: '15px',
+        color: '#ffe8f8',
+        fontStyle: 'bold',
+        align: 'center',
+      })
+      .setOrigin(0.5)
+      .setName('deleteConfirmMsg');
+    const mk = (ox: number, label: string, yes: boolean) => {
+      const c = this.add.container(cam.width / 2 + ox, cam.height / 2 + 28);
+      const fill = yes ? 0xb43282 : 0x3a2a48;
+      const b = this.add.rectangle(0, 0, 88, 32, fill, 1);
+      b.setStrokeStyle(1, yes ? 0xff7ac8 : 0x8870a0);
+      b.setInteractive({ useHandCursor: true });
+      const t = this.add
+        .text(0, 0, label, { fontSize: '14px', color: '#ffffff', fontStyle: 'bold' })
+        .setOrigin(0.5);
+      b.on('pointerover', () => b.setFillStyle(yes ? 0xd44a9a : 0x4a3a58));
+      b.on('pointerout', () => b.setFillStyle(fill));
+      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
+        p.event.stopPropagation();
+        this.blockPanGesture = true;
+        this.panActive = false;
+        this.deleteConfirmUi.setVisible(false);
+        if (yes) this.confirmDeleteSelected();
+      });
+      c.add([b, t]);
+      return c;
+    };
+    this.deleteConfirmUi.add([dim, panel, msg, mk(-52, 'Sí', true), mk(52, 'No', false)]);
+  }
+
+  private layoutSelectionHud(canRotate: boolean): void {
+    if (!this.rotateUi) return;
+    if (canRotate) {
+      this.rotateUiBg.setSize(260, 40);
+      this.rotateLeftBtn.setVisible(true).setPosition(-86, 0);
+      this.rotateRightBtn.setVisible(true).setPosition(-8, 0);
+      this.deleteBtn.setPosition(88, 0);
+    } else {
+      this.rotateUiBg.setSize(108, 40);
+      this.rotateLeftBtn.setVisible(false);
+      this.rotateRightBtn.setVisible(false);
+      this.deleteBtn.setPosition(0, 0);
+    }
+  }
+
+  private requestDeleteSelected(): void {
+    if (!this.buildMode || !this.selectedFurniture || !this.deleteConfirmUi) return;
+    const def = this.getFurnitureDef(this.selectedFurniture);
+    if (!def) return;
+    const refund = this.refundForFurniture(def);
+    const msg = this.deleteConfirmUi.getByName('deleteConfirmMsg') as Phaser.GameObjects.Text | null;
+    if (msg) {
+      msg.setText(
+        refund > 0 ? `¿Quitar este mueble?\n(+$${refund})` : '¿Quitar este mueble?'
+      );
+    }
+    this.deleteConfirmUi.setVisible(true);
+  }
+
+  private refundForFurniture(def: FurnitureDef): number {
+    if (!def.fromShop && !def.catalogId) return 0;
+    const cat = this.shopCatalogById.get(def.catalogId ?? def.type);
+    return cat && cat.price > 0 ? cat.price : 0;
+  }
+
+  private confirmDeleteSelected(): void {
+    if (!this.buildMode || !this.selectedFurniture) return;
+    this.deleteFurniture(this.selectedFurniture);
+  }
+
+  private deleteFurniture(id: SelectedFurniture): void {
+    if (!id || !this.buildMode) return;
+    const def = this.getFurnitureDef(id);
+    if (!def) return;
+
+    const refund = this.refundForFurniture(def);
+    if (refund > 0) {
+      this.money += refund;
+    }
+
+    // Destroy visual
+    if (id === 'sofa') {
+      this.sofaImage?.destroy();
+      this.sofaImage = null;
+      this.sofaDef = null;
+    } else if (id === 'bar') {
+      this.barImage?.destroy();
+      this.barImage = null;
+      this.barGlow?.destroy();
+      this.barGlow = null;
+      this.barDef = null;
+    } else {
+      const img = this.shopImages.get(id);
+      img?.destroy();
+      this.shopImages.delete(id);
+    }
+
+    this.scenario.furniture = this.scenario.furniture.filter((f) => f.id !== def.id);
+    this.clearFurnitureSelection();
+    this.rebuildPathfinder();
+    this.syncSpotsFromFurniture();
+    this.persistLayout();
+    this.syncFurnitureInteractive();
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.emitShopCatalog();
+    const hint =
+      refund > 0
+        ? `Mueble eliminado · +$${refund} reembolsados`
+        : 'Mueble eliminado';
+    this.buildHint.setText(hint).setVisible(true);
   }
 
   private selectFurniture(id: SelectedFurniture): void {
@@ -1289,24 +1473,29 @@ export class ClubScene extends Phaser.Scene {
     this.clearFurnitureSelection();
     this.selectedFurniture = id;
     if (id === 'sofa') {
+      if (!this.sofaImage || !this.sofaDef) return;
       this.sofaImage.setTint(0xffc0e8);
+      this.layoutSelectionHud(true);
       this.rotateUi.setVisible(true);
       const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
       this.rotateUi.setPosition(x, y - 72);
-      this.buildHint.setText('Arrastra el sofá · Girar ⟲ ⟳').setVisible(true);
+      this.buildHint.setText('Arrastra el sofá · Girar ⟲ ⟳ · Eliminar').setVisible(true);
     } else if (id === 'bar') {
+      if (!this.barImage || !this.barDef) return;
       this.barImage.setTint(0xffe0a0);
+      this.layoutSelectionHud(true);
       this.rotateUi.setVisible(true);
       const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
       this.rotateUi.setPosition(x, y - 86);
-      this.buildHint.setText('Arrastra la barra · Girar ⟲ ⟳').setVisible(true);
+      this.buildHint.setText('Arrastra la barra · Girar ⟲ ⟳ · Eliminar').setVisible(true);
     } else {
       const def = this.getFurnitureDef(id);
       const img = this.shopImages.get(id);
       if (!def || !img) return;
       img.setTint(0xc8b0ff);
       const support = def.facingSupport ?? 'flip';
-      this.rotateUi.setVisible(support !== 'none');
+      this.layoutSelectionHud(support !== 'none');
+      this.rotateUi.setVisible(true);
       const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
       this.rotateUi.setPosition(pos.x, pos.y - 78);
       const name = this.shopCatalogById.get(def.catalogId ?? '')?.name ?? 'mueble';
@@ -1316,7 +1505,7 @@ export class ClubScene extends Phaser.Scene {
           : support === 'full'
             ? ' · Girar ⟲ ⟳'
             : '';
-      this.buildHint.setText(`Arrastra ${name}${rotHint}`).setVisible(true);
+      this.buildHint.setText(`Arrastra ${name}${rotHint} · Eliminar`).setVisible(true);
     }
   }
 
@@ -1330,6 +1519,7 @@ export class ClubScene extends Phaser.Scene {
     }
     this.selectedFurniture = null;
     if (this.rotateUi) this.rotateUi.setVisible(false);
+    if (this.deleteConfirmUi) this.deleteConfirmUi.setVisible(false);
   }
 
   setBuildMode = (on: boolean): void => {
@@ -1339,6 +1529,7 @@ export class ClubScene extends Phaser.Scene {
     }
     this.buildMode = on;
     this.clearFurnitureSelection();
+    if (this.deleteConfirmUi) this.deleteConfirmUi.setVisible(false);
     this.hideBarMenu();
     this.deselectNpc();
     this.game.events.emit('npc-deselected');
@@ -1366,7 +1557,7 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private rotateSofa(dir: number): void {
-    if (!this.buildMode) return;
+    if (!this.buildMode || !this.sofaDef || !this.sofaImage) return;
     const idx = FACINGS.indexOf(this.sofaFacing);
     const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
     const prevFacing = this.sofaFacing;
@@ -1418,7 +1609,7 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private rotateBar(dir: number): void {
-    if (!this.buildMode) return;
+    if (!this.buildMode || !this.barDef || !this.barImage) return;
     const idx = FACINGS.indexOf(this.barFacing);
     const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
     const prevFp: [number, number] = [...this.barDef.footprint] as [number, number];
@@ -1534,7 +1725,7 @@ export class ClubScene extends Phaser.Scene {
     this.wirePatronClick(patron);
     this.patrons.push(patron);
 
-    const goSofa = Math.random() < 0.35;
+    const goSofa = this.sofaDef != null && Math.random() < 0.35;
     if (goSofa) {
       patron.goal = 'sofa';
       const spot = this.findFreeNear(this.sofaRest);
@@ -1919,7 +2110,7 @@ export class ClubScene extends Phaser.Scene {
 
   private isPointerOverGameObject(
     p: Phaser.Input.Pointer,
-    go: Phaser.GameObjects.Image | undefined
+    go: Phaser.GameObjects.Image | null | undefined
   ): boolean {
     if (!go || !go.active) return false;
     const world = this.cameras.main.getWorldPoint(p.x, p.y);
