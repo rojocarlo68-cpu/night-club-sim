@@ -1,0 +1,115 @@
+{
+  "items": [
+    {
+      "id": "dj_booth",
+      "name": "Mesa de DJ",
+      "price": 120,
+      "category": "muebles",
+      "sprite": "furn_dj_booth_se",
+      "spriteFile": "assets/furniture/dj_booth_se.png",
+      "sprites": {
+        "se": "furn_dj_booth_se",
+        "sw": "furn_dj_booth_sw",
+        "ne": "furn_dj_booth_ne",
+        "nw": "furn_dj_booth_nw"
+      },
+      "footprint": [2, 1],
+      "displaySize": [128, 135],
+      "yBias": -22,
+      "facingSupport": "full",
+      "defaultFacing": "se",
+      "blurb": "Cabina DJ neón 2×1. Más cara = más resistente."
+    },
+    {
+      "id": "mesa_cocktail",
+      "name": "Mesa cocktail",
+      "price": 35,
+      "category": "muebles",
+      "sprite": "furn_mesa_cocktail",
+      "footprint": [1, 1],
+      "displaySize": [56, 64],
+      "yBias": -10,
+      "facingSupport": "flip",
+      "defaultFacing": "se",
+      "blurb": "Mesita alta para copas. Placeholder iso."
+    },
+    {
+      "id": "silla",
+      "name": "Silla",
+      "price": 18,
+      "category": "muebles",
+      "sprite": "furn_silla",
+      "footprint": [1, 1],
+      "displaySize": [44, 58],
+      "yBias": -8,
+      "facingSupport": "flip",
+      "defaultFacing": "se",
+      "blurb": "Silla sencilla. Barata, se desgasta más rápido."
+    },
+    {
+      "id": "banqueta",
+      "name": "Banqueta",
+      "price": 22,
+      "category": "muebles",
+      "sprite": "furn_banqueta",
+      "footprint": [1, 1],
+      "displaySize": [48, 52],
+      "yBias": -6,
+      "facingSupport": "flip",
+      "defaultFacing": "se",
+      "blurb": "Banqueta de barra. Placeholder iso."
+    },
+    {
+      "id": "mesa_vip",
+      "name": "Mesa VIP",
+      "price": 85,
+      "category": "muebles",
+      "sprite": "furn_mesa_vip",
+      "footprint": [2, 1],
+      "displaySize": [110, 78],
+      "yBias": -14,
+      "facingSupport": "flip",
+      "defaultFacing": "se",
+      "blurb": "Mesa VIP 2×1. Más duradera que la cocktail."
+    },
+    {
+      "id": "planta",
+      "name": "Planta",
+      "price": 25,
+      "category": "decoracion",
+      "sprite": "furn_planta",
+      "footprint": [1, 1],
+      "displaySize": [42, 72],
+      "yBias": -16,
+      "facingSupport": "none",
+      "defaultFacing": "se",
+      "blurb": "Planta decorativa. Placeholder iso."
+    },
+    {
+      "id": "altavoz",
+      "name": "Altavoz",
+      "price": 55,
+      "category": "decoracion",
+      "sprite": "furn_altavoz",
+      "footprint": [1, 1],
+      "displaySize": [50, 70],
+      "yBias": -12,
+      "facingSupport": "flip",
+      "defaultFacing": "se",
+      "blurb": "Altavoz de pista. Placeholder iso."
+    },
+    {
+      "id": "luz_pista",
+      "name": "Luz de pista",
+      "price": 40,
+      "category": "decoracion",
+      "sprite": "furn_luz_pista",
+      "footprint": [1, 1],
+      "displaySize": [46, 60],
+      "yBias": -18,
+      "facingSupport": "none",
+      "defaultFacing": "se",
+      "blurb": "Foco de pista. Placeholder iso."
+    }
+  ]
+}
