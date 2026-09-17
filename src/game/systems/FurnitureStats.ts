@@ -174,3 +174,21 @@ export interface FurnitureInspectPayload {
   maxComfort: number;
   maxCleanliness: number;
 }
+
+/**
+ * Sell-back refund from remaining durability.
+ * r = durability / maxDurability in [0,1].
+ * r < 0.5 → $0; r in [0.5, 1] → linear 0%…100% of purchasePrice.
+ */
+export function refundForWear(
+  purchasePrice: number,
+  durability: number,
+  maxDurability: number
+): number {
+  const price = Math.max(0, Math.floor(purchasePrice));
+  if (price <= 0) return 0;
+  const maxD = Math.max(1, maxDurability);
+  const r = clampStat(durability / maxD, 1);
+  if (r < 0.5) return 0;
+  return Math.floor(price * (r - 0.5) / 0.5);
+}

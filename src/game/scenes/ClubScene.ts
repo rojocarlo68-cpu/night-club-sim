@@ -36,6 +36,7 @@ import {
   conditionFromDurability,
   freshStatsForPrice,
   mergeSavedStats,
+  refundForWear,
 } from '../systems/FurnitureStats';
 
 interface Drink {
@@ -113,6 +114,8 @@ interface SavedLayoutItem {
   catalogId?: string;
   flipX?: boolean;
   footprint?: [number, number];
+  /** Purchase / catalog price for wear refunds. */
+  price?: number;
   durability?: number;
   comfort?: number;
   cleanliness?: number;
@@ -206,6 +209,8 @@ export class ClubScene extends Phaser.Scene {
   private rotateUiBg!: Phaser.GameObjects.Rectangle;
   /** True while UIScene delete-confirm modal is open (blocks Club input). */
   private deleteConfirmOpen = false;
+  /** Snapshot id at confirm-open so Sí still deletes if selection is cleared. */
+  private pendingDeleteFurnitureId: string | null = null;
   private buildHint!: Phaser.GameObjects.Text;
 
   // Relative offsets from furniture tile (computed on load / after layout apply)
@@ -329,6 +334,7 @@ export class ClubScene extends Phaser.Scene {
       if (this.textures.exists(key)) this.requireTexture(key);
     }
     for (const f of this.scenario.furniture) {
+      this.ensureShopFlags(f);
       if (f.fromShop || f.catalogId) {
         const key = this.furnitureTextureKey(f.type, (f.facing as IsoFacing) || 'se', f);
         this.requireTexture(key);
@@ -581,6 +587,9 @@ export class ClubScene extends Phaser.Scene {
         if (typeof item.flipX === 'boolean') {
           def.flipX = item.flipX;
         }
+        if (typeof item.price === 'number' && item.price > 0) {
+          def.price = item.price;
+        }
         this.applyStatsFromSaved(def, item);
       }
       // Saved list is authoritative: deleted pieces stay gone across reload
@@ -624,6 +633,7 @@ export class ClubScene extends Phaser.Scene {
         catalogId: f.catalogId,
         flipX: f.flipX,
         footprint: [...f.footprint] as [number, number],
+        price: f.price,
         durability: f.durability,
         comfort: f.comfort,
         cleanliness: f.cleanliness,
@@ -1191,6 +1201,7 @@ export class ClubScene extends Phaser.Scene {
           this.beginFurniturePointer(p, 'bar');
         });
         this.barImage.on('pointerup', (p: Phaser.Input.Pointer) => {
+          if (this.deleteConfirmOpen) return;
           if (this.panDragging || this.skipNextTap) return;
           if (!this.buildMode) return;
           if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;
@@ -1215,6 +1226,7 @@ export class ClubScene extends Phaser.Scene {
           this.beginFurniturePointer(p, 'sofa');
         });
         this.sofaImage.on('pointerup', (p: Phaser.Input.Pointer) => {
+          if (this.deleteConfirmOpen) return;
           if (this.panDragging || this.skipNextTap) return;
           if (!this.buildMode) return;
           if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;
@@ -1222,8 +1234,12 @@ export class ClubScene extends Phaser.Scene {
             this.selectFurniture('sofa');
           }
         });
-      } else if (f.fromShop || f.catalogId) {
-        this.spawnShopFurnitureVisual(f);
+      } else {
+        // Shop / catalog pieces (silla, planta, altavoz, DJ, …) — never skip placeholders
+        this.ensureShopFlags(f);
+        if (f.fromShop || f.catalogId || this.shopCatalogById.has(f.type)) {
+          this.spawnShopFurnitureVisual(f);
+        }
       }
     }
     const anchor = this.sofaDef || this.barDef || this.scenario.furniture[0];
@@ -1424,8 +1440,9 @@ export class ClubScene extends Phaser.Scene {
   private requestDeleteSelected(): void {
     if (!this.buildMode || !this.selectedFurniture || this.deleteConfirmOpen) return;
     const def = this.getFurnitureDef(this.selectedFurniture);
-    if (!def) return;
+    if (!def || !def.id) return;
     const refund = this.refundForFurniture(def);
+    this.pendingDeleteFurnitureId = def.id;
     this.deleteConfirmOpen = true;
     this.blockPanGesture = true;
     this.panActive = false;
@@ -1434,62 +1451,92 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.emit('ui-delete-confirm', { refund });
   }
 
+  /** Wear-scaled sell-back; 0 when price unknown or durability < 50%. */
   private refundForFurniture(def: FurnitureDef): number {
-    if (!def.fromShop && !def.catalogId) return 0;
-    const cat = this.shopCatalogById.get(def.catalogId ?? def.type);
-    return cat && cat.price > 0 ? cat.price : 0;
+    this.ensureFurnitureStats(def);
+    const price = this.purchasePriceOf(def);
+    if (price <= 0) return 0;
+    const st = this.statsOf(def);
+    return refundForWear(price, st.durability, st.maxDurability);
+  }
+
+  /** Catalog / recorded purchase price; starters use STARTER_FURNITURE_PRICE. */
+  private purchasePriceOf(def: FurnitureDef): number {
+    if (typeof def.price === 'number' && def.price > 0) return Math.floor(def.price);
+    if (def.catalogId) {
+      const cat = this.shopCatalogById.get(def.catalogId);
+      if (cat && cat.price > 0) return Math.floor(cat.price);
+    }
+    if (def.type === 'sofa' || def.type === 'bar') return STARTER_FURNITURE_PRICE;
+    const cat = this.shopCatalogById.get(def.type);
+    if (cat && cat.price > 0) return Math.floor(cat.price);
+    return 0;
   }
 
   private hideDeleteConfirmUi(): void {
     const wasOpen = this.deleteConfirmOpen;
     this.deleteConfirmOpen = false;
+    this.pendingDeleteFurnitureId = null;
     if (wasOpen) this.game.events.emit('ui-delete-confirm-hide');
   }
 
   private onCmdConfirmDeleteFurniture = (): void => {
+    const id = this.pendingDeleteFurnitureId || this.selectedFurniture;
     this.deleteConfirmOpen = false;
-    this.confirmDeleteSelected();
+    this.pendingDeleteFurnitureId = null;
+    this.confirmDeleteFurniture(id);
   };
 
   private onCmdCancelDeleteFurniture = (): void => {
     this.deleteConfirmOpen = false;
+    this.pendingDeleteFurnitureId = null;
   };
 
-  private confirmDeleteSelected(): void {
-    if (!this.buildMode || !this.selectedFurniture) return;
-    this.deleteFurniture(this.selectedFurniture);
+  private confirmDeleteFurniture(id: SelectedFurniture): void {
+    if (!this.buildMode || !id) return;
+    this.deleteFurniture(id);
   }
 
   private deleteFurniture(id: SelectedFurniture): void {
     if (!id || !this.buildMode) return;
     const def = this.getFurnitureDef(id);
-    if (!def) return;
+    if (!def || !def.id) return;
 
     const refund = this.refundForFurniture(def);
     if (refund > 0) {
       this.money += refund;
     }
 
-    // Destroy visual
-    this.destroyDirtOverlay(def.id);
-    if (this.inspectedFurnitureId === def.id) this.closeFurnitureInspect();
-    if (id === 'sofa') {
+    const fid = def.id;
+    this.destroyDirtOverlay(fid);
+    this.cleanClaim.delete(fid);
+    this.releasePatronsAtFurniture(fid);
+    if (this.inspectedFurnitureId === fid) this.closeFurnitureInspect();
+
+    // Destroy visuals for every kind (sofa/bar aliases + shop instance ids)
+    const isSofa = id === 'sofa' || def.type === 'sofa' || fid === 'sofa';
+    const isBar = id === 'bar' || def.type === 'bar' || fid === 'bar';
+    if (isSofa) {
       this.sofaImage?.destroy();
       this.sofaImage = null;
       this.sofaDef = null;
-    } else if (id === 'bar') {
+    } else if (isBar) {
       this.barImage?.destroy();
       this.barImage = null;
       this.barGlow?.destroy();
       this.barGlow = null;
       this.barDef = null;
-    } else {
-      const img = this.shopImages.get(id);
-      img?.destroy();
-      this.shopImages.delete(id);
+    }
+    // Shop placeholders keyed by instance id (also try selection alias)
+    for (const key of new Set([fid, id])) {
+      const img = this.shopImages.get(key);
+      if (img) {
+        img.destroy();
+        this.shopImages.delete(key);
+      }
     }
 
-    this.scenario.furniture = this.scenario.furniture.filter((f) => f.id !== def.id);
+    this.scenario.furniture = this.scenario.furniture.filter((f) => f.id !== fid);
     this.clearFurnitureSelection();
     this.rebuildPathfinder();
     this.syncSpotsFromFurniture();
@@ -1500,12 +1547,22 @@ export class ClubScene extends Phaser.Scene {
     const hint =
       refund > 0
         ? `Mueble eliminado · +$${refund} reembolsados`
-        : 'Mueble eliminado';
+        : 'Mueble eliminado · sin reembolso';
     this.buildHint.setText(hint).setVisible(true);
   }
 
+  /** Drop seat claims / seated patrons tied to a removed piece. */
+  private releasePatronsAtFurniture(furnitureId: string): void {
+    for (const patron of this.patrons) {
+      if (patron.seatedFurnitureId !== furnitureId) continue;
+      this.releasePatronSlot(patron);
+      patron.seated = false;
+      patron.refreshStatusLabel();
+    }
+  }
+
   private selectFurniture(id: SelectedFurniture): void {
-    if (!this.buildMode || !id) return;
+    if (!this.buildMode || !id || this.deleteConfirmOpen) return;
     this.deselectNpc();
     this.game.events.emit('npc-deselected');
     this.clearFurnitureSelection();
@@ -1557,7 +1614,8 @@ export class ClubScene extends Phaser.Scene {
     }
     this.selectedFurniture = null;
     if (this.rotateUi) this.rotateUi.setVisible(false);
-    this.hideDeleteConfirmUi();
+    // Do NOT hide delete confirm here — pendingDeleteFurnitureId must survive
+    // pointerup reselect races while the UIScene modal is open.
   }
 
   setBuildMode = (on: boolean): void => {
@@ -1566,6 +1624,7 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
     this.buildMode = on;
+    this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     this.hideBarMenu();
     this.closeFurnitureInspect();
@@ -1701,6 +1760,7 @@ export class ClubScene extends Phaser.Scene {
     if (this.phase === 'summary') {
       this.resetForNewNight();
     }
+    this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     this.rebuildPathfinder();
     this.syncSpotsFromFurniture();
@@ -2654,6 +2714,7 @@ export class ClubScene extends Phaser.Scene {
 
   private finishNight(): void {
     this.phase = 'summary';
+    this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     if (this.selectedNpcId && this.selectedNpcId !== this.bartender?.profile.id) {
       this.deselectNpc();
@@ -3277,8 +3338,17 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
+  private ensureShopFlags(def: FurnitureDef): void {
+    if (def.type === 'sofa' || def.type === 'bar') return;
+    if (!def.catalogId && this.shopCatalogById.has(def.type)) {
+      def.catalogId = def.type;
+    }
+    if (def.catalogId) def.fromShop = true;
+  }
+
   private upgradeAllShopFurnitureFromCatalog(): void {
     for (const f of this.scenario.furniture) {
+      this.ensureShopFlags(f);
       if (f.fromShop || f.catalogId) this.upgradeShopFurnitureFromCatalog(f);
     }
   }
@@ -3318,9 +3388,23 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private getFurnitureDef(id: string): FurnitureDef | null {
-    if (id === 'sofa') return this.sofaDef;
-    if (id === 'bar') return this.barDef;
-    return this.scenario.furniture.find((f) => f.id === id) ?? null;
+    if (!id) return null;
+    // Instance id is authoritative (shop pieces like silla_1_2)
+    const byId = this.scenario.furniture.find((f) => f.id === id);
+    if (byId) return byId;
+    // Starter drag/select aliases
+    if (id === 'sofa') {
+      return this.sofaDef ?? this.scenario.furniture.find((f) => f.type === 'sofa') ?? null;
+    }
+    if (id === 'bar') {
+      return this.barDef ?? this.scenario.furniture.find((f) => f.type === 'bar') ?? null;
+    }
+    // Legacy / unique catalog-id-as-instance-id saves
+    const byCat = this.scenario.furniture.filter(
+      (f) => f.catalogId === id || f.type === id
+    );
+    if (byCat.length === 1) return byCat[0];
+    return null;
   }
 
   private getFurnitureImage(id: string): Phaser.GameObjects.Image | null {
@@ -3387,6 +3471,7 @@ export class ClubScene extends Phaser.Scene {
       this.beginFurniturePointer(p, instanceId);
     });
     img.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (this.deleteConfirmOpen) return;
       if (this.panDragging || this.skipNextTap) return;
       if (!this.buildMode) return;
       if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;

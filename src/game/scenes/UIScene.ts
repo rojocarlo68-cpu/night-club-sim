@@ -973,7 +973,9 @@ export class UIScene extends Phaser.Scene {
     this.hideStaffPanel();
     const refund = typeof payload?.refund === 'number' ? payload.refund : 0;
     this.deleteConfirmMsg.setText(
-      refund > 0 ? `¿Quitar este mueble?\n(+$${refund})` : '¿Quitar este mueble?'
+      refund > 0
+        ? `¿Quitar este mueble?\n(+$${refund})`
+        : '¿Quitar este mueble?\n(sin reembolso)'
     );
     const cam = this.cameras.main;
     this.layoutDeleteConfirm(cam.width, cam.height);
