@@ -87,6 +87,8 @@ export class UIScene extends Phaser.Scene {
   private deleteConfirm!: Phaser.GameObjects.Container;
   private deleteConfirmVisible = false;
   private deleteConfirmMsg!: Phaser.GameObjects.Text;
+  /** Id+refund snapshotted on the modal — Sí emits this id; never trust ClubScene selection. */
+  private pendingDelete: { id: string; refund: number } | null = null;
 
   private furnPanel!: Phaser.GameObjects.Container;
   private furnPanelVisible = false;
@@ -108,6 +110,8 @@ export class UIScene extends Phaser.Scene {
   }
 
   create(): void {
+    // Keep HUD/modals above ClubScene for pointer hit-testing
+    this.scene.bringToTop();
     const cam = this.cameras.main;
 
     // Top HUD
@@ -893,6 +897,8 @@ export class UIScene extends Phaser.Scene {
   private createDeleteConfirm(): void {
     const cam = this.cameras.main;
     // Screen-space modal in UIScene (zoom=1) so Sí/No hit areas match visuals on mobile.
+    // Confirm path carries furniture id in the event payload (see pendingDelete) — do not
+    // rely on ClubScene.selectedFurniture surviving pointer races while the modal is open.
     this.deleteConfirm = this.add
       .container(0, 0)
       .setScrollFactor(0)
@@ -906,14 +912,18 @@ export class UIScene extends Phaser.Scene {
     dim.on('pointerdown', (p: Phaser.Input.Pointer) => {
       p.event.stopPropagation();
     });
+    dim.on('pointerup', (p: Phaser.Input.Pointer) => {
+      p.event.stopPropagation();
+    });
 
     const panel = this.add
-      .rectangle(cam.width / 2, cam.height / 2, 280, 130, 0x1a0e28, 0.96)
+      .rectangle(cam.width / 2, cam.height / 2, 300, 150, 0x1a0e28, 0.96)
       .setName('deletePanel');
     panel.setStrokeStyle(2, 0xff3ca0);
     // Absorb taps on panel chrome so they do not fall through to ClubScene
     panel.setInteractive();
     panel.on('pointerdown', (p: Phaser.Input.Pointer) => p.event.stopPropagation());
+    panel.on('pointerup', (p: Phaser.Input.Pointer) => p.event.stopPropagation());
 
     this.deleteConfirmMsg = this.add
       .text(cam.width / 2, cam.height / 2 - 28, '¿Quitar este mueble?', {
@@ -925,30 +935,52 @@ export class UIScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setName('deleteConfirmMsg');
 
+    const BTN_W = 120;
+    const BTN_H = 52;
     const mk = (ox: number, label: string, yes: boolean) => {
-      const c = this.add.container(cam.width / 2 + ox, cam.height / 2 + 32).setName(yes ? 'deleteYes' : 'deleteNo');
+      const c = this.add.container(cam.width / 2 + ox, cam.height / 2 + 36).setName(yes ? 'deleteYes' : 'deleteNo');
+      // Depth above dim/panel so hit-testing prefers the buttons
+      c.setDepth(2);
       const fill = yes ? 0xb43282 : 0x3a2a48;
-      const b = this.add.rectangle(0, 0, 96, 40, fill, 1);
+      const b = this.add.rectangle(0, 0, BTN_W, BTN_H, fill, 1);
       b.setStrokeStyle(1, yes ? 0xff7ac8 : 0x8870a0);
-      // Explicit hit area — reliable on touch / mobile
-      b.setInteractive({ useHandCursor: true, hitArea: new Phaser.Geom.Rectangle(-48, -20, 96, 40), hitAreaCallback: Phaser.Geom.Rectangle.Contains });
+      // Large explicit hit area — reliable on touch / mobile
+      b.setInteractive({
+        useHandCursor: true,
+        hitArea: new Phaser.Geom.Rectangle(-BTN_W / 2, -BTN_H / 2, BTN_W, BTN_H),
+        hitAreaCallback: Phaser.Geom.Rectangle.Contains,
+      });
       const t = this.add
-        .text(0, 0, label, { fontSize: '16px', color: '#ffffff', fontStyle: 'bold' })
+        .text(0, 0, label, { fontSize: '18px', color: '#ffffff', fontStyle: 'bold' })
         .setOrigin(0.5);
       b.on('pointerover', () => b.setFillStyle(yes ? 0xd44a9a : 0x4a3a58));
       b.on('pointerout', () => b.setFillStyle(fill));
-      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      const onPress = (p: Phaser.Input.Pointer) => {
         p.event.stopPropagation();
-        if (!this.deleteConfirmVisible) return;
-        this.hideDeleteConfirm();
-        if (yes) this.game.events.emit('cmd-confirm-delete-furniture');
-        else this.game.events.emit('cmd-cancel-delete-furniture');
-      });
+        this.handleDeleteConfirmChoice(yes);
+      };
+      b.on('pointerdown', onPress);
+      b.on('pointerup', onPress);
       c.add([b, t]);
       return c;
     };
 
-    this.deleteConfirm.add([dim, panel, this.deleteConfirmMsg, mk(-56, 'Sí', true), mk(56, 'No', false)]);
+    // Display list: dim first, then panel/msg, then buttons last (higher for input)
+    this.deleteConfirm.add([dim, panel, this.deleteConfirmMsg, mk(-70, 'Sí', true), mk(70, 'No', false)]);
+  }
+
+  /** Sí/No — emit confirm with { id } from pendingDelete; pointerdown+up both guarded. */
+  private handleDeleteConfirmChoice(yes: boolean): void {
+    if (!this.deleteConfirmVisible) return;
+    const pending = this.pendingDelete;
+    this.hideDeleteConfirm();
+    if (yes) {
+      if (pending?.id) {
+        this.game.events.emit('cmd-confirm-delete-furniture', { id: pending.id });
+      }
+    } else {
+      this.game.events.emit('cmd-cancel-delete-furniture');
+    }
   }
 
   private layoutDeleteConfirm(w: number, h: number): void {
@@ -963,15 +995,18 @@ export class UIScene extends Phaser.Scene {
     }
     if (panel) panel.setPosition(w / 2, h / 2);
     if (this.deleteConfirmMsg) this.deleteConfirmMsg.setPosition(w / 2, h / 2 - 28);
-    if (yes) yes.setPosition(w / 2 - 56, h / 2 + 32);
-    if (no) no.setPosition(w / 2 + 56, h / 2 + 32);
+    if (yes) yes.setPosition(w / 2 - 70, h / 2 + 36);
+    if (no) no.setPosition(w / 2 + 70, h / 2 + 36);
   }
 
-  private onDeleteConfirm = (payload: { refund?: number }): void => {
+  private onDeleteConfirm = (payload: { id?: string; refund?: number }): void => {
     if (!this.deleteConfirm) return;
+    const id = typeof payload?.id === 'string' ? payload.id : '';
+    if (!id) return; // refuse to open without a concrete furniture id
     this.hideShopPanel();
     this.hideStaffPanel();
     const refund = typeof payload?.refund === 'number' ? payload.refund : 0;
+    this.pendingDelete = { id, refund };
     this.deleteConfirmMsg.setText(
       refund > 0
         ? `¿Quitar este mueble?\n(+$${refund})`
@@ -981,14 +1016,18 @@ export class UIScene extends Phaser.Scene {
     this.layoutDeleteConfirm(cam.width, cam.height);
     this.deleteConfirmVisible = true;
     this.deleteConfirm.setVisible(true);
-    // Ensure on top of other UI panels
     this.deleteConfirm.setDepth(9800);
+    // UIScene above ClubScene for input; topOnly so dim does not steal Sí/No
+    this.scene.bringToTop();
+    this.input.setTopOnly(true);
   };
 
   private hideDeleteConfirm = (): void => {
     if (!this.deleteConfirm) return;
     this.deleteConfirmVisible = false;
     this.deleteConfirm.setVisible(false);
+    this.pendingDelete = null;
+    this.input.setTopOnly(false);
   };
 
 

@@ -73,6 +73,7 @@ export class BootScene extends Phaser.Scene {
       this.ensurePlaceholderFurniture();
       this.scene.start('ClubScene');
       this.scene.launch('UIScene');
+      this.scene.bringToTop('UIScene');
     });
 
     this.load.image('room_floor', 'assets/tiles/room_floor.jpeg');

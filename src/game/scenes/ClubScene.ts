@@ -209,8 +209,6 @@ export class ClubScene extends Phaser.Scene {
   private rotateUiBg!: Phaser.GameObjects.Rectangle;
   /** True while UIScene delete-confirm modal is open (blocks Club input). */
   private deleteConfirmOpen = false;
-  /** Snapshot id at confirm-open so Sí still deletes if selection is cleared. */
-  private pendingDeleteFurnitureId: string | null = null;
   private buildHint!: Phaser.GameObjects.Text;
 
   // Relative offsets from furniture tile (computed on load / after layout apply)
@@ -1442,13 +1440,13 @@ export class ClubScene extends Phaser.Scene {
     const def = this.getFurnitureDef(this.selectedFurniture);
     if (!def || !def.id) return;
     const refund = this.refundForFurniture(def);
-    this.pendingDeleteFurnitureId = def.id;
     this.deleteConfirmOpen = true;
     this.blockPanGesture = true;
     this.panActive = false;
     this.furnDragging = false;
     this.furnDragId = null;
-    this.game.events.emit('ui-delete-confirm', { refund });
+    // Pass id in the open payload so UIScene can echo it back on Sí (selection may race-clear).
+    this.game.events.emit('ui-delete-confirm', { id: def.id, refund });
   }
 
   /** Wear-scaled sell-back; 0 when price unknown or durability < 50%. */
@@ -1476,20 +1474,22 @@ export class ClubScene extends Phaser.Scene {
   private hideDeleteConfirmUi(): void {
     const wasOpen = this.deleteConfirmOpen;
     this.deleteConfirmOpen = false;
-    this.pendingDeleteFurnitureId = null;
     if (wasOpen) this.game.events.emit('ui-delete-confirm-hide');
   }
 
-  private onCmdConfirmDeleteFurniture = (): void => {
-    const id = this.pendingDeleteFurnitureId || this.selectedFurniture;
+  /**
+   * Sí from UIScene — delete ONLY payload.id. Do not fall back to selectedFurniture
+   * (pointer races can clear selection while the modal is open).
+   */
+  private onCmdConfirmDeleteFurniture = (payload?: { id?: string }): void => {
     this.deleteConfirmOpen = false;
-    this.pendingDeleteFurnitureId = null;
+    const id = typeof payload?.id === 'string' ? payload.id : '';
+    if (!id) return; // missing id → safe no-op
     this.confirmDeleteFurniture(id);
   };
 
   private onCmdCancelDeleteFurniture = (): void => {
     this.deleteConfirmOpen = false;
-    this.pendingDeleteFurnitureId = null;
   };
 
   private confirmDeleteFurniture(id: SelectedFurniture): void {
@@ -1497,6 +1497,7 @@ export class ClubScene extends Phaser.Scene {
     this.deleteFurniture(id);
   }
 
+  /** Remove by id only — never requires selectedFurniture to still match. */
   private deleteFurniture(id: SelectedFurniture): void {
     if (!id || !this.buildMode) return;
     const def = this.getFurnitureDef(id);
@@ -1614,8 +1615,8 @@ export class ClubScene extends Phaser.Scene {
     }
     this.selectedFurniture = null;
     if (this.rotateUi) this.rotateUi.setVisible(false);
-    // Do NOT hide delete confirm here — pendingDeleteFurnitureId must survive
-    // pointerup reselect races while the UIScene modal is open.
+    // Do NOT hide delete confirm here — UIScene holds pendingDelete.id for Sí;
+    // selection may clear from pointer races while the modal is open.
   }
 
   setBuildMode = (on: boolean): void => {
