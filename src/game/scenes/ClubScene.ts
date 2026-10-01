@@ -133,6 +133,20 @@ interface SavedLayout {
 }
 
 const FACINGS: IsoFacing[] = ['se', 'sw', 'nw', 'ne'];
+
+/**
+ * Per-facing sofa art metrics (display px). Sprites were cut from different
+ * renders, so ground width / lowest point differ per facing. `w`/`h` scale each
+ * sprite so its ground contact (bottom 20% opaque span) is ~96px on screen;
+ * `gcx` = ground-span centre minus image centre, `bottom` = lowest opaque pixel
+ * minus image centre (both display px, x right / y down).
+ */
+const SOFA_ART: Record<IsoFacing, { w: number; h: number; gcx: number; bottom: number }> = {
+  se: { w: 189.1, h: 136.3, gcx: -38.0, bottom: 67.6 },
+  sw: { w: 181.5, h: 110.6, gcx: 29.2, bottom: 55.2 },
+  ne: { w: 157.9, h: 102.5, gcx: 27.0, bottom: 50.2 },
+  nw: { w: 177.6, h: 131.9, gcx: -34.5, bottom: 64.5 },
+};
 const LAYOUT_KEY = 'night-club-layout-v1';
 /** Soft wall rim: outermost tile ring sits under neon wall geometry. */
 const BUILD_MARGIN = 1;
@@ -593,6 +607,17 @@ export class ClubScene extends Phaser.Scene {
       // Saved list is authoritative: deleted pieces stay gone across reload
       const savedIds = new Set(saved.furniture.map((i) => i.id));
       this.scenario.furniture = this.scenario.furniture.filter((f) => savedIds.has(f.id));
+      // Sofa footprint/offsets are not persisted: rebuild them for the saved facing
+      // (default art/scenario pose is 'se' = footprint 1x2, front on +col).
+      const savedSofa = this.scenario.furniture.find((f) => f.type === 'sofa');
+      if (savedSofa) {
+        const steps = Math.max(0, FACINGS.indexOf((savedSofa.facing as IsoFacing) || 'se'));
+        for (let i = 0; i < steps; i++) {
+          savedSofa.footprint = [savedSofa.footprint[1], savedSofa.footprint[0]];
+          this.sofaRestOff = [-this.sofaRestOff[1], this.sofaRestOff[0]];
+          this.sofaInteractOff = [-this.sofaInteractOff[1], this.sofaInteractOff[0]];
+        }
+      }
       // Re-apply relative spots from offsets (sofa/bar may have been deleted)
       this.sofaDef = this.scenario.furniture.find((f) => f.type === 'sofa') ?? null;
       this.barDef = this.scenario.furniture.find((f) => f.type === 'bar') ?? null;
@@ -745,16 +770,24 @@ export class ClubScene extends Phaser.Scene {
 
   /**
    * Display size for any furniture type.
-   * Sofa/bar defaults sized so SE opaque ground-contact width (bottom ~20% of
-   * opaque bbox, PIL) ≈ 96px — matching a 2×1 footprint on 64×32 tiles (96×48).
+   * Bar default sized so SE opaque ground-contact width ≈ 96px (2×1 on 64×32 tiles).
+   * Sofa uses per-facing SOFA_ART metrics (ground width ≈ 96px in every facing).
    * Shop items (DJ) use catalog displaySize; prefer booth base → footprint.
    */
-  private furnitureDisplaySize(kind: string, def?: FurnitureDef): { w: number; h: number } {
+  private furnitureDisplaySize(
+    kind: string,
+    def?: FurnitureDef,
+    facing?: IsoFacing
+  ): { w: number; h: number } {
+    if (kind === 'sofa') {
+      const f = facing ?? ((def ?? this.sofaDef)?.facing as IsoFacing | undefined) ?? 'se';
+      const a = SOFA_ART[f] ?? SOFA_ART.se;
+      return { w: a.w, h: a.h };
+    }
     if (def?.displayW && def?.displayH) return { w: def.displayW, h: def.displayH };
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
     if (cat) return { w: cat.displaySize[0], h: cat.displaySize[1] };
     if (kind === 'bar') return { w: 154, h: 120 };
-    if (kind === 'sofa') return { w: 190, h: 145 };
     return { w: 96, h: 72 };
   }
 
@@ -763,14 +796,28 @@ export class ClubScene extends Phaser.Scene {
     kind: string,
     col: number,
     row: number,
-    def?: FurnitureDef
+    def?: FurnitureDef,
+    facing?: IsoFacing
   ): { x: number; y: number } {
     const { x, y } = tileToScreen(col, row, this.iso);
+    if (kind === 'sofa') {
+      // Align sprite ground to the footprint: ground-span centre on the footprint
+      // centre, lowest opaque pixel on the footprint's bottom vertex.
+      const d = def ?? this.sofaDef;
+      const f = facing ?? (d?.facing as IsoFacing | undefined) ?? 'se';
+      const a = SOFA_ART[f] ?? SOFA_ART.se;
+      const fw = Math.max(1, d?.footprint?.[0] ?? 2);
+      const fh = Math.max(1, d?.footprint?.[1] ?? 1);
+      const half = this.iso.tileWidth / 2;
+      const q = this.iso.tileHeight / 2;
+      const footCx = ((fw - 1) - (fh - 1)) * (half / 2);
+      const footBottom = (fw - 1 + (fh - 1)) * q + q; // bottom vertex below anchor-tile centre
+      return { x: x + footCx - a.gcx, y: y + footBottom - a.bottom };
+    }
     if (typeof def?.yBias === 'number') return { x, y: y + def.yBias };
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
     if (cat) return { x, y: y + (cat.yBias ?? -8) };
     if (kind === 'bar') return { x, y: y - 18 };
-    if (kind === 'sofa') return { x, y: y - 8 };
     return { x, y: y - 8 };
   }
 
@@ -793,8 +840,8 @@ export class ClubScene extends Phaser.Scene {
     facing: IsoFacing,
     def?: FurnitureDef
   ): boolean {
-    const size = this.furnitureDisplaySize(kind, def);
-    const pos = this.furnitureWorldPos(kind, col, row, def);
+    const size = this.furnitureDisplaySize(kind, def, facing);
+    const pos = this.furnitureWorldPos(kind, col, row, def, facing);
     const key = this.furnitureTextureFor(kind, facing, def);
     return canPlaceVisual(
       this.textures,
@@ -1213,8 +1260,9 @@ export class ClubScene extends Phaser.Scene {
         if (!FACINGS.includes(this.sofaFacing)) this.sofaFacing = 'se';
         const key = this.furnitureTextureKey('sofa', this.sofaFacing, f);
         this.requireTexture(key);
-        this.sofaImage = this.add.image(x, y - 8, key);
-        const sofaSize = this.furnitureDisplaySize('sofa', f);
+        const sofaPos = this.furnitureWorldPos('sofa', f.tile[0], f.tile[1], f, this.sofaFacing);
+        this.sofaImage = this.add.image(sofaPos.x, sofaPos.y, key);
+        const sofaSize = this.furnitureDisplaySize('sofa', f, this.sofaFacing);
         this.sofaImage.setDisplaySize(sofaSize.w, sofaSize.h);
         this.sofaImage.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint));
         this.sofaImage.setInteractive({ useHandCursor: true });
@@ -1316,7 +1364,13 @@ export class ClubScene extends Phaser.Scene {
     if (!id) return;
     if (id === 'sofa') {
       if (!this.sofaDef || !this.sofaImage) return;
-      const pos = this.furnitureWorldPos('sofa', this.sofaDef.tile[0], this.sofaDef.tile[1]);
+      const pos = this.furnitureWorldPos(
+        'sofa',
+        this.sofaDef.tile[0],
+        this.sofaDef.tile[1],
+        this.sofaDef,
+        this.sofaFacing
+      );
       this.sofaImage.setPosition(pos.x, pos.y);
       this.sofaImage.setDepth(
         depthForFurniture(this.sofaDef.tile[0], this.sofaDef.tile[1], this.sofaDef.footprint)
@@ -1697,9 +1751,10 @@ export class ClubScene extends Phaser.Scene {
 
     this.sofaFacing = next;
     this.sofaDef.facing = next;
-    const size = this.furnitureDisplaySize('sofa');
+    const size = this.furnitureDisplaySize('sofa', this.sofaDef, next);
     this.sofaImage.setTexture(this.furnitureTextureKey('sofa', next));
     this.sofaImage.setDisplaySize(size.w, size.h);
+    this.repositionFurnitureVisual('sofa');
     this.syncSpotsFromFurniture();
     this.persistLayout();
     this.rebuildPathfinder();
