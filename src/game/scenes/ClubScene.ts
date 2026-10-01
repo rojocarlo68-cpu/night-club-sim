@@ -7,11 +7,9 @@ import {
   depthForCharacter,
 } from '../systems/IsoUtils';
 import {
-  Point,
-  ROOM_NEON_MATCH_FRAC,
-  ROOM_ART_OFFSET_Y,
-  computePlayableFloorPolygon,
-  canPlaceVisual,
+  FLOOR_ART_VERTEX,
+  FLOOR_ART_SIZE,
+  STAGE_ART_TOP_VERTEX,
 } from '../systems/FloorBounds';
 import { Pathfinder } from '../systems/Pathfinding';
 import { Bartender, BartenderData, StaffAiJob } from '../entities/Bartender';
@@ -88,6 +86,8 @@ interface Scenario {
   spawnIntervalMs: number;
   map: { cols: number; rows: number; tileWidth: number; tileHeight: number };
   blocked: [number, number][];
+  /** Stage scene object: tile-footprint (cols x rows) whose tiles are in `blocked`. */
+  stage?: { tiles: [number, number]; footprint: [number, number] };
   furniture: FurnitureDef[];
   spawnTile: [number, number];
   exitTile: [number, number];
@@ -136,21 +136,20 @@ interface SavedLayout {
 const FACINGS: IsoFacing[] = ['se', 'sw', 'nw', 'ne'];
 
 /**
- * Per-facing sofa art metrics (display px). Sprites are perspective-corrected
- * (piecewise-affine warp, scripts in repo history) so both base edges are exactly
- * 2:1 and 32px per tile: the base parallelogram IS the footprint rectangle.
- * `w`/`h` = display size; (`vx`,`vy`) = lowest base vertex relative to the image
- * centre (x right / y down). That vertex is pinned to the footprint's bottom vertex.
+ * Per-facing sofa art: final-res 256x192 PNGs displayed at 128x96 (scale 0.5). The base
+ * parallelogram is an exact 2:1 / 192x96 (96x48 displayed) 2x1 footprint. (`vx`,`vy`) = lowest
+ * base vertex (measured by fitting the +/-0.5-slope base edges), in px relative to the
+ * display-image centre (x right / y down); that vertex is pinned to the footprint's bottom
+ * vertex. se/nw footprint [1,2] (vertex left of centre), sw/ne footprint [2,1] (right).
  */
-const SOFA_ART: Record<IsoFacing, { w: number; h: number; vx: number; vy: number }> = {
-  se: { w: 100.0, h: 62.0, vx: -15.5, vy: 31.5 },
-  sw: { w: 109.5, h: 60.5, vx: 13.75, vy: 31.25 },
-  ne: { w: 125.5, h: 64.5, vx: 3.75, vy: 32.25 },
-  nw: { w: 105.5, h: 68.0, vx: -15.75, vy: 34.5 },
+const SOFA_DISPLAY = { w: 128, h: 96 };
+const SOFA_ART: Record<IsoFacing, { vx: number; vy: number }> = {
+  se: { vx: 96.51 / 2 - 64, vy: 192.95 / 2 - 48 },
+  sw: { vx: 160.48 / 2 - 64, vy: 192.96 / 2 - 48 },
+  nw: { vx: 96.07 / 2 - 64, vy: 192.78 / 2 - 48 },
+  ne: { vx: 160.85 / 2 - 64, vy: 192.81 / 2 - 48 },
 };
 const LAYOUT_KEY = 'night-club-layout-v1';
-/** Soft wall rim: outermost tile ring sits under neon wall geometry. */
-const BUILD_MARGIN = 1;
 const TAP_THRESH = 10;
 const HUD_TOP = 56;
 /** Pinch / wheel zoom clamps (initial narrow-viewport zoom still applied in setupCamera). */
@@ -204,6 +203,7 @@ export class ClubScene extends Phaser.Scene {
   private barImage: Phaser.GameObjects.Image | null = null;
   private barGlow: Phaser.GameObjects.Arc | null = null;
   private roomImage!: Phaser.GameObjects.Image;
+  private stageImage: Phaser.GameObjects.Image | null = null;
   /** Purchased / decor furniture images keyed by instance id. */
   private shopImages = new Map<string, Phaser.GameObjects.Image>();
   private shopCatalog: ShopFurnitureItem[] = [];
@@ -253,9 +253,6 @@ export class ClubScene extends Phaser.Scene {
   private furnDragId: SelectedFurniture = null;
   private blockPanGesture = false;
   private dragPoseValid = true;
-
-  /** Glossy floor inside neon rim (world/screen space). Authority for sprite-vs-neon. */
-  private floorPoly: Point[] = [];
 
   constructor() {
     super('ClubScene');
@@ -336,6 +333,7 @@ export class ClubScene extends Phaser.Scene {
     this.applySavedLayout();
 
     this.requireTexture('room_floor');
+    this.requireTexture('stage');
     for (const facing of FACINGS) {
       this.requireTexture(`furn_sofa_${facing}`);
       this.requireTexture(`furn_bar_${facing}`);
@@ -739,21 +737,11 @@ export class ClubScene extends Phaser.Scene {
 
   private canPlaceFurniture(def: FurnitureDef, col: number, row: number): boolean {
     if (!this.tileInBounds(col, row, def.footprint)) return false;
-    const { cols, rows } = this.scenario.map;
     const wall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
     for (let dc = 0; dc < def.footprint[0]; dc++) {
       for (let dr = 0; dr < def.footprint[1]; dr++) {
         const c = col + dc;
         const r = row + dr;
-        // 1-tile outer rim = neon wall (reject even if scenario.blocked empty)
-        if (
-          c < BUILD_MARGIN ||
-          r < BUILD_MARGIN ||
-          c >= cols - BUILD_MARGIN ||
-          r >= rows - BUILD_MARGIN
-        ) {
-          return false;
-        }
         if (wall.has(`${c},${r}`)) return false;
         // collide with other furniture
         for (const other of this.scenario.furniture) {
@@ -772,7 +760,7 @@ export class ClubScene extends Phaser.Scene {
   /**
    * Display size for any furniture type.
    * Bar default sized so SE opaque ground-contact width ≈ 96px (2×1 on 64×32 tiles).
-   * Sofa uses per-facing SOFA_ART metrics (ground width ≈ 96px in every facing).
+   * Sofa is always 128x96 (256x192 art @0.5); base == 2x1 footprint.
    * Shop items (DJ) use catalog displaySize; prefer booth base → footprint.
    */
   private furnitureDisplaySize(
@@ -782,8 +770,8 @@ export class ClubScene extends Phaser.Scene {
   ): { w: number; h: number } {
     if (kind === 'sofa') {
       const f = facing ?? ((def ?? this.sofaDef)?.facing as IsoFacing | undefined) ?? 'se';
-      const a = SOFA_ART[f] ?? SOFA_ART.se;
-      return { w: a.w, h: a.h };
+      void f;
+      return { w: SOFA_DISPLAY.w, h: SOFA_DISPLAY.h };
     }
     if (def?.displayW && def?.displayH) return { w: def.displayW, h: def.displayH };
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
@@ -803,7 +791,7 @@ export class ClubScene extends Phaser.Scene {
     const { x, y } = tileToScreen(col, row, this.iso);
     if (kind === 'sofa') {
       // Pin the sprite's lowest base vertex to the footprint's bottom vertex; the
-      // warped base edges are exactly 2:1 so the base coincides with the tile rect.
+      // art's base edges are exactly 2:1 so the base coincides with the tile rect.
       const d = def ?? this.sofaDef;
       const f = facing ?? (d?.facing as IsoFacing | undefined) ?? 'se';
       const a = SOFA_ART[f] ?? SOFA_ART.se;
@@ -830,41 +818,27 @@ export class ClubScene extends Phaser.Scene {
     return this.furnitureTextureKey(kind, facing, def);
   }
 
-  /**
-   * Sprite-vs-neon authority: opaque visual AABB must stay inside floorPoly.
-   * Used by all furniture types (present and future purchasable decorations).
-   */
-  private canPlaceVisualAt(
-    kind: string,
-    col: number,
-    row: number,
-    facing: IsoFacing,
-    def?: FurnitureDef
-  ): boolean {
-    // Sofa art is warped so its base == tile footprint: tile rules are exact.
-    if (kind === 'sofa') return true;
-    const size = this.furnitureDisplaySize(kind, def, facing);
-    const pos = this.furnitureWorldPos(kind, col, row, def, facing);
-    const key = this.furnitureTextureFor(kind, facing, def);
-    return canPlaceVisual(
-      this.textures,
-      this.floorPoly,
-      key,
-      pos.x,
-      pos.y,
-      size.w,
-      size.h
-    );
-  }
-
   private poseAllowed(
     def: FurnitureDef,
     col: number,
     row: number,
     facing: IsoFacing
   ): boolean {
-    if (!this.canPlaceFurniture(def, col, row)) return false;
-    return this.canPlaceVisualAt(def.type, col, row, facing, def);
+    void facing;
+    // Tile-integer, footprint-only: 12x12 map bounds + blocked tiles (stage) + other furniture.
+    return this.canPlaceFurniture(def, col, row);
+  }
+
+  /**
+   * After a footprint change (rotation) keep the piece valid: stay if it fits, else move to the
+   * nearest tile where the new footprint fits. False if nowhere fits (caller reverts).
+   */
+  private nudgeToValidTile(def: FurnitureDef, facing: IsoFacing): boolean {
+    if (this.poseAllowed(def, def.tile[0], def.tile[1], facing)) return true;
+    const found = this.findNearestValidTile(def, facing);
+    if (!found) return false;
+    def.tile = found;
+    return true;
   }
 
   private setFurnitureDragTint(id: SelectedFurniture, valid: boolean): void {
@@ -932,30 +906,27 @@ export class ClubScene extends Phaser.Scene {
 
   private drawRoom(cols: number, rows: number): void {
     const { originX, originY, tileWidth, tileHeight } = this.iso;
-    const midCol = (cols - 1) / 2;
-    const midRow = (rows - 1) / 2;
-    const center = tileToScreen(midCol, midRow, this.iso);
+    // Grid top vertex of tile (0,0) = tile centre minus half a tile height.
+    const vx = originX;
+    const vy = originY - tileHeight / 2;
+    void tileWidth;
 
-    // room_floor.jpeg is perspective-rectified (original kept in art_src/room_floor_original.jpeg): its
-    // neon/stage inner edges are exactly 2:1 and lie ON the outer tile-rim lines
-    // (tile coord 0.5 and cols-1.5), so the grid IS the visible floor. The art is
-    // drawn at an exact 838.095x419.048 world size centred on the grid centre.
-    const diamondW = (cols + rows - 2) * (tileWidth / 2);
-    const diamondH = (cols + rows - 2) * (tileHeight / 2);
-    this.roomImage = this.add.image(center.x, center.y + ROOM_ART_OFFSET_Y, 'room_floor');
-    this.roomImage.setDisplaySize(diamondW / ROOM_NEON_MATCH_FRAC, diamondH / ROOM_NEON_MATCH_FRAC);
+    // Floor art is the exact 768x384 12x12 diamond (64x32 tiles): drawn 1:1 (scale 1.0), its
+    // art grid vertex pinned to the grid's top vertex, so the art grid IS the tile grid.
+    this.roomImage = this.add.image(vx, vy, 'room_floor');
+    this.roomImage.setOrigin(FLOOR_ART_VERTEX.x / FLOOR_ART_SIZE.w, FLOOR_ART_VERTEX.y / FLOOR_ART_SIZE.h);
     this.roomImage.setDepth(0);
-    this.roomImage.setAlpha(1);
 
-    // Outer playable envelope (used for non-warped sprites such as bar/DJ: opaque
-    // contact box must stay inside). The sofa is warped so its base == tile
-    // footprint and is validated by tile rules alone (canPlaceFurniture).
-    this.floorPoly = computePlayableFloorPolygon(
-      this.roomImage.x,
-      this.roomImage.y,
-      this.roomImage.displayWidth,
-      this.roomImage.displayHeight
-    );
+    // Stage: scene object over cols 0-1 x rows 0-11 (upper-left edge). Drawn 1:1; its base
+    // footprint quad's top vertex is pinned to the same grid vertex. Footprint tiles are in
+    // scenario.blocked (furniture + pathfinding). Everything with col >= 2 is in front.
+    const st = this.scenario.stage;
+    if (st && this.textures.exists('stage')) {
+      const tl = tileToScreen(st.tiles[0], st.tiles[1], this.iso);
+      this.stageImage = this.add.image(tl.x, tl.y - tileHeight / 2, 'stage');
+      this.stageImage.setOrigin(STAGE_ART_TOP_VERTEX.x / 452, STAGE_ART_TOP_VERTEX.y / 260);
+      this.stageImage.setDepth(2);
+    }
 
     const blockedWall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
     for (let row = 0; row < rows; row++) {
@@ -966,10 +937,12 @@ export class ClubScene extends Phaser.Scene {
         dot.setDepth(1);
       }
     }
+  }
 
-    this.add
-      .rectangle(originX, originY + 200, 640, 420, 0x000000, 0.12)
-      .setDepth(1);
+  /** World centre of the 12x12 floor diamond. */
+  private floorCenter(): { x: number; y: number } {
+    const { cols, rows } = this.scenario.map;
+    return tileToScreen((cols - 1) / 2, (rows - 1) / 2, this.iso);
   }
 
   private setupCamera(): void {
@@ -983,23 +956,19 @@ export class ClubScene extends Phaser.Scene {
     else if (w < 560) zoom = 0.8;
     else if (w < 720) zoom = 0.9;
     cam.setZoom(Phaser.Math.Clamp(zoom, ZOOM_MIN, ZOOM_MAX));
-    cam.centerOn(this.roomImage.x, this.roomImage.y + 20);
+    const fc = this.floorCenter();
+    cam.centerOn(fc.x, fc.y + 20);
   }
 
   /** World scroll bounds around the room — call after zoom so corners stay reachable. */
   private refreshCameraBounds(): void {
     const cam = this.cameras.main;
-    const room = this.roomImage;
-    if (!room) return;
+    if (!this.roomImage) return;
     const pad = 100;
-    const bw = room.displayWidth + pad * 2;
-    const bh = room.displayHeight + pad * 2;
-    cam.setBounds(
-      room.x - room.displayWidth / 2 - pad,
-      room.y - room.displayHeight / 2 - pad,
-      bw,
-      bh
-    );
+    const c = this.floorCenter();
+    const w = FLOOR_ART_SIZE.w;
+    const h = FLOOR_ART_SIZE.h;
+    cam.setBounds(c.x - w / 2 - pad, c.y - h / 2 - pad - 40, w + pad * 2, h + pad * 2 + 40);
   }
 
   /**
@@ -1731,22 +1700,8 @@ export class ClubScene extends Phaser.Scene {
       this.sofaInteractOff = [prevInteract[1], -prevInteract[0]];
     }
 
-    const tileOk = this.canPlaceFurniture(
-      this.sofaDef,
-      this.sofaDef.tile[0],
-      this.sofaDef.tile[1]
-    );
-    const visualOk =
-      tileOk &&
-      this.canPlaceVisualAt(
-        'sofa',
-        this.sofaDef.tile[0],
-        this.sofaDef.tile[1],
-        next,
-        this.sofaDef
-      );
-    if (!visualOk) {
-      // Keep previous facing — rotated sprite would cross neon
+    // Footprint [w,h]<->[h,w] may no longer fit here: nudge to the nearest valid tile.
+    if (!this.nudgeToValidTile(this.sofaDef, next)) {
       this.sofaDef.footprint = prevFp;
       this.sofaRestOff = prevRest;
       this.sofaInteractOff = prevInteract;
@@ -1782,22 +1737,7 @@ export class ClubScene extends Phaser.Scene {
       this.barInteractOff = [prevInteract[1], -prevInteract[0]];
     }
 
-    const tileOk = this.canPlaceFurniture(
-      this.barDef,
-      this.barDef.tile[0],
-      this.barDef.tile[1]
-    );
-    const visualOk =
-      tileOk &&
-      this.canPlaceVisualAt(
-        'bar',
-        this.barDef.tile[0],
-        this.barDef.tile[1],
-        next,
-        this.barDef
-      );
-    if (!visualOk) {
-      // Keep previous facing — rotated sprite would cross neon
+    if (!this.nudgeToValidTile(this.barDef, next)) {
       this.barDef.footprint = prevFp;
       this.barStaffOff = prevStaff;
       this.barInteractOff = prevInteract;
@@ -3223,8 +3163,8 @@ export class ClubScene extends Phaser.Scene {
     const { cols, rows } = this.scenario.map;
     let goal: { col: number; row: number } | null = null;
     for (let i = 0; i < 16; i++) {
-      const col = Phaser.Math.Between(1, cols - 2);
-      const row = Phaser.Math.Between(1, rows - 2);
+      const col = Phaser.Math.Between(0, cols - 1);
+      const row = Phaser.Math.Between(0, rows - 1);
       if (!this.pathfinder.isWalkable(col, row)) continue;
       if (col === staff.grid.col && row === staff.grid.row) continue;
       if (this.isStaffTileBlocked({ col, row }, staff)) continue;
@@ -3565,13 +3505,11 @@ export class ClubScene extends Phaser.Scene {
     const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
     const prevFp: [number, number] = [...def.footprint] as [number, number];
     def.footprint = [prevFp[1], prevFp[0]];
-    const tileOk = this.canPlaceFurniture(def, def.tile[0], def.tile[1]);
-    const visualOk =
-      tileOk && this.canPlaceVisualAt(def.type, def.tile[0], def.tile[1], next, def);
-    if (!visualOk) {
+    if (!this.nudgeToValidTile(def, next)) {
       def.footprint = prevFp;
       return;
     }
+    this.repositionFurnitureVisual(def.id);
     def.facing = next;
     def.flipX = false;
     const size = this.furnitureDisplaySize(def.type, def);
