@@ -234,20 +234,20 @@
         "nw": "furn_sofa_nw"
       },
       "tile": [
-        2,
-        6
+        3,
+        5
       ],
       "footprint": [
-        2,
-        1
+        1,
+        2
       ],
       "interact": [
-        2,
+        4,
         5
       ],
       "restSpot": [
-        2,
-        6
+        3,
+        5
       ]
     }
   ],
