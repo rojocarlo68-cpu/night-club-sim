@@ -20,6 +20,9 @@ export interface OpaqueBounds {
 /** Matches ClubScene.drawRoom: tile-center diamond = roomDisplay * this frac. */
 export const ROOM_NEON_MATCH_FRAC = 0.84;
 
+/** World-y offset of the room art centre from the grid centre (art is rectified around it). */
+export const ROOM_ART_OFFSET_Y = 6;
+
 /** Neon rim bbox as a fraction of the room art image (approx.). */
 export const ROOM_NEON_ART_FRAC = 0.87;
 

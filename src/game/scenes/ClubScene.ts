@@ -9,6 +9,7 @@ import {
 import {
   Point,
   ROOM_NEON_MATCH_FRAC,
+  ROOM_ART_OFFSET_Y,
   computePlayableFloorPolygon,
   canPlaceVisual,
 } from '../systems/FloorBounds';
@@ -135,17 +136,17 @@ interface SavedLayout {
 const FACINGS: IsoFacing[] = ['se', 'sw', 'nw', 'ne'];
 
 /**
- * Per-facing sofa art metrics (display px). Sprites were cut from different
- * renders, so ground width / lowest point differ per facing. `w`/`h` scale each
- * sprite so its ground contact (bottom 20% opaque span) is ~96px on screen;
- * `gcx` = ground-span centre minus image centre, `bottom` = lowest opaque pixel
- * minus image centre (both display px, x right / y down).
+ * Per-facing sofa art metrics (display px). Sprites are perspective-corrected
+ * (piecewise-affine warp, scripts in repo history) so both base edges are exactly
+ * 2:1 and 32px per tile: the base parallelogram IS the footprint rectangle.
+ * `w`/`h` = display size; (`vx`,`vy`) = lowest base vertex relative to the image
+ * centre (x right / y down). That vertex is pinned to the footprint's bottom vertex.
  */
-const SOFA_ART: Record<IsoFacing, { w: number; h: number; gcx: number; bottom: number }> = {
-  se: { w: 189.1, h: 136.3, gcx: -38.0, bottom: 67.6 },
-  sw: { w: 181.5, h: 110.6, gcx: 29.2, bottom: 55.2 },
-  ne: { w: 157.9, h: 102.5, gcx: 27.0, bottom: 50.2 },
-  nw: { w: 177.6, h: 131.9, gcx: -34.5, bottom: 64.5 },
+const SOFA_ART: Record<IsoFacing, { w: number; h: number; vx: number; vy: number }> = {
+  se: { w: 100.0, h: 62.0, vx: -15.5, vy: 31.5 },
+  sw: { w: 109.5, h: 60.5, vx: 13.75, vy: 31.25 },
+  ne: { w: 125.5, h: 64.5, vx: 3.75, vy: 32.25 },
+  nw: { w: 105.5, h: 68.0, vx: -15.75, vy: 34.5 },
 };
 const LAYOUT_KEY = 'night-club-layout-v1';
 /** Soft wall rim: outermost tile ring sits under neon wall geometry. */
@@ -801,8 +802,8 @@ export class ClubScene extends Phaser.Scene {
   ): { x: number; y: number } {
     const { x, y } = tileToScreen(col, row, this.iso);
     if (kind === 'sofa') {
-      // Align sprite ground to the footprint: ground-span centre on the footprint
-      // centre, lowest opaque pixel on the footprint's bottom vertex.
+      // Pin the sprite's lowest base vertex to the footprint's bottom vertex; the
+      // warped base edges are exactly 2:1 so the base coincides with the tile rect.
       const d = def ?? this.sofaDef;
       const f = facing ?? (d?.facing as IsoFacing | undefined) ?? 'se';
       const a = SOFA_ART[f] ?? SOFA_ART.se;
@@ -810,9 +811,9 @@ export class ClubScene extends Phaser.Scene {
       const fh = Math.max(1, d?.footprint?.[1] ?? 1);
       const half = this.iso.tileWidth / 2;
       const q = this.iso.tileHeight / 2;
-      const footCx = ((fw - 1) - (fh - 1)) * (half / 2);
-      const footBottom = (fw - 1 + (fh - 1)) * q + q; // bottom vertex below anchor-tile centre
-      return { x: x + footCx - a.gcx, y: y + footBottom - a.bottom };
+      const vertX = (fw - fh) * half; // bottom vertex x offset from anchor-tile centre
+      const vertY = (fw + fh - 1) * q; // bottom vertex y offset from anchor-tile centre
+      return { x: x + vertX - a.vx, y: y + vertY - a.vy };
     }
     if (typeof def?.yBias === 'number') return { x, y: y + def.yBias };
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
@@ -840,6 +841,8 @@ export class ClubScene extends Phaser.Scene {
     facing: IsoFacing,
     def?: FurnitureDef
   ): boolean {
+    // Sofa art is warped so its base == tile footprint: tile rules are exact.
+    if (kind === 'sofa') return true;
     const size = this.furnitureDisplaySize(kind, def, facing);
     const pos = this.furnitureWorldPos(kind, col, row, def, facing);
     const key = this.furnitureTextureFor(kind, facing, def);
@@ -933,19 +936,20 @@ export class ClubScene extends Phaser.Scene {
     const midRow = (rows - 1) / 2;
     const center = tileToScreen(midCol, midRow, this.iso);
 
-    // Size room art so the neon platform border hugs the outer placeable tiles
-    // (art neon bbox covers ~87% of the image; match that to the iso diamond).
+    // room_floor.jpeg is perspective-rectified (original kept in art_src/room_floor_original.jpeg): its
+    // neon/stage inner edges are exactly 2:1 and lie ON the outer tile-rim lines
+    // (tile coord 0.5 and cols-1.5), so the grid IS the visible floor. The art is
+    // drawn at an exact 838.095x419.048 world size centred on the grid centre.
     const diamondW = (cols + rows - 2) * (tileWidth / 2);
     const diamondH = (cols + rows - 2) * (tileHeight / 2);
-    // neon bbox ~87% of art; ROOM_NEON_MATCH_FRAC pushes wall slightly outward so
-    // BUILD_MARGIN rim sits on/under neon while placeable tiles hug glossy floor.
-    const neonFrac = ROOM_NEON_MATCH_FRAC;
-    this.roomImage = this.add.image(center.x, center.y + 6, 'room_floor');
-    this.roomImage.setDisplaySize(diamondW / neonFrac, diamondH / neonFrac);
+    this.roomImage = this.add.image(center.x, center.y + ROOM_ART_OFFSET_Y, 'room_floor');
+    this.roomImage.setDisplaySize(diamondW / ROOM_NEON_MATCH_FRAC, diamondH / ROOM_NEON_MATCH_FRAC);
     this.roomImage.setDepth(0);
     this.roomImage.setAlpha(1);
 
-    // Playable floor = neon diamond inset ~6% (sprite-vs-neon authority).
+    // Outer playable envelope (used for non-warped sprites such as bar/DJ: opaque
+    // contact box must stay inside). The sofa is warped so its base == tile
+    // footprint and is validated by tile rules alone (canPlaceFurniture).
     this.floorPoly = computePlayableFloorPolygon(
       this.roomImage.x,
       this.roomImage.y,
