@@ -17,7 +17,7 @@ export interface PatronData {
   traits?: string[];
 }
 
-export type PatronGoal = 'bar' | 'sofa' | 'leave';
+export type PatronGoal = 'bar' | 'sofa' | 'pinball' | 'leave';
 
 /** Male client walk/idle sheets: 112×192 frames, feet near bottom. */
 export const PATRON_FRAME_W = 112;
@@ -49,6 +49,10 @@ export class Patron extends Character {
   impatient = false;
   /** Claimed seat/queue tile key `col,row`. */
   claimedSlotKey: string | null = null;
+  /** Standing at a pinball machine (6-10s play). */
+  playing = false;
+  /** Furniture id of the machine being played / walked to. */
+  playFurnitureId: string | null = null;
   /** Furniture id when seated. */
   seatedFurnitureId: string | null = null;
   /** Remaining patience while waiting at bar (seconds, scaled). */
@@ -210,6 +214,7 @@ export class Patron extends Character {
     if (this.angry) return 'angry';
     if (this.goal === 'leave') return 'leaving';
     if (this.state === 'walking' && !this.waiting && !this.seated) return 'walking';
+    if (this.playing) return 'playing';
     if (this.served) return 'drinking';
     if (this.seated) return 'seated';
     if (this.waiting) {
@@ -231,6 +236,7 @@ export class Patron extends Character {
       key === 'angry' ||
       key === 'seated' ||
       key === 'drinking' ||
+      key === 'playing' ||
       key === 'relaxing';
     if (!show || !text) {
       this.statusLabel.setVisible(false);
@@ -242,6 +248,7 @@ export class Patron extends Character {
     else if (key === 'impatient') this.statusLabel.setColor('#ffb347');
     else if (key === 'seated' || key === 'relaxing') this.statusLabel.setColor('#b8f7c0');
     else if (key === 'waiting') this.statusLabel.setColor('#9ef0ff');
+    else if (key === 'playing') this.statusLabel.setColor('#ff9ad5');
     else this.statusLabel.setColor('#ffe066');
   }
 }

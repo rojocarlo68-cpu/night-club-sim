@@ -19,6 +19,7 @@ import { StaffCandidate, StaffPoolFile, StaffRosterEntry, StaffRosterPayload } f
 import { ShopCatalogPayload, ShopFurnitureFile, ShopFurnitureItem } from '../types/Shop';
 import {
   AI_TUNABLES,
+  PINBALL_FRONT_OFFSET,
   SEATABLE_TYPES,
   STATUS_ES,
   lerp,
@@ -66,6 +67,8 @@ interface FurnitureDef {
   displayW?: number;
   displayH?: number;
   yBias?: number;
+  /** Art-px (2x) base-vertex anchor pinned to the footprint bottom vertex (catalog baseVertex). */
+  baseVertex?: [number, number];
   facingSupport?: 'full' | 'flip' | 'none';
   /** Catalog price used for max stats / decay (starters use STARTER_FURNITURE_PRICE). */
   price?: number;
@@ -803,8 +806,26 @@ export class ClubScene extends Phaser.Scene {
       const vertY = (fw + fh - 1) * q; // bottom vertex y offset from anchor-tile centre
       return { x: x + vertX - a.vx, y: y + vertY - a.vy };
     }
-    if (typeof def?.yBias === 'number') return { x, y: y + def.yBias };
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
+    const bv = def?.baseVertex ?? cat?.baseVertex;
+    if (def && bv) {
+      // Sofa-style exact snapping for shop art with a measured base vertex: the sprite's lowest
+      // base vertex (2x art px) is pinned to the footprint's bottom vertex.
+      const f = facing ?? (def.facing as IsoFacing | undefined) ?? 'se';
+      const frame = this.textures.getFrame(this.furnitureTextureKey(kind, f, def));
+      const size = this.furnitureDisplaySize(kind, def, f);
+      const sx = size.w / frame.realWidth;
+      const sy = size.h / frame.realHeight;
+      const fw = Math.max(1, def.footprint?.[0] ?? 1);
+      const fh = Math.max(1, def.footprint?.[1] ?? 1);
+      const half = this.iso.tileWidth / 2;
+      const q = this.iso.tileHeight / 2;
+      return {
+        x: x + (fw - fh) * half - (bv[0] - frame.realWidth / 2) * sx,
+        y: y + (fw + fh - 1) * q - (bv[1] - frame.realHeight / 2) * sy,
+      };
+    }
+    if (typeof def?.yBias === 'number') return { x, y: y + def.yBias };
     if (cat) return { x, y: y + (cat.yBias ?? -8) };
     if (kind === 'bar') return { x, y: y - 18 };
     return { x, y: y - 8 };
@@ -1582,6 +1603,10 @@ export class ClubScene extends Phaser.Scene {
   /** Drop seat claims / seated patrons tied to a removed piece. */
   private releasePatronsAtFurniture(furnitureId: string): void {
     for (const patron of this.patrons) {
+      if (patron.playFurnitureId === furnitureId) {
+        this.endPinballWalk(patron);
+        continue;
+      }
       if (patron.seatedFurnitureId !== furnitureId) continue;
       this.releasePatronSlot(patron);
       patron.seated = false;
@@ -1822,7 +1847,14 @@ export class ClubScene extends Phaser.Scene {
     this.wirePatronClick(patron);
     this.patrons.push(patron);
 
-    // Choose seat vs bar from comfort / cleanliness; claim slot (anti-stack).
+    // Sometimes play pinball first (placeholder machine), then carry on to a seat / the bar.
+    if (this.tryStartPinball(patron, () => this.chooseMainPatronGoal(patron, pdata))) return;
+    this.chooseMainPatronGoal(patron, pdata);
+  }
+
+  /** Choose seat vs bar from comfort / cleanliness; claim slot (anti-stack). */
+  private chooseMainPatronGoal(patron: Patron, pdata: PatronData): void {
+    if (!patron.active || this.phase !== 'open') return;
     const seats = this.listFreeSeats(patron.profile.id);
     const bestSeat = seats[0] ?? null;
     const barSlots = this.listBarQueueSlots(patron.profile.id);
@@ -1862,6 +1894,117 @@ export class ClubScene extends Phaser.Scene {
     } else {
       this.sendPatronToBarQueue(patron, pdata.preferredDrink);
     }
+  }
+
+  // ─── Pinball (placeholder): patrons stand in front of the machine for a few seconds ──
+
+  private isPinballDef(def: FurnitureDef): boolean {
+    return def.catalogId === 'pinball' || def.type === 'pinball';
+  }
+
+  /** Walkable tile in front of the machine for its current facing (null if out of bounds). */
+  private pinballFrontTile(def: FurnitureDef): { col: number; row: number } | null {
+    const facing = (def.facing as IsoFacing) || 'se';
+    const off = PINBALL_FRONT_OFFSET[facing] ?? PINBALL_FRONT_OFFSET.se;
+    const col = def.tile[0] + off[0];
+    const row = def.tile[1] + off[1];
+    const { cols, rows } = this.scenario.map;
+    if (col < 0 || row < 0 || col >= cols || row >= rows) return null;
+    return { col, row };
+  }
+
+  private pinballUsable(def: FurnitureDef): boolean {
+    this.ensureFurnitureStats(def);
+    const st = this.statsOf(def);
+    const cond = conditionFromDurability(st.durability, st.maxDurability);
+    return cond !== 'Inservible' && cond !== 'Se rompió' && st.durability > 0;
+  }
+
+  /** Random usable machine whose front tile is walkable and unclaimed. */
+  private pickPinballSpot(
+    patronId: string
+  ): { def: FurnitureDef; spot: { col: number; row: number } } | null {
+    const options: Array<{ def: FurnitureDef; spot: { col: number; row: number } }> = [];
+    for (const f of this.scenario.furniture) {
+      if (!this.isPinballDef(f) || !this.pinballUsable(f)) continue;
+      const spot = this.pinballFrontTile(f);
+      if (!spot || !this.isPatronSlotFree(spot, patronId)) continue;
+      options.push({ def: f, spot });
+    }
+    if (!options.length) return null;
+    return options[Phaser.Math.Between(0, options.length - 1)];
+  }
+
+  /** Maybe send the patron to play pinball; `onDone` continues the normal flow afterwards. */
+  private tryStartPinball(patron: Patron, onDone: () => void): boolean {
+    if (this.phase !== 'open' || Math.random() >= AI_TUNABLES.pinballPlayChance) return false;
+    const pick = this.pickPinballSpot(patron.profile.id);
+    if (!pick || !this.claimPatronSlot(patron, pick.spot)) return false;
+    patron.goal = 'pinball';
+    patron.playFurnitureId = pick.def.id;
+    const furnId = pick.def.id;
+    const ok = patron.walkTo(pick.spot, () => this.beginPinballPlay(patron, furnId, onDone));
+    if (!ok) {
+      this.releasePatronSlot(patron);
+      patron.goal = 'bar';
+      patron.playFurnitureId = null;
+      return false;
+    }
+    return true;
+  }
+
+  private endPinballWalk(patron: Patron): void {
+    patron.playing = false;
+    patron.playFurnitureId = null;
+    this.releasePatronSlot(patron);
+    patron.refreshStatusLabel();
+  }
+
+  private beginPinballPlay(patron: Patron, furnId: string, onDone: () => void): void {
+    if (!patron.active || this.phase !== 'open') return;
+    const def = this.getFurnitureDef(furnId);
+    if (!def || !this.pinballUsable(def)) {
+      this.endPinballWalk(patron);
+      onDone();
+      return;
+    }
+    patron.playing = true;
+    patron.waiting = false;
+    patron.faceToward({ col: def.tile[0], row: def.tile[1] });
+    patron.refreshStatusLabel();
+    patron.showBubble('🎮');
+    const ms = Phaser.Math.Between(AI_TUNABLES.pinballPlayMinMs, AI_TUNABLES.pinballPlayMaxMs);
+    this.time.delayedCall(ms, () => this.finishPinballPlay(patron, furnId, onDone));
+  }
+
+  private finishPinballPlay(patron: Patron, furnId: string, onDone: () => void): void {
+    if (!patron.active || this.phase !== 'open') return;
+    this.endPinballWalk(patron);
+    const def = this.getFurnitureDef(furnId);
+    if (def && this.isPinballDef(def)) {
+      this.ensureFurnitureStats(def);
+      const st = this.statsOf(def);
+      const durR = st.durability / Math.max(1, st.maxDurability);
+      const cleanR = st.cleanliness / Math.max(1, st.maxCleanliness);
+      const quality = Math.max(0, Math.min(1, 0.6 * durR + 0.4 * cleanR));
+      const scale = lerp(AI_TUNABLES.pinballQualityMin, AI_TUNABLES.pinballQualityMax, quality);
+      const base = Phaser.Math.Between(AI_TUNABLES.pinballPayMin, AI_TUNABLES.pinballPayMax);
+      const earned = this.pinballUsable(def) ? Math.max(1, Math.round(base * scale)) : 0;
+      if (earned > 0) {
+        this.money += earned;
+        this.nightEarned += earned;
+        patron.showBubble(`+$${earned}`);
+      }
+      // Wear + dirt per play
+      st.durability = Math.max(0, st.durability - AI_TUNABLES.pinballPlayWear);
+      st.cleanliness = Math.max(0, st.cleanliness - AI_TUNABLES.pinballPlayDirt);
+      this.writeStatsToDef(def, st);
+      this.refreshDirtOverlay(def);
+      this.reemitFurnitureInspectIf(def.id);
+      this.persistLayout();
+      this.game.events.emit('stats-updated', this.getHudState());
+    }
+    onDone();
   }
 
   /** Claim a bar queue tile and walk there to wait for service. */
@@ -2010,8 +2153,9 @@ export class ClubScene extends Phaser.Scene {
     for (const f of furniture) {
       this.ensureFurnitureStats(f);
       const st = this.statsOf(f);
-      cleanSum += st.cleanliness / Math.max(1, st.maxCleanliness);
-      comfortSum += st.comfort / Math.max(1, st.maxComfort);
+      const cleanR = st.cleanliness / Math.max(1, st.maxCleanliness);
+      cleanSum += cleanR;
+      comfortSum += st.maxComfort > 0 ? st.comfort / st.maxComfort : cleanR;
       const cond = conditionFromDurability(st.durability, st.maxDurability);
       if (cond === 'Inservible' || cond === 'Se rompió') broken++;
     }
@@ -2032,9 +2176,9 @@ export class ClubScene extends Phaser.Scene {
       if (dist > 4 || dist >= bestDist) continue;
       const st = this.statsOf(f);
       const cond = conditionFromDurability(st.durability, st.maxDurability);
+      const cleanR = st.cleanliness / Math.max(1, st.maxCleanliness);
       let local =
-        0.55 * (st.cleanliness / Math.max(1, st.maxCleanliness)) +
-        0.45 * (st.comfort / Math.max(1, st.maxComfort));
+        0.55 * cleanR + 0.45 * (st.maxComfort > 0 ? st.comfort / st.maxComfort : cleanR);
       if (cond === 'Inservible' || cond === 'Se rompió') local *= 0.25;
       best = local;
       bestDist = dist;
@@ -3333,6 +3477,7 @@ export class ClubScene extends Phaser.Scene {
     def.displayW = cat.displaySize[0];
     def.displayH = cat.displaySize[1];
     if (typeof cat.yBias === 'number') def.yBias = cat.yBias;
+    def.baseVertex = cat.baseVertex;
     if (cat.facingSupport === 'full') {
       def.flipX = false;
     }
@@ -3374,9 +3519,11 @@ export class ClubScene extends Phaser.Scene {
       displayW: cat.displaySize[0],
       displayH: cat.displaySize[1],
       yBias: cat.yBias ?? -8,
+      baseVertex: cat.baseVertex,
       facingSupport: cat.facingSupport,
       price,
       ...stats,
+      ...(cat.id === 'pinball' ? { comfort: 0, maxComfort: 0 } : {}),
     };
   }
 
@@ -3509,8 +3656,8 @@ export class ClubScene extends Phaser.Scene {
       def.footprint = prevFp;
       return;
     }
-    this.repositionFurnitureVisual(def.id);
     def.facing = next;
+    this.repositionFurnitureVisual(def.id);
     def.flipX = false;
     const size = this.furnitureDisplaySize(def.type, def);
     if (def.catalogId === 'dj_booth' && this.djBoothIdleReady()) {
@@ -3630,6 +3777,11 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private writeStatsToDef(def: FurnitureDef, st: FurnitureRuntimeStats): void {
+    // Pinball is not a seat: comfort is fixed at 0/0 (and ignored by venue-quality averages).
+    if (this.isPinballDef(def)) {
+      st.comfort = 0;
+      st.maxComfort = 0;
+    }
     def.durability = st.durability;
     def.comfort = st.comfort;
     def.cleanliness = st.cleanliness;
@@ -3675,7 +3827,8 @@ export class ClubScene extends Phaser.Scene {
       // Dirt snowballs: already-dirty pieces decay faster (stains escalate)
       const boost =
         before < DIRT_VISUAL_THRESHOLD ? AI_TUNABLES.dirtyDecayBoost : before < 75 ? 1.2 : 1;
-      applyDecay(st, dtSec * boost, this.furniturePrice(f));
+      const wearMul = f.catalogId === 'pinball' ? AI_TUNABLES.pinballDecayMul : 1;
+      applyDecay(st, dtSec * boost * wearMul, this.furniturePrice(f));
       this.writeStatsToDef(f, st);
       const crossed =
         (before >= DIRT_VISUAL_THRESHOLD) !== (st.cleanliness >= DIRT_VISUAL_THRESHOLD) ||

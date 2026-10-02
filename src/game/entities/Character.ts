@@ -148,6 +148,14 @@ export class Character extends Phaser.GameObjects.Container {
     return dr >= 0 ? 'sw' : 'ne';
   }
 
+  /** Turn in place toward a neighbouring tile and keep standing (idle). */
+  faceToward(target: GridPos): void {
+    if (target.col === this.grid.col && target.row === this.grid.row) return;
+    this.facing = this.facingFromStep(this.grid, target);
+    this.applyFacingFlip();
+    if (this.useSheetIdle) this.playSheetIdle(true);
+  }
+
   protected playWalkFacing(facing: IsoFacing): void {
     this.facing = facing;
     this.applyFacingFlip();

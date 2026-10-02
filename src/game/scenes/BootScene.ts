@@ -94,6 +94,10 @@ export class BootScene extends Phaser.Scene {
     this.load.image('furn_dj_booth_nw', 'assets/furniture/dj_booth_nw.png');
     // Legacy alias (shop thumb / old saves) → SE
     this.load.image('furn_dj_booth', 'assets/furniture/dj_booth_se.png');
+    this.load.image('furn_pinball_se', 'assets/furniture/pinball_se.png');
+    this.load.image('furn_pinball_sw', 'assets/furniture/pinball_sw.png');
+    this.load.image('furn_pinball_ne', 'assets/furniture/pinball_ne.png');
+    this.load.image('furn_pinball_nw', 'assets/furniture/pinball_nw.png');
     // Idle sheets (2×4): front=SE/SW, back=NE/NW
     this.load.spritesheet('dj_booth_front_sheet', 'assets/furniture/dj_booth_front_sheet.png', {
       frameWidth: 400,

@@ -33,6 +33,7 @@ const STATE_ES: Record<string, string> = {
   angry: 'Enfadado',
   seated: 'Sentado',
   drinking: 'Bebiendo',
+  playing: 'Jugando pinball',
   leaving: 'Saliendo',
   relaxing: 'Sentado',
   serving: 'Atendiendo',
@@ -1160,7 +1161,15 @@ export class UIScene extends Phaser.Scene {
 
     const px = -150;
     if (this.textures.exists(it.sprite)) {
-      const img = this.add.image(px, y + rowH / 2, it.sprite).setDisplaySize(72, 50);
+      const img = this.add.image(px, y + rowH / 2, it.sprite);
+      if (it.baseVertex) {
+        // Real art: keep aspect (placeholders are stretched to the legacy 72x50 slot)
+        const f = img.frame;
+        const k = Math.min(72 / f.realWidth, 64 / f.realHeight);
+        img.setDisplaySize(f.realWidth * k, f.realHeight * k);
+      } else {
+        img.setDisplaySize(72, 50);
+      }
       this.shopPanel.add(img);
       this.shopRows.push(img);
     } else {

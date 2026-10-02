@@ -21,6 +21,27 @@
       "blurb": "Cabina DJ neón 2×1. Más cara = más resistente."
     },
     {
+      "id": "pinball",
+      "name": "Máquina de pinball",
+      "price": 120,
+      "category": "muebles",
+      "sprite": "furn_pinball_se",
+      "spriteFile": "assets/furniture/pinball_se.png",
+      "sprites": {
+        "se": "furn_pinball_se",
+        "sw": "furn_pinball_sw",
+        "ne": "furn_pinball_ne",
+        "nw": "furn_pinball_nw"
+      },
+      "footprint": [1, 1],
+      "displaySize": [96, 80.5],
+      "yBias": 0,
+      "baseVertex": [96, 158],
+      "facingSupport": "full",
+      "defaultFacing": "se",
+      "blurb": "Pinball neón 1×1 (placeholder). Los clientes juegan y dejan propina; se desgasta."
+    },
+    {
       "id": "mesa_cocktail",
       "name": "Mesa cocktail",
       "price": 35,

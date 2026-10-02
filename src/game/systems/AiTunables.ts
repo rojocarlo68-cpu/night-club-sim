@@ -41,7 +41,35 @@ export const AI_TUNABLES = {
   wanderIdleMaxMs: 3500,
   postJobThinkMinMs: 500,
   postJobThinkMaxMs: 900,
+
+  // ── Pinball (placeholder) ──
+  /** Chance an arriving patron plays pinball first (needs a free, walkable front tile). */
+  pinballPlayChance: 0.4,
+  /** Standing play time at the machine (ms). */
+  pinballPlayMinMs: 6000,
+  pinballPlayMaxMs: 10000,
+  /** Pay per play ($, rounded) before the condition / cleanliness scale. */
+  pinballPayMin: 2,
+  pinballPayMax: 5,
+  /** Pay scale at worst (0% quality) → best (100%); quality = condition x cleanliness. */
+  pinballQualityMin: 0.4,
+  pinballQualityMax: 1.0,
+  /** Durability / cleanliness cost per play (on top of normal decay). */
+  pinballPlayWear: 1.2,
+  pinballPlayDirt: 3,
+  /** Passive wear multiplier vs. the price-based decay (moderate: ~2x a DJ booth). */
+  pinballDecayMul: 2,
 } as const;
+
+/** Tile in front of the pinball (where patrons stand) per facing: [dCol, dRow] from its tile.
+ *  The machine "faces" the screen direction of its name: se = lower-right (+col), sw = lower-left
+ *  (+row), nw = upper-left (-col), ne = upper-right (-row). Adjust here if the art changes. */
+export const PINBALL_FRONT_OFFSET: Record<'se' | 'sw' | 'ne' | 'nw', [number, number]> = {
+  se: [1, 0],
+  sw: [0, 1],
+  nw: [-1, 0],
+  ne: [0, -1],
+};
 
 /** Furniture types patrons can sit at (one claimed tile per seat). */
 export const SEATABLE_TYPES = new Set([
@@ -64,6 +92,7 @@ export const STATUS_ES: Record<string, string> = {
   wandering: 'Deambulando',
   walking: 'Caminando',
   drinking: 'Bebiendo',
+  playing: 'Jugando pinball',
   leaving: 'Saliendo',
   idle: 'Libre',
   busy: 'Ocupada',

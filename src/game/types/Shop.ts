@@ -19,6 +19,11 @@ export interface ShopFurnitureItem {
   /** Subtracted from tile screen Y when placing. */
   yBias?: number;
   /**
+   * Art-pixel position (2x texture px from top-left) of the sprite's lowest base vertex. When set,
+   * that vertex is pinned to the footprint's bottom vertex (sofa-style exact tile snapping).
+   */
+  baseVertex?: [number, number];
+  /**
    * full = 4 iso angles; flip = mirror one sprite; none = no rotate.
    */
   facingSupport: ShopFacingSupport;
