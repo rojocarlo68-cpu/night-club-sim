@@ -23,12 +23,18 @@ Meta: gana dinero sin dejar a Luna sin energia.
 
 Instalar, luego build. Salida en carpeta dist. Preview disponible.
 
+## Suelo (tema medieval) — tile-based
+
+Camara isometrica fija 2:1 (sin giros, estilo Ultima Online). Rejilla 12x12; tile = rombo 64x32 px a 1x.
+
+- `public/data/floor.json`: `types` (id, texture, file) + `grid[row][col]` con el id de cada casilla. Editarlo cambia el diseno sin tocar codigo.
+- `public/assets/tiles/floor_<id>.png`: **128x64 px RGBA** (una casilla a 2x, rombo exacto). Reemplazar estos PNG cambia el arte sin tocar codigo. Cualquier tamano 2:1 sirve (se reescala); el motor re-enmascara cada tile al rombo exacto (regla de centro de pixel) y los estampa en UNA textura al iniciar, asi que no hay costuras a ningun zoom.
+- `scripts/make_floor_tiles.py` genera los tiles placeholder (`--json` tambien reescribe floor.json con el diseno por defecto).
+- En modo Construir aparece una rejilla tenue de rombos; en juego normal no se ve ninguna rejilla.
+
 ## Placement (Construir)
 
-Playable floor = iso diamond from `room_floor` neon rim, inset ~4% (`FloorBounds.ts`).
-Move rejects if the furniture **visual footprint** (opaque-pixel floor-contact box) leaves that polygon.
-Tile snap + rim stay as a first filter; sprite-vs-neon is the authority. New decorations reuse `canPlaceVisual`.
-Shop items use the same neon bounds checks.
+Tile-integer: la huella del mueble (casillas) debe caber en el 12x12 y no pisar otros muebles. `scenario.json > blocked` esta vacio (ya no hay escenario).
 
 ## Datos
 

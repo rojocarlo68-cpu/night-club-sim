@@ -76,8 +76,13 @@ export class BootScene extends Phaser.Scene {
       this.scene.bringToTop('UIScene');
     });
 
-    this.load.image('room_floor', 'assets/tiles/room_floor.png');
-    this.load.image('stage', 'assets/tiles/stage.png');
+    // Floor: data/floor.json lists the tile types; their PNGs are queued as soon as it is parsed
+    // (swap art by replacing public/assets/tiles/floor_<type>.png, no code change).
+    this.load.json('floor', 'data/floor.json');
+    this.load.once('filecomplete-json-floor', () => {
+      const floor = this.cache.json.get('floor') as { types?: Array<{ texture: string; file: string }> };
+      for (const t of floor?.types ?? []) this.load.image(t.texture, t.file);
+    });
 
     this.load.image('furn_sofa_se', 'assets/furniture/sofa_se.png');
     this.load.image('furn_bar_se', 'assets/furniture/bar_se.png');

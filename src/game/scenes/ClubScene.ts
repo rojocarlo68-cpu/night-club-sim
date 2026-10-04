@@ -6,11 +6,7 @@ import {
   depthForFurniture,
   depthForCharacter,
 } from '../systems/IsoUtils';
-import {
-  FLOOR_ART_VERTEX,
-  FLOOR_ART_SIZE,
-  STAGE_ART_TOP_VERTEX,
-} from '../systems/FloorBounds';
+import { FloorData, buildFloorTexture } from '../systems/FloorRenderer';
 import { Pathfinder } from '../systems/Pathfinding';
 import { Bartender, BartenderData, StaffAiJob } from '../entities/Bartender';
 import { Patron, PatronData } from '../entities/Patron';
@@ -87,9 +83,8 @@ interface Scenario {
   patronSpawnCount: [number, number];
   spawnIntervalMs: number;
   map: { cols: number; rows: number; tileWidth: number; tileHeight: number };
+  /** Non-walkable / non-placeable tiles (empty now that the stage is gone). */
   blocked: [number, number][];
-  /** Stage scene object: tile-footprint (cols x rows) whose tiles are in `blocked`. */
-  stage?: { tiles: [number, number]; footprint: [number, number] };
   furniture: FurnitureDef[];
   spawnTile: [number, number];
   exitTile: [number, number];
@@ -138,6 +133,9 @@ interface SavedLayout {
 
 /** Every piece uses this single orientation: front toward the bottom-right, back toward the stage. */
 const FIXED_FACING: IsoFacing = 'se';
+
+/** Backdrop beyond the floor: deep warm charcoal-brown (medieval tavern), no neon. */
+const BG_COLOR = '#1a1411';
 
 /**
  * Sofa art: final-res 256x192 PNG displayed at 128x96 (scale 0.5). The base parallelogram is an
@@ -200,7 +198,9 @@ export class ClubScene extends Phaser.Scene {
   private barImage: Phaser.GameObjects.Image | null = null;
   private barGlow: Phaser.GameObjects.Arc | null = null;
   private roomImage!: Phaser.GameObjects.Image;
-  private stageImage: Phaser.GameObjects.Image | null = null;
+  /** Faint tile-diamond grid, visible only in Construir mode. */
+  private buildGrid: Phaser.GameObjects.Graphics | null = null;
+  private floorPixelSize = { w: 768, h: 384 };
   /** Purchased / decor furniture images keyed by instance id. */
   private shopImages = new Map<string, Phaser.GameObjects.Image>();
   private shopCatalog: ShopFurnitureItem[] = [];
@@ -269,7 +269,7 @@ export class ClubScene extends Phaser.Scene {
   private showFatalError(message: string): void {
     const w = this.cameras.main.width;
     const h = this.cameras.main.height;
-    this.cameras.main.setBackgroundColor('#05030a');
+    this.cameras.main.setBackgroundColor(BG_COLOR);
     this.add
       .text(w / 2, h / 2 - 20, 'Night Club — error', {
         fontSize: '22px',
@@ -309,7 +309,8 @@ export class ClubScene extends Phaser.Scene {
     this.selectedFurniture = null;
 
     const { cols, rows, tileWidth, tileHeight } = this.scenario.map;
-    const originX = this.cameras.main.width / 2;
+    // Integer origin: the baked floor is pixel-exact, so tile vertices must sit on whole pixels.
+    const originX = Math.round(this.cameras.main.width / 2);
     const originY = 70;
     this.iso = { tileWidth, tileHeight, originX, originY };
 
@@ -330,8 +331,7 @@ export class ClubScene extends Phaser.Scene {
 
     this.applySavedLayout();
 
-    this.requireTexture('room_floor');
-    this.requireTexture('stage');
+    if (!this.cache.json.get('floor')) throw new Error('Falta JSON floor');
     this.requireTexture('furn_sofa_se');
     this.requireTexture('furn_bar_se');
     this.loadShopCatalog();
@@ -397,7 +397,7 @@ export class ClubScene extends Phaser.Scene {
       .setDepth(9500)
       .setVisible(false);
 
-    this.cameras.main.setBackgroundColor('#05030a');
+    this.cameras.main.setBackgroundColor(BG_COLOR);
 
     this.game.events.emit('club-ready', this.getHudState());
     this.game.events.on('cmd-open-night', this.openNight, this);
@@ -883,37 +883,43 @@ export class ClubScene extends Phaser.Scene {
 
   private drawRoom(cols: number, rows: number): void {
     const { originX, originY, tileWidth, tileHeight } = this.iso;
-    // Grid top vertex of tile (0,0) = tile centre minus half a tile height.
+    const floor = this.cache.json.get('floor') as FloorData;
+    for (const t of floor.types) this.requireTexture(t.texture);
+
+    // Every tile (its own 128x64 diamond texture, masked to the exact 2:1 pixel diamond) is
+    // stamped into one canvas texture at startup: no seams/gaps at any zoom. The canvas is shown at
+    // 1/textureScale so one 64x32 tile == 64x32 world px, with canvas (rows*tw/2, 0) pinned to the
+    // top vertex of tile (0,0) = tile-centre minus half a tile height (integer pixels).
+    const built = buildFloorTexture(this, floor, cols, rows);
+    const S = floor.textureScale || 2;
     const vx = originX;
     const vy = originY - tileHeight / 2;
-    void tileWidth;
-
-    // Floor art is the exact 768x384 12x12 diamond (64x32 tiles): drawn 1:1 (scale 1.0), its
-    // art grid vertex pinned to the grid's top vertex, so the art grid IS the tile grid.
-    this.roomImage = this.add.image(vx, vy, 'room_floor');
-    this.roomImage.setOrigin(FLOOR_ART_VERTEX.x / FLOOR_ART_SIZE.w, FLOOR_ART_VERTEX.y / FLOOR_ART_SIZE.h);
+    this.roomImage = this.add.image(vx, vy, built.key);
+    this.roomImage.setOrigin(built.vertexX / built.width, 0);
+    this.roomImage.setScale(1 / S);
     this.roomImage.setDepth(0);
+    this.floorPixelSize = { w: built.width / S, h: built.height / S };
 
-    // Stage: scene object over cols 0-1 x rows 0-11 (upper-left edge). Drawn 1:1; its base
-    // footprint quad's top vertex is pinned to the same grid vertex. Footprint tiles are in
-    // scenario.blocked (furniture + pathfinding). Everything with col >= 2 is in front.
-    const st = this.scenario.stage;
-    if (st && this.textures.exists('stage')) {
-      const tl = tileToScreen(st.tiles[0], st.tiles[1], this.iso);
-      this.stageImage = this.add.image(tl.x, tl.y - tileHeight / 2, 'stage');
-      this.stageImage.setOrigin(STAGE_ART_TOP_VERTEX.x / 452, STAGE_ART_TOP_VERTEX.y / 260);
-      this.stageImage.setDepth(2);
-    }
-
-    const blockedWall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
+    // Construir-only faint grid of tile diamonds (never shown in normal play).
+    const g = this.add.graphics();
+    g.lineStyle(1, 0xf2dcae, 0.20);
     for (let row = 0; row < rows; row++) {
       for (let col = 0; col < cols; col++) {
-        if (blockedWall.has(`${col},${row}`)) continue;
         const { x, y } = tileToScreen(col, row, this.iso);
-        const dot = this.add.circle(x, y, 1.5, 0x2ad6ff, 0.08);
-        dot.setDepth(1);
+        const hw = tileWidth / 2;
+        const hh = tileHeight / 2;
+        g.beginPath();
+        g.moveTo(x, y - hh);
+        g.lineTo(x + hw, y);
+        g.lineTo(x, y + hh);
+        g.lineTo(x - hw, y);
+        g.closePath();
+        g.strokePath();
       }
     }
+    g.setDepth(1);
+    g.setVisible(this.buildMode);
+    this.buildGrid = g;
   }
 
   /** World centre of the 12x12 floor diamond. */
@@ -924,7 +930,6 @@ export class ClubScene extends Phaser.Scene {
 
   private setupCamera(): void {
     const cam = this.cameras.main;
-    this.refreshCameraBounds();
 
     // Slight zoom-out on narrow / mobile viewports (pinch/wheel can still go to ZOOM_MIN/MAX)
     const w = cam.width;
@@ -933,6 +938,7 @@ export class ClubScene extends Phaser.Scene {
     else if (w < 560) zoom = 0.8;
     else if (w < 720) zoom = 0.9;
     cam.setZoom(Phaser.Math.Clamp(zoom, ZOOM_MIN, ZOOM_MAX));
+    this.refreshCameraBounds();
     const fc = this.floorCenter();
     cam.centerOn(fc.x, fc.y + 20);
   }
@@ -943,9 +949,16 @@ export class ClubScene extends Phaser.Scene {
     if (!this.roomImage) return;
     const pad = 100;
     const c = this.floorCenter();
-    const w = FLOOR_ART_SIZE.w;
-    const h = FLOOR_ART_SIZE.h;
-    cam.setBounds(c.x - w / 2 - pad, c.y - h / 2 - pad - 40, w + pad * 2, h + pad * 2 + 40);
+    const w = this.floorPixelSize.w;
+    const h = this.floorPixelSize.h;
+    // Bounds hug the 768x384 diamond (+pad), but are never smaller than the visible world area:
+    // Phaser pins an undersized bounds box to its top-left corner, which would push the floor off
+    // centre on wide screens / when zoomed out. A bigger box stays centred on the floor.
+    const bw = Math.max(w + pad * 2, cam.width / cam.zoom);
+    const bh = Math.max(h + pad * 2 + 40, cam.height / cam.zoom);
+    const bcx = c.x;
+    const bcy = c.y - 20;
+    cam.setBounds(bcx - bw / 2, bcy - bh / 2, bw, bh);
   }
 
   /**
@@ -1572,6 +1585,7 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
     this.buildMode = on;
+    this.buildGrid?.setVisible(on);
     this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     this.hideBarMenu();
