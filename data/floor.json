@@ -1,0 +1,203 @@
+{
+ "_doc": "grid[row][col] holds a type id. Replace public/assets/tiles/floor_<id>.png to swap art (128x64 px, 2:1 diamond). Add types freely.",
+ "tileWidth": 64,
+ "tileHeight": 32,
+ "textureScale": 2,
+ "types": [
+  {
+   "id": "stone_a",
+   "texture": "floor_stone_a",
+   "file": "assets/tiles/floor_stone_a.png"
+  },
+  {
+   "id": "stone_b",
+   "texture": "floor_stone_b",
+   "file": "assets/tiles/floor_stone_b.png"
+  },
+  {
+   "id": "stone_c",
+   "texture": "floor_stone_c",
+   "file": "assets/tiles/floor_stone_c.png"
+  },
+  {
+   "id": "wood",
+   "texture": "floor_wood",
+   "file": "assets/tiles/floor_wood.png"
+  },
+  {
+   "id": "carpet",
+   "texture": "floor_carpet",
+   "file": "assets/tiles/floor_carpet.png"
+  }
+ ],
+ "grid": [
+  [
+   "stone_a",
+   "stone_c",
+   "stone_a",
+   "stone_a",
+   "stone_a",
+   "stone_c",
+   "stone_b",
+   "stone_b",
+   "stone_a",
+   "stone_c",
+   "stone_c",
+   "stone_a"
+  ],
+  [
+   "stone_b",
+   "stone_a",
+   "stone_b",
+   "stone_c",
+   "stone_c",
+   "stone_c",
+   "stone_a",
+   "stone_c",
+   "stone_c",
+   "stone_b",
+   "stone_c",
+   "stone_c"
+  ],
+  [
+   "stone_a",
+   "stone_c",
+   "stone_b",
+   "stone_c",
+   "stone_c",
+   "stone_b",
+   "stone_b",
+   "stone_b",
+   "stone_c",
+   "stone_a",
+   "stone_b",
+   "stone_c"
+  ],
+  [
+   "stone_c",
+   "stone_c",
+   "stone_a",
+   "stone_c",
+   "stone_a",
+   "stone_c",
+   "carpet",
+   "stone_c",
+   "stone_c",
+   "stone_a",
+   "stone_a",
+   "stone_b"
+  ],
+  [
+   "stone_c",
+   "stone_b",
+   "stone_a",
+   "stone_a",
+   "stone_b",
+   "stone_c",
+   "carpet",
+   "wood",
+   "wood",
+   "wood",
+   "wood",
+   "stone_b"
+  ],
+  [
+   "stone_c",
+   "stone_c",
+   "stone_a",
+   "stone_a",
+   "stone_a",
+   "stone_b",
+   "carpet",
+   "wood",
+   "wood",
+   "wood",
+   "wood",
+   "stone_b"
+  ],
+  [
+   "stone_a",
+   "stone_a",
+   "stone_b",
+   "stone_c",
+   "stone_c",
+   "stone_a",
+   "carpet",
+   "wood",
+   "wood",
+   "wood",
+   "wood",
+   "stone_a"
+  ],
+  [
+   "stone_b",
+   "stone_a",
+   "stone_b",
+   "stone_b",
+   "stone_a",
+   "stone_c",
+   "carpet",
+   "wood",
+   "wood",
+   "wood",
+   "wood",
+   "stone_b"
+  ],
+  [
+   "stone_a",
+   "stone_c",
+   "stone_b",
+   "stone_b",
+   "stone_a",
+   "stone_a",
+   "carpet",
+   "wood",
+   "wood",
+   "wood",
+   "wood",
+   "stone_c"
+  ],
+  [
+   "stone_c",
+   "stone_a",
+   "stone_c",
+   "stone_b",
+   "stone_c",
+   "stone_a",
+   "carpet",
+   "stone_b",
+   "stone_a",
+   "stone_a",
+   "stone_c",
+   "stone_c"
+  ],
+  [
+   "stone_b",
+   "stone_c",
+   "stone_b",
+   "stone_a",
+   "stone_a",
+   "stone_b",
+   "carpet",
+   "stone_a",
+   "stone_a",
+   "stone_c",
+   "stone_b",
+   "stone_a"
+  ],
+  [
+   "stone_c",
+   "stone_a",
+   "stone_a",
+   "stone_c",
+   "stone_c",
+   "stone_c",
+   "carpet",
+   "stone_b",
+   "stone_b",
+   "stone_c",
+   "stone_a",
+   "stone_b"
+  ]
+ ]
+}

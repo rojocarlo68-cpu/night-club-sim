@@ -1,7 +1,7 @@
 {
   "id": "club_floor_mvp",
   "title": "Night Club",
-  "subtitle": "Pista principal",
+  "subtitle": "Salón principal",
   "startingMoney": 40,
   "nightDurationSec": 75,
   "patronSpawnCount": [
@@ -15,104 +15,7 @@
     "tileWidth": 64,
     "tileHeight": 32
   },
-  "blocked": [
-    [
-      0,
-      0
-    ],
-    [
-      1,
-      0
-    ],
-    [
-      0,
-      1
-    ],
-    [
-      1,
-      1
-    ],
-    [
-      0,
-      2
-    ],
-    [
-      1,
-      2
-    ],
-    [
-      0,
-      3
-    ],
-    [
-      1,
-      3
-    ],
-    [
-      0,
-      4
-    ],
-    [
-      1,
-      4
-    ],
-    [
-      0,
-      5
-    ],
-    [
-      1,
-      5
-    ],
-    [
-      0,
-      6
-    ],
-    [
-      1,
-      6
-    ],
-    [
-      0,
-      7
-    ],
-    [
-      1,
-      7
-    ],
-    [
-      0,
-      8
-    ],
-    [
-      1,
-      8
-    ],
-    [
-      0,
-      9
-    ],
-    [
-      1,
-      9
-    ],
-    [
-      0,
-      10
-    ],
-    [
-      1,
-      10
-    ],
-    [
-      0,
-      11
-    ],
-    [
-      1,
-      11
-    ]
-  ],
+  "blocked": [],
   "furniture": [
     {
       "id": "bar",
@@ -192,15 +95,5 @@
       "price": 6,
       "serveTimeMs": 1000
     }
-  ],
-  "stage": {
-    "tiles": [
-      0,
-      0
-    ],
-    "footprint": [
-      2,
-      12
-    ]
-  }
+  ]
 }
