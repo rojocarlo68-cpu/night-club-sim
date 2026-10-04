@@ -1531,8 +1531,14 @@ export class ClubScene extends Phaser.Scene {
    */
   private onCmdConfirmDeleteFurniture = (payload?: { id?: string }): void => {
     this.deleteConfirmOpen = false;
-    const id = typeof payload?.id === 'string' ? payload.id : '';
-    if (!id) return; // missing id → safe no-op
+    // Prefer the id the modal carried; fall back to the current selection so a Sí never no-ops.
+    let id = typeof payload?.id === 'string' ? payload.id : '';
+    if (!id || !this.getFurnitureDef(id)) id = this.selectedFurniture ?? '';
+    if (!id) {
+      this.buildHint.setText('No se pudo eliminar: selecciona el mueble otra vez').setVisible(true);
+      return;
+    }
+    if (!this.buildMode) return;
     this.confirmDeleteFurniture(id);
   };
 
@@ -1557,10 +1563,20 @@ export class ClubScene extends Phaser.Scene {
     }
 
     const fid = def.id;
-    this.destroyDirtOverlay(fid);
-    this.cleanClaim.delete(fid);
-    this.releasePatronsAtFurniture(fid);
-    if (this.inspectedFurnitureId === fid) this.closeFurnitureInspect();
+    // Side effects must never block the removal itself (a throw here used to leave the piece in place).
+    const safe = (fn: () => void): void => {
+      try {
+        fn();
+      } catch (err) {
+        console.warn('[delete] side effect failed', err);
+      }
+    };
+    safe(() => this.destroyDirtOverlay(fid));
+    safe(() => this.cleanClaim.delete(fid));
+    safe(() => this.releasePatronsAtFurniture(fid));
+    safe(() => {
+      if (this.inspectedFurnitureId === fid) this.closeFurnitureInspect();
+    });
 
     // Destroy visuals for every kind (sofa/bar aliases + shop instance ids)
     const isSofa = id === 'sofa' || def.type === 'sofa' || fid === 'sofa';

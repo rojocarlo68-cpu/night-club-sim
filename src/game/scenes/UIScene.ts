@@ -90,6 +90,8 @@ export class UIScene extends Phaser.Scene {
   private deleteConfirmMsg!: Phaser.GameObjects.Text;
   /** Id+refund snapshotted on the modal — Sí emits this id; never trust ClubScene selection. */
   private pendingDelete: { id: string; refund: number } | null = null;
+  /** Game-loop clock (same clock as Pointer.downTime) when the delete modal opened. */
+  private deleteOpenedAt = 0;
 
   private furnPanel!: Phaser.GameObjects.Container;
   private furnPanelVisible = false;
@@ -957,7 +959,10 @@ export class UIScene extends Phaser.Scene {
       b.on('pointerover', () => b.setFillStyle(yes ? 0xd44a9a : 0x4a3a58));
       b.on('pointerout', () => b.setFillStyle(fill));
       const onPress = (p: Phaser.Input.Pointer) => {
-        p.event.stopPropagation();
+        p.event?.stopPropagation?.();
+        // Ignore the tail of the press that opened the modal (Eliminar tap whose finger/mouse
+        // lifts on top of Sí/No) — only presses that STARTED after the modal opened count.
+        if (!this.isFreshDeletePress(p)) return;
         this.handleDeleteConfirmChoice(yes);
       };
       b.on('pointerdown', onPress);
@@ -968,6 +973,28 @@ export class UIScene extends Phaser.Scene {
 
     // Display list: dim first, then panel/msg, then buttons last (higher for input)
     this.deleteConfirm.add([dim, panel, this.deleteConfirmMsg, mk(-70, 'Sí', true), mk(70, 'No', false)]);
+
+    // Geometric fallback: if object hit-testing ever misses (zoom/resize/touch quirks), a fresh press
+    // inside the Sí/No rectangles (generous 150x80 zones) still resolves the modal.
+    const geometric = (p: Phaser.Input.Pointer) => {
+      if (!this.deleteConfirmVisible || !this.isFreshDeletePress(p)) return;
+      const c = this.cameras.main;
+      const cx = c.width / 2;
+      const cy = c.height / 2 + 36;
+      const inZone = (zx: number) => Math.abs(p.x - zx) <= 75 && Math.abs(p.y - cy) <= 40;
+      if (inZone(cx - 70)) this.handleDeleteConfirmChoice(true);
+      else if (inZone(cx + 70)) this.handleDeleteConfirmChoice(false);
+    };
+    this.input.on('pointerdown', geometric);
+    this.input.on('pointerup', geometric);
+  }
+
+  /** True when this pointer's press began after the delete modal opened (not the opener's tail). */
+  private isFreshDeletePress(p: Phaser.Input.Pointer): boolean {
+    if (!this.deleteConfirmVisible) return false;
+    const now = this.game.loop.time;
+    if (now - this.deleteOpenedAt < 200) return false; // accidental double-tap guard
+    return p.downTime > this.deleteOpenedAt;
   }
 
   /** Sí/No — emit confirm with { id } from pendingDelete; pointerdown+up both guarded. */
@@ -1016,6 +1043,7 @@ export class UIScene extends Phaser.Scene {
     const cam = this.cameras.main;
     this.layoutDeleteConfirm(cam.width, cam.height);
     this.deleteConfirmVisible = true;
+    this.deleteOpenedAt = this.game.loop.time;
     this.deleteConfirm.setVisible(true);
     this.deleteConfirm.setDepth(9800);
     // UIScene above ClubScene for input; topOnly so dim does not steal Sí/No
