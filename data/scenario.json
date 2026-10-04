@@ -120,10 +120,7 @@
       "sprite": "bar",
       "facing": "se",
       "sprites": {
-        "se": "furn_bar_se",
-        "sw": "furn_bar_sw",
-        "ne": "furn_bar_ne",
-        "nw": "furn_bar_nw"
+        "se": "furn_bar_se"
       },
       "tile": [
         7,
@@ -148,10 +145,7 @@
       "sprite": "sofa",
       "facing": "se",
       "sprites": {
-        "se": "furn_sofa_se",
-        "sw": "furn_sofa_sw",
-        "ne": "furn_sofa_ne",
-        "nw": "furn_sofa_nw"
+        "se": "furn_sofa_se"
       },
       "tile": [
         3,
