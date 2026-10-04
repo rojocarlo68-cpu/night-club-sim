@@ -7,17 +7,9 @@
       "category": "muebles",
       "sprite": "furn_dj_booth_se",
       "spriteFile": "assets/furniture/dj_booth_se.png",
-      "sprites": {
-        "se": "furn_dj_booth_se",
-        "sw": "furn_dj_booth_sw",
-        "ne": "furn_dj_booth_ne",
-        "nw": "furn_dj_booth_nw"
-      },
       "footprint": [2, 1],
       "displaySize": [128, 135],
       "yBias": -22,
-      "facingSupport": "full",
-      "defaultFacing": "se",
       "blurb": "Cabina DJ neón 2×1. Más cara = más resistente."
     },
     {
@@ -27,18 +19,10 @@
       "category": "muebles",
       "sprite": "furn_pinball_se",
       "spriteFile": "assets/furniture/pinball_se.png",
-      "sprites": {
-        "se": "furn_pinball_se",
-        "sw": "furn_pinball_sw",
-        "ne": "furn_pinball_ne",
-        "nw": "furn_pinball_nw"
-      },
       "footprint": [1, 1],
       "displaySize": [96, 80.5],
       "yBias": 0,
       "baseVertex": [96, 158],
-      "facingSupport": "full",
-      "defaultFacing": "se",
       "blurb": "Pinball neón 1×1 (placeholder). Los clientes juegan y dejan propina; se desgasta."
     },
     {
@@ -50,8 +34,6 @@
       "footprint": [1, 1],
       "displaySize": [56, 64],
       "yBias": -10,
-      "facingSupport": "flip",
-      "defaultFacing": "se",
       "blurb": "Mesita alta para copas. Placeholder iso."
     },
     {
@@ -63,8 +45,6 @@
       "footprint": [1, 1],
       "displaySize": [44, 58],
       "yBias": -8,
-      "facingSupport": "flip",
-      "defaultFacing": "se",
       "blurb": "Silla sencilla. Barata, se desgasta más rápido."
     },
     {
@@ -76,8 +56,6 @@
       "footprint": [1, 1],
       "displaySize": [48, 52],
       "yBias": -6,
-      "facingSupport": "flip",
-      "defaultFacing": "se",
       "blurb": "Banqueta de barra. Placeholder iso."
     },
     {
@@ -89,8 +67,6 @@
       "footprint": [2, 1],
       "displaySize": [110, 78],
       "yBias": -14,
-      "facingSupport": "flip",
-      "defaultFacing": "se",
       "blurb": "Mesa VIP 2×1. Más duradera que la cocktail."
     },
     {
@@ -102,8 +78,6 @@
       "footprint": [1, 1],
       "displaySize": [42, 72],
       "yBias": -16,
-      "facingSupport": "none",
-      "defaultFacing": "se",
       "blurb": "Planta decorativa. Placeholder iso."
     },
     {
@@ -115,8 +89,6 @@
       "footprint": [1, 1],
       "displaySize": [50, 70],
       "yBias": -12,
-      "facingSupport": "flip",
-      "defaultFacing": "se",
       "blurb": "Altavoz de pista. Placeholder iso."
     },
     {
@@ -128,8 +100,6 @@
       "footprint": [1, 1],
       "displaySize": [46, 60],
       "yBias": -18,
-      "facingSupport": "none",
-      "defaultFacing": "se",
       "blurb": "Foco de pista. Placeholder iso."
     }
   ]

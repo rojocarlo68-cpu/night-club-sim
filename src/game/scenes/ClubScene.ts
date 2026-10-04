@@ -46,14 +46,16 @@ interface Drink {
   serveTimeMs: number;
 }
 
-type IsoFacing = 'se' | 'sw' | 'ne' | 'nw';
+/** Single fixed orientation for every piece (Ultima Online style: fixed camera, no rotation). */
+type IsoFacing = 'se';
 
 interface FurnitureDef {
   id: string;
   type: string;
   sprite: string;
   facing?: IsoFacing;
-  sprites?: Partial<Record<IsoFacing, string>>;
+  /** Texture key of the (only) SE art. */
+  sprites?: { se?: string };
   tile: [number, number];
   footprint: [number, number];
   interact?: [number, number];
@@ -61,15 +63,12 @@ interface FurnitureDef {
   restSpot?: [number, number];
   /** Shop catalog id when this instance was purchased. */
   catalogId?: string;
-  /** Horizontal mirror for single-angle shop sprites. */
-  flipX?: boolean;
   fromShop?: boolean;
   displayW?: number;
   displayH?: number;
   yBias?: number;
   /** Art-px (2x) base-vertex anchor pinned to the footprint bottom vertex (catalog baseVertex). */
   baseVertex?: [number, number];
-  facingSupport?: 'full' | 'flip' | 'none';
   /** Catalog price used for max stats / decay (starters use STARTER_FURNITURE_PRICE). */
   price?: number;
   durability?: number;
@@ -114,7 +113,8 @@ interface CharactersFile {
 interface SavedLayoutItem {
   id: string;
   tile: [number, number];
-  facing?: IsoFacing;
+  /** Legacy: old saves may carry a rotated facing/footprint; both are ignored (migrated to SE). */
+  facing?: string;
   catalogId?: string;
   flipX?: boolean;
   footprint?: [number, number];
@@ -136,22 +136,18 @@ interface SavedLayout {
   money?: number;
 }
 
-const FACINGS: IsoFacing[] = ['se', 'sw', 'nw', 'ne'];
+/** Every piece uses this single orientation: front toward the bottom-right, back toward the stage. */
+const FIXED_FACING: IsoFacing = 'se';
 
 /**
- * Per-facing sofa art: final-res 256x192 PNGs displayed at 128x96 (scale 0.5). The base
- * parallelogram is an exact 2:1 / 192x96 (96x48 displayed) 2x1 footprint. (`vx`,`vy`) = lowest
- * base vertex (measured by fitting the +/-0.5-slope base edges), in px relative to the
- * display-image centre (x right / y down); that vertex is pinned to the footprint's bottom
- * vertex. se/nw footprint [1,2] (vertex left of centre), sw/ne footprint [2,1] (right).
+ * Sofa art: final-res 256x192 PNG displayed at 128x96 (scale 0.5). The base parallelogram is an
+ * exact 2:1 / 192x96 (96x48 displayed) footprint. (`vx`,`vy`) = lowest base vertex (measured by
+ * fitting the +/-0.5-slope base edges), in px relative to the display-image centre (x right / y
+ * down); that vertex is pinned to the footprint's bottom vertex. Footprint [1,2] (vertex left of
+ * centre).
  */
 const SOFA_DISPLAY = { w: 128, h: 96 };
-const SOFA_ART: Record<IsoFacing, { vx: number; vy: number }> = {
-  se: { vx: 96.51 / 2 - 64, vy: 192.95 / 2 - 48 },
-  sw: { vx: 160.48 / 2 - 64, vy: 192.96 / 2 - 48 },
-  nw: { vx: 96.07 / 2 - 64, vy: 192.78 / 2 - 48 },
-  ne: { vx: 160.85 / 2 - 64, vy: 192.81 / 2 - 48 },
-};
+const SOFA_ART = { vx: 96.51 / 2 - 64, vy: 192.95 / 2 - 48 };
 const LAYOUT_KEY = 'night-club-layout-v1';
 const TAP_THRESH = 10;
 const HUD_TOP = 56;
@@ -200,8 +196,6 @@ export class ClubScene extends Phaser.Scene {
 
   private sofaDef: FurnitureDef | null = null;
   private barDef: FurnitureDef | null = null;
-  private sofaFacing: IsoFacing = 'se';
-  private barFacing: IsoFacing = 'se';
   private sofaImage: Phaser.GameObjects.Image | null = null;
   private barImage: Phaser.GameObjects.Image | null = null;
   private barGlow: Phaser.GameObjects.Arc | null = null;
@@ -220,11 +214,12 @@ export class ClubScene extends Phaser.Scene {
   private inspectedFurnitureId: string | null = null;
 
   private selectedFurniture: SelectedFurniture = null;
-  private rotateUi!: Phaser.GameObjects.Container;
-  private rotateLeftBtn!: Phaser.GameObjects.Container;
-  private rotateRightBtn!: Phaser.GameObjects.Container;
+  /** Floating Eliminar HUD above the selected piece (no rotation any more). */
+  private selectionHud!: Phaser.GameObjects.Container;
   private deleteBtn!: Phaser.GameObjects.Container;
-  private rotateUiBg!: Phaser.GameObjects.Rectangle;
+  private selectionHudBg!: Phaser.GameObjects.Rectangle;
+  /** Set when a loaded save held rotated pieces / stale footprints (re-persisted after the nudge). */
+  private layoutMigrated = false;
   /** True while UIScene delete-confirm modal is open (blocks Club input). */
   private deleteConfirmOpen = false;
   private buildHint!: Phaser.GameObjects.Text;
@@ -337,21 +332,15 @@ export class ClubScene extends Phaser.Scene {
 
     this.requireTexture('room_floor');
     this.requireTexture('stage');
-    for (const facing of FACINGS) {
-      this.requireTexture(`furn_sofa_${facing}`);
-      this.requireTexture(`furn_bar_${facing}`);
-    }
+    this.requireTexture('furn_sofa_se');
+    this.requireTexture('furn_bar_se');
     this.loadShopCatalog();
     this.upgradeAllShopFurnitureFromCatalog();
-    for (const facing of FACINGS) {
-      const key = `furn_dj_booth_${facing}`;
-      if (this.textures.exists(key)) this.requireTexture(key);
-    }
+    if (this.textures.exists('furn_dj_booth_se')) this.requireTexture('furn_dj_booth_se');
     for (const f of this.scenario.furniture) {
       this.ensureShopFlags(f);
       if (f.fromShop || f.catalogId) {
-        const key = this.furnitureTextureKey(f.type, (f.facing as IsoFacing) || 'se', f);
-        this.requireTexture(key);
+        this.requireTexture(this.furnitureTextureKey(f.type, f));
       }
     }
     this.requireTexture(this.chars.bartender.sprite || 'bartender');
@@ -362,6 +351,10 @@ export class ClubScene extends Phaser.Scene {
     this.drawRoom(cols, rows);
     this.placeFurniture();
     this.ensureAllFurnitureInsideFloor();
+    if (this.layoutMigrated) {
+      this.persistLayout();
+      this.layoutMigrated = false;
+    }
     this.ensureAllFurnitureStats();
     this.refreshAllDirtOverlays();
     this.setupCamera();
@@ -578,28 +571,38 @@ export class ClubScene extends Phaser.Scene {
       for (const item of saved.furniture) {
         let def = this.scenario.furniture.find((f) => f.id === item.id);
         if (!def && item.catalogId) {
+          // Footprint always comes from the catalog (single SE orientation): a saved footprint
+          // may be a rotated one from before rotation was removed, so it is never trusted.
           const spawned = this.defFromShopCatalog(item.catalogId, item.id);
           if (spawned) {
-            if (Array.isArray(item.footprint) && item.footprint.length === 2) {
-              spawned.footprint = [item.footprint[0], item.footprint[1]];
-            }
             this.scenario.furniture.push(spawned);
             def = spawned;
           }
         }
         if (!def) continue;
+        // Old saves: pieces rotated to sw/ne/nw (or with a swapped footprint / mirror flag) are
+        // forced back to the one SE pose. The saved tile is kept (clamped to the map for the SE
+        // footprint) and ensureAllFurnitureInsideFloor() nudges it to the nearest valid tile.
+        const savedFp = Array.isArray(item.footprint) ? item.footprint : null;
+        if (
+          (item.facing && item.facing !== FIXED_FACING) ||
+          item.flipX ||
+          (savedFp && (savedFp[0] !== def.footprint[0] || savedFp[1] !== def.footprint[1]))
+        ) {
+          this.layoutMigrated = true;
+        }
+        def.facing = FIXED_FACING;
         if (
           Array.isArray(item.tile) &&
           item.tile.length === 2 &&
-          this.tileInBounds(item.tile[0], item.tile[1], def.footprint)
+          Number.isFinite(item.tile[0]) &&
+          Number.isFinite(item.tile[1])
         ) {
-          def.tile = [item.tile[0], item.tile[1]];
-        }
-        if (item.facing && FACINGS.includes(item.facing)) {
-          def.facing = item.facing;
-        }
-        if (typeof item.flipX === 'boolean') {
-          def.flipX = item.flipX;
+          const { cols, rows } = this.scenario.map;
+          def.tile = [
+            Phaser.Math.Clamp(Math.round(item.tile[0]), 0, Math.max(0, cols - def.footprint[0])),
+            Phaser.Math.Clamp(Math.round(item.tile[1]), 0, Math.max(0, rows - def.footprint[1])),
+          ];
         }
         if (typeof item.price === 'number' && item.price > 0) {
           def.price = item.price;
@@ -609,17 +612,7 @@ export class ClubScene extends Phaser.Scene {
       // Saved list is authoritative: deleted pieces stay gone across reload
       const savedIds = new Set(saved.furniture.map((i) => i.id));
       this.scenario.furniture = this.scenario.furniture.filter((f) => savedIds.has(f.id));
-      // Sofa footprint/offsets are not persisted: rebuild them for the saved facing
-      // (default art/scenario pose is 'se' = footprint 1x2, front on +col).
-      const savedSofa = this.scenario.furniture.find((f) => f.type === 'sofa');
-      if (savedSofa) {
-        const steps = Math.max(0, FACINGS.indexOf((savedSofa.facing as IsoFacing) || 'se'));
-        for (let i = 0; i < steps; i++) {
-          savedSofa.footprint = [savedSofa.footprint[1], savedSofa.footprint[0]];
-          this.sofaRestOff = [-this.sofaRestOff[1], this.sofaRestOff[0]];
-          this.sofaInteractOff = [-this.sofaInteractOff[1], this.sofaInteractOff[0]];
-        }
-      }
+      // Sofa/bar keep the scenario's SE footprint and spot offsets (captured before this runs).
       // Re-apply relative spots from offsets (sofa/bar may have been deleted)
       this.sofaDef = this.scenario.furniture.find((f) => f.type === 'sofa') ?? null;
       this.barDef = this.scenario.furniture.find((f) => f.type === 'bar') ?? null;
@@ -654,9 +647,8 @@ export class ClubScene extends Phaser.Scene {
       furniture: this.scenario.furniture.map((f) => ({
         id: f.id,
         tile: [...f.tile] as [number, number],
-        facing: f.facing as IsoFacing | undefined,
+        facing: FIXED_FACING,
         catalogId: f.catalogId,
-        flipX: f.flipX,
         footprint: [...f.footprint] as [number, number],
         price: f.price,
         durability: f.durability,
@@ -766,14 +758,8 @@ export class ClubScene extends Phaser.Scene {
    * Sofa is always 128x96 (256x192 art @0.5); base == 2x1 footprint.
    * Shop items (DJ) use catalog displaySize; prefer booth base → footprint.
    */
-  private furnitureDisplaySize(
-    kind: string,
-    def?: FurnitureDef,
-    facing?: IsoFacing
-  ): { w: number; h: number } {
+  private furnitureDisplaySize(kind: string, def?: FurnitureDef): { w: number; h: number } {
     if (kind === 'sofa') {
-      const f = facing ?? ((def ?? this.sofaDef)?.facing as IsoFacing | undefined) ?? 'se';
-      void f;
       return { w: SOFA_DISPLAY.w, h: SOFA_DISPLAY.h };
     }
     if (def?.displayW && def?.displayH) return { w: def.displayW, h: def.displayH };
@@ -788,16 +774,14 @@ export class ClubScene extends Phaser.Scene {
     kind: string,
     col: number,
     row: number,
-    def?: FurnitureDef,
-    facing?: IsoFacing
+    def?: FurnitureDef
   ): { x: number; y: number } {
     const { x, y } = tileToScreen(col, row, this.iso);
     if (kind === 'sofa') {
       // Pin the sprite's lowest base vertex to the footprint's bottom vertex; the
       // art's base edges are exactly 2:1 so the base coincides with the tile rect.
       const d = def ?? this.sofaDef;
-      const f = facing ?? (d?.facing as IsoFacing | undefined) ?? 'se';
-      const a = SOFA_ART[f] ?? SOFA_ART.se;
+      const a = SOFA_ART;
       const fw = Math.max(1, d?.footprint?.[0] ?? 2);
       const fh = Math.max(1, d?.footprint?.[1] ?? 1);
       const half = this.iso.tileWidth / 2;
@@ -811,9 +795,8 @@ export class ClubScene extends Phaser.Scene {
     if (def && bv) {
       // Sofa-style exact snapping for shop art with a measured base vertex: the sprite's lowest
       // base vertex (2x art px) is pinned to the footprint's bottom vertex.
-      const f = facing ?? (def.facing as IsoFacing | undefined) ?? 'se';
-      const frame = this.textures.getFrame(this.furnitureTextureKey(kind, f, def));
-      const size = this.furnitureDisplaySize(kind, def, f);
+      const frame = this.textures.getFrame(this.furnitureTextureKey(kind, def));
+      const size = this.furnitureDisplaySize(kind, def);
       const sx = size.w / frame.realWidth;
       const sy = size.h / frame.realHeight;
       const fw = Math.max(1, def.footprint?.[0] ?? 1);
@@ -831,35 +814,12 @@ export class ClubScene extends Phaser.Scene {
     return { x, y: y - 8 };
   }
 
-  private furnitureTextureFor(
-    kind: string,
-    facing: IsoFacing,
-    def?: FurnitureDef
-  ): string {
-    return this.furnitureTextureKey(kind, facing, def);
-  }
-
-  private poseAllowed(
-    def: FurnitureDef,
-    col: number,
-    row: number,
-    facing: IsoFacing
-  ): boolean {
-    void facing;
-    // Tile-integer, footprint-only: 12x12 map bounds + blocked tiles (stage) + other furniture.
-    return this.canPlaceFurniture(def, col, row);
-  }
-
   /**
-   * After a footprint change (rotation) keep the piece valid: stay if it fits, else move to the
-   * nearest tile where the new footprint fits. False if nowhere fits (caller reverts).
+   * Tile-integer, footprint-only placement: 12x12 map bounds + blocked tiles (stage) + other
+   * furniture. Every piece has one fixed orientation, so there is no facing to consider.
    */
-  private nudgeToValidTile(def: FurnitureDef, facing: IsoFacing): boolean {
-    if (this.poseAllowed(def, def.tile[0], def.tile[1], facing)) return true;
-    const found = this.findNearestValidTile(def, facing);
-    if (!found) return false;
-    def.tile = found;
-    return true;
+  private poseAllowed(def: FurnitureDef, col: number, row: number): boolean {
+    return this.canPlaceFurniture(def, col, row);
   }
 
   private setFurnitureDragTint(id: SelectedFurniture, valid: boolean): void {
@@ -882,19 +842,18 @@ export class ClubScene extends Phaser.Scene {
    */
   private ensureAllFurnitureInsideFloor(): void {
     for (const def of this.scenario.furniture) {
-      const facing = (def.facing as IsoFacing) || 'se';
-      if (this.poseAllowed(def, def.tile[0], def.tile[1], facing)) continue;
-      const found = this.findNearestValidTile(def, facing);
+      def.facing = FIXED_FACING;
+      if (this.poseAllowed(def, def.tile[0], def.tile[1])) continue;
+      const found = this.findNearestValidTile(def);
       if (!found) continue;
       def.tile = found;
+      this.layoutMigrated = true;
       if (def.type === 'sofa') {
         this.sofaDef = def;
-        this.sofaFacing = facing;
         this.syncSpotsFromFurniture();
         this.repositionFurnitureVisual('sofa');
       } else if (def.type === 'bar') {
         this.barDef = def;
-        this.barFacing = facing;
         this.syncSpotsFromFurniture();
         this.repositionFurnitureVisual('bar');
         // Luna stays on the floor — do not snap her into the bar when furniture moves.
@@ -906,10 +865,7 @@ export class ClubScene extends Phaser.Scene {
     this.rebuildPathfinder();
   }
 
-  private findNearestValidTile(
-    def: FurnitureDef,
-    facing: IsoFacing
-  ): [number, number] | null {
+  private findNearestValidTile(def: FurnitureDef): [number, number] | null {
     const { cols, rows } = this.scenario.map;
     const [sc, sr] = def.tile;
     for (let rad = 0; rad < Math.max(cols, rows); rad++) {
@@ -918,7 +874,7 @@ export class ClubScene extends Phaser.Scene {
           if (rad > 0 && Math.max(Math.abs(dc), Math.abs(dr)) !== rad) continue;
           const c = sc + dc;
           const r = sr + dr;
-          if (this.poseAllowed(def, c, r, facing)) return [c, r];
+          if (this.poseAllowed(def, c, r)) return [c, r];
         }
       }
     }
@@ -1182,7 +1138,8 @@ export class ClubScene extends Phaser.Scene {
     return false;
   }
 
-  private furnitureTextureKey(kind: string, facing: IsoFacing, def?: FurnitureDef): string {
+  /** Texture key of a piece's single SE art. */
+  private furnitureTextureKey(kind: string, def?: FurnitureDef): string {
     const src =
       def ??
       (kind === 'sofa'
@@ -1190,23 +1147,17 @@ export class ClubScene extends Phaser.Scene {
         : kind === 'bar'
           ? this.barDef
           : this.scenario.furniture.find((f) => f.id === kind || f.type === kind));
-    const fromScenario = src?.sprites?.[facing];
+    const fromScenario = src?.sprites?.se;
     if (fromScenario) return fromScenario;
     const cat =
       this.shopCatalogById.get(src?.catalogId ?? '') ||
       this.shopCatalogById.get(src?.type ?? '') ||
       this.shopCatalogById.get(kind);
-    if (cat?.sprites?.[facing]) return cat.sprites[facing] as string;
-    if (cat?.sprites?.se && (src?.fromShop || src?.catalogId || cat.id === kind)) {
-      return cat.sprites.se as string;
-    }
-    // Single-angle shop sprites (same key for all facings)
-    if (src?.fromShop || src?.catalogId) {
-      if (cat) return cat.sprite;
-      if (src.sprite && this.textures.exists(src.sprite)) return src.sprite;
-    }
     if (cat) return cat.sprite;
-    return `furn_${kind}_${facing}`;
+    if ((src?.fromShop || src?.catalogId) && src.sprite && this.textures.exists(src.sprite)) {
+      return src.sprite;
+    }
+    return `furn_${kind}_se`;
   }
 
   private applyBarDisplaySize(): void {
@@ -1223,9 +1174,7 @@ export class ClubScene extends Phaser.Scene {
       const { x, y } = tileToScreen(f.tile[0], f.tile[1], this.iso);
       if (f.type === 'bar') {
         this.barDef = f;
-        this.barFacing = (f.facing as IsoFacing) || 'se';
-        if (!FACINGS.includes(this.barFacing)) this.barFacing = 'se';
-        const bkey = this.furnitureTextureKey('bar', this.barFacing, f);
+        const bkey = this.furnitureTextureKey('bar', f);
         this.requireTexture(bkey);
         this.barImage = this.add.image(x, y - 18, bkey);
         this.applyBarDisplaySize();
@@ -1250,13 +1199,11 @@ export class ClubScene extends Phaser.Scene {
         });
       } else if (f.type === 'sofa') {
         this.sofaDef = f;
-        this.sofaFacing = (f.facing as IsoFacing) || 'se';
-        if (!FACINGS.includes(this.sofaFacing)) this.sofaFacing = 'se';
-        const key = this.furnitureTextureKey('sofa', this.sofaFacing, f);
+        const key = this.furnitureTextureKey('sofa', f);
         this.requireTexture(key);
-        const sofaPos = this.furnitureWorldPos('sofa', f.tile[0], f.tile[1], f, this.sofaFacing);
+        const sofaPos = this.furnitureWorldPos('sofa', f.tile[0], f.tile[1], f);
         this.sofaImage = this.add.image(sofaPos.x, sofaPos.y, key);
-        const sofaSize = this.furnitureDisplaySize('sofa', f, this.sofaFacing);
+        const sofaSize = this.furnitureDisplaySize('sofa', f);
         this.sofaImage.setDisplaySize(sofaSize.w, sofaSize.h);
         this.sofaImage.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint));
         this.sofaImage.setInteractive({ useHandCursor: true });
@@ -1286,7 +1233,7 @@ export class ClubScene extends Phaser.Scene {
     const pos = anchor
       ? tileToScreen(anchor.tile[0], anchor.tile[1], this.iso)
       : { x: this.iso.originX, y: this.iso.originY + 120 };
-    this.buildRotateUi(pos.x, pos.y);
+    this.buildSelectionHud(pos.x, pos.y);
   }
 
   private beginFurniturePointer(p: Phaser.Input.Pointer, id: SelectedFurniture): void {
@@ -1309,8 +1256,7 @@ export class ClubScene extends Phaser.Scene {
     const id = this.furnDragId;
     const def = this.getFurnitureDef(id);
     if (!def) return;
-    const facing = this.getFurnitureFacing(id);
-    const ok = this.poseAllowed(def, tile.col, tile.row, facing);
+    const ok = this.poseAllowed(def, tile.col, tile.row);
     this.dragPoseValid = ok;
     this.setFurnitureDragTint(id, ok);
     if (!ok) return; // keep last valid tile (snap-back authority)
@@ -1340,9 +1286,7 @@ export class ClubScene extends Phaser.Scene {
     if (!id) return;
     const def = this.getFurnitureDef(id);
     if (!def) return;
-    const facing = this.getFurnitureFacing(id);
-    // Tile/rim first filter; sprite-vs-neon is the authority for looking inside
-    if (!this.poseAllowed(def, col, row, facing)) return;
+    if (!this.poseAllowed(def, col, row)) return;
     if (def.tile[0] === col && def.tile[1] === row) return;
     def.tile = [col, row];
     if (id === 'sofa' || id === 'bar') this.syncSpotsFromFurniture();
@@ -1358,19 +1302,13 @@ export class ClubScene extends Phaser.Scene {
     if (!id) return;
     if (id === 'sofa') {
       if (!this.sofaDef || !this.sofaImage) return;
-      const pos = this.furnitureWorldPos(
-        'sofa',
-        this.sofaDef.tile[0],
-        this.sofaDef.tile[1],
-        this.sofaDef,
-        this.sofaFacing
-      );
+      const pos = this.furnitureWorldPos('sofa', this.sofaDef.tile[0], this.sofaDef.tile[1], this.sofaDef);
       this.sofaImage.setPosition(pos.x, pos.y);
       this.sofaImage.setDepth(
         depthForFurniture(this.sofaDef.tile[0], this.sofaDef.tile[1], this.sofaDef.footprint)
       );
       if (this.selectedFurniture === 'sofa') {
-        this.rotateUi.setPosition(pos.x, pos.y - 66);
+        this.selectionHud.setPosition(pos.x, pos.y - 66);
       }
     } else if (id === 'bar') {
       if (!this.barDef || !this.barImage) return;
@@ -1389,7 +1327,7 @@ export class ClubScene extends Phaser.Scene {
         );
       }
       if (this.selectedFurniture === 'bar') {
-        this.rotateUi.setPosition(pos.x, pos.y - 70);
+        this.selectionHud.setPosition(pos.x, pos.y - 70);
       }
       this.syncBartenderBarDepth();
     } else {
@@ -1398,89 +1336,40 @@ export class ClubScene extends Phaser.Scene {
       if (!def || !img) return;
       const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
       img.setPosition(pos.x, pos.y);
-      if ((def.facingSupport ?? 'flip') === 'flip') {
-        img.setFlipX(!!def.flipX);
-      }
       img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
       if (this.selectedFurniture === id) {
-        this.rotateUi.setPosition(pos.x, pos.y - 78);
+        this.selectionHud.setPosition(pos.x, pos.y - 78);
       }
     }
     const moved = this.getFurnitureDef(id);
     if (moved) this.refreshDirtOverlay(moved);
   }
 
-  private buildRotateUi(x: number, y: number): void {
-    this.rotateUi = this.add.container(x, y - 70).setDepth(9000).setVisible(false);
+  private buildSelectionHud(x: number, y: number): void {
+    this.selectionHud = this.add.container(x, y - 70).setDepth(9000).setVisible(false);
 
-    this.rotateUiBg = this.add.rectangle(0, 0, 260, 40, 0x1a0e28, 0.92);
-    this.rotateUiBg.setStrokeStyle(1, 0xff3ca0);
+    this.selectionHudBg = this.add.rectangle(0, 0, 108, 40, 0x1a0e28, 0.92);
+    this.selectionHudBg.setStrokeStyle(1, 0xff3ca0);
 
-    const mkRotate = (ox: number, label: string, dir: number) => {
-      const c = this.add.container(ox, 0);
-      const b = this.add.rectangle(0, 0, 72, 28, 0xb43282, 1);
-      b.setStrokeStyle(1, 0xff7ac8);
-      b.setInteractive({ useHandCursor: true });
-      const t = this.add
-        .text(0, 0, label, { fontSize: '12px', color: '#ffffff', fontStyle: 'bold' })
-        .setOrigin(0.5);
-      b.on('pointerover', () => b.setFillStyle(0xd44a9a));
-      b.on('pointerout', () => b.setFillStyle(0xb43282));
-      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
-        p.event.stopPropagation();
-        this.blockPanGesture = true;
-        this.panActive = false;
-        this.rotateSelected(dir);
-      });
-      c.add([b, t]);
-      return c;
-    };
-
-    const mkDelete = (ox: number) => {
-      const c = this.add.container(ox, 0);
-      const b = this.add.rectangle(0, 0, 84, 28, 0x8a2048, 1);
-      b.setStrokeStyle(1, 0xff6a9a);
-      b.setInteractive({ useHandCursor: true });
-      const t = this.add
-        .text(0, 0, 'Eliminar', { fontSize: '12px', color: '#ffffff', fontStyle: 'bold' })
-        .setOrigin(0.5);
-      b.on('pointerover', () => b.setFillStyle(0xaa3060));
-      b.on('pointerout', () => b.setFillStyle(0x8a2048));
-      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
-        p.event.stopPropagation();
-        if (this.deleteConfirmOpen) return;
-        this.blockPanGesture = true;
-        this.panActive = false;
-        this.requestDeleteSelected();
-      });
-      c.add([b, t]);
-      return c;
-    };
-
-    this.rotateLeftBtn = mkRotate(-86, 'Girar ⟲', -1);
-    this.rotateRightBtn = mkRotate(-8, 'Girar ⟳', 1);
-    this.deleteBtn = mkDelete(88);
-    this.rotateUi.add([
-      this.rotateUiBg,
-      this.rotateLeftBtn,
-      this.rotateRightBtn,
-      this.deleteBtn,
-    ]);
-  }
-
-  private layoutSelectionHud(canRotate: boolean): void {
-    if (!this.rotateUi) return;
-    if (canRotate) {
-      this.rotateUiBg.setSize(260, 40);
-      this.rotateLeftBtn.setVisible(true).setPosition(-86, 0);
-      this.rotateRightBtn.setVisible(true).setPosition(-8, 0);
-      this.deleteBtn.setPosition(88, 0);
-    } else {
-      this.rotateUiBg.setSize(108, 40);
-      this.rotateLeftBtn.setVisible(false);
-      this.rotateRightBtn.setVisible(false);
-      this.deleteBtn.setPosition(0, 0);
-    }
+    const c = this.add.container(0, 0);
+    const b = this.add.rectangle(0, 0, 84, 28, 0x8a2048, 1);
+    b.setStrokeStyle(1, 0xff6a9a);
+    b.setInteractive({ useHandCursor: true });
+    const t = this.add
+      .text(0, 0, 'Eliminar', { fontSize: '12px', color: '#ffffff', fontStyle: 'bold' })
+      .setOrigin(0.5);
+    b.on('pointerover', () => b.setFillStyle(0xaa3060));
+    b.on('pointerout', () => b.setFillStyle(0x8a2048));
+    b.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      p.event.stopPropagation();
+      if (this.deleteConfirmOpen) return;
+      this.blockPanGesture = true;
+      this.panActive = false;
+      this.requestDeleteSelected();
+    });
+    c.add([b, t]);
+    this.deleteBtn = c;
+    this.selectionHud.add([this.selectionHudBg, this.deleteBtn]);
   }
 
   private requestDeleteSelected(): void {
@@ -1639,37 +1528,27 @@ export class ClubScene extends Phaser.Scene {
     if (id === 'sofa') {
       if (!this.sofaImage || !this.sofaDef) return;
       this.sofaImage.setTint(0xffc0e8);
-      this.layoutSelectionHud(true);
-      this.rotateUi.setVisible(true);
+      this.selectionHud.setVisible(true);
       const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
-      this.rotateUi.setPosition(x, y - 72);
-      this.buildHint.setText('Arrastra el sofá · Girar ⟲ ⟳ · Eliminar').setVisible(true);
+      this.selectionHud.setPosition(x, y - 72);
+      this.buildHint.setText('Arrastra el sofá · Eliminar').setVisible(true);
     } else if (id === 'bar') {
       if (!this.barImage || !this.barDef) return;
       this.barImage.setTint(0xffe0a0);
-      this.layoutSelectionHud(true);
-      this.rotateUi.setVisible(true);
+      this.selectionHud.setVisible(true);
       const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
-      this.rotateUi.setPosition(x, y - 86);
-      this.buildHint.setText('Arrastra la barra · Girar ⟲ ⟳ · Eliminar').setVisible(true);
+      this.selectionHud.setPosition(x, y - 86);
+      this.buildHint.setText('Arrastra la barra · Eliminar').setVisible(true);
     } else {
       const def = this.getFurnitureDef(id);
       const img = this.shopImages.get(id);
       if (!def || !img) return;
       img.setTint(0xc8b0ff);
-      const support = def.facingSupport ?? 'flip';
-      this.layoutSelectionHud(support !== 'none');
-      this.rotateUi.setVisible(true);
+      this.selectionHud.setVisible(true);
       const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
-      this.rotateUi.setPosition(pos.x, pos.y - 78);
+      this.selectionHud.setPosition(pos.x, pos.y - 78);
       const name = this.shopCatalogById.get(def.catalogId ?? '')?.name ?? 'mueble';
-      const rotHint =
-        support === 'flip'
-          ? ' · Girar refleja (1 ángulo)'
-          : support === 'full'
-            ? ' · Girar ⟲ ⟳'
-            : '';
-      this.buildHint.setText(`Arrastra ${name}${rotHint} · Eliminar`).setVisible(true);
+      this.buildHint.setText(`Arrastra ${name} · Eliminar`).setVisible(true);
     }
   }
 
@@ -1682,7 +1561,7 @@ export class ClubScene extends Phaser.Scene {
       this.shopImages.get(this.selectedFurniture)?.clearTint();
     }
     this.selectedFurniture = null;
-    if (this.rotateUi) this.rotateUi.setVisible(false);
+    if (this.selectionHud) this.selectionHud.setVisible(false);
     // Do NOT hide delete confirm here — UIScene holds pendingDelete.id for Sí;
     // selection may clear from pointer races while the modal is open.
   }
@@ -1714,86 +1593,6 @@ export class ClubScene extends Phaser.Scene {
     }
     this.game.events.emit('build-mode-changed', this.buildMode);
   };
-
-  private rotateSelected(dir: number): void {
-    if (!this.buildMode) return;
-    if (this.selectedFurniture === 'bar') this.rotateBar(dir);
-    else if (this.selectedFurniture === 'sofa') this.rotateSofa(dir);
-    else if (this.selectedFurniture) this.rotateShopFurniture(this.selectedFurniture, dir);
-  }
-
-  private rotateSofa(dir: number): void {
-    if (!this.buildMode || !this.sofaDef || !this.sofaImage) return;
-    const idx = FACINGS.indexOf(this.sofaFacing);
-    const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
-    const prevFacing = this.sofaFacing;
-    const prevFp: [number, number] = [...this.sofaDef.footprint] as [number, number];
-    const prevRest = [...this.sofaRestOff] as [number, number];
-    const prevInteract = [...this.sofaInteractOff] as [number, number];
-
-    // 90° grid rotate: footprint swaps; offsets rotate with facing
-    this.sofaDef.footprint = [prevFp[1], prevFp[0]];
-    if (dir > 0) {
-      this.sofaRestOff = [-prevRest[1], prevRest[0]];
-      this.sofaInteractOff = [-prevInteract[1], prevInteract[0]];
-    } else {
-      this.sofaRestOff = [prevRest[1], -prevRest[0]];
-      this.sofaInteractOff = [prevInteract[1], -prevInteract[0]];
-    }
-
-    // Footprint [w,h]<->[h,w] may no longer fit here: nudge to the nearest valid tile.
-    if (!this.nudgeToValidTile(this.sofaDef, next)) {
-      this.sofaDef.footprint = prevFp;
-      this.sofaRestOff = prevRest;
-      this.sofaInteractOff = prevInteract;
-      return;
-    }
-
-    this.sofaFacing = next;
-    this.sofaDef.facing = next;
-    const size = this.furnitureDisplaySize('sofa', this.sofaDef, next);
-    this.sofaImage.setTexture(this.furnitureTextureKey('sofa', next));
-    this.sofaImage.setDisplaySize(size.w, size.h);
-    this.repositionFurnitureVisual('sofa');
-    this.syncSpotsFromFurniture();
-    this.persistLayout();
-    this.rebuildPathfinder();
-    void prevFacing;
-  }
-
-  private rotateBar(dir: number): void {
-    if (!this.buildMode || !this.barDef || !this.barImage) return;
-    const idx = FACINGS.indexOf(this.barFacing);
-    const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
-    const prevFp: [number, number] = [...this.barDef.footprint] as [number, number];
-    const prevStaff = [...this.barStaffOff] as [number, number];
-    const prevInteract = [...this.barInteractOff] as [number, number];
-
-    this.barDef.footprint = [prevFp[1], prevFp[0]];
-    if (dir > 0) {
-      this.barStaffOff = [-prevStaff[1], prevStaff[0]];
-      this.barInteractOff = [-prevInteract[1], prevInteract[0]];
-    } else {
-      this.barStaffOff = [prevStaff[1], -prevStaff[0]];
-      this.barInteractOff = [prevInteract[1], -prevInteract[0]];
-    }
-
-    if (!this.nudgeToValidTile(this.barDef, next)) {
-      this.barDef.footprint = prevFp;
-      this.barStaffOff = prevStaff;
-      this.barInteractOff = prevInteract;
-      return;
-    }
-
-    this.barFacing = next;
-    this.barDef.facing = next;
-    this.barImage.setTexture(this.furnitureTextureKey('bar', next));
-    this.applyBarDisplaySize();
-    this.syncSpotsFromFurniture();
-    this.syncBartenderBarDepth();
-    this.persistLayout();
-    this.rebuildPathfinder();
-  }
 
   openNight = (): void => {
     if (this.buildMode) return;
@@ -1918,10 +1717,9 @@ export class ClubScene extends Phaser.Scene {
     return def.catalogId === 'pinball' || def.type === 'pinball';
   }
 
-  /** Walkable tile in front of the machine for its current facing (null if out of bounds). */
+  /** Tile in front of the machine (its fixed SE front; null if out of bounds). */
   private pinballFrontTile(def: FurnitureDef): { col: number; row: number } | null {
-    const facing = (def.facing as IsoFacing) || 'se';
-    const off = PINBALL_FRONT_OFFSET[facing] ?? PINBALL_FRONT_OFFSET.se;
+    const off = PINBALL_FRONT_OFFSET;
     const col = def.tile[0] + off[0];
     const row = def.tile[1] + off[1];
     const { cols, rows } = this.scenario.map;
@@ -2416,6 +2214,7 @@ export class ClubScene extends Phaser.Scene {
     this.wireStaffClick(npc);
     npc.refreshHitArea();
     this.extraStaff.push(npc);
+    this.syncCharacterInput();
     if (walkIn) {
       const near = this.findStaffSpawnTile();
       npc.state = 'walking';
@@ -2529,7 +2328,24 @@ export class ClubScene extends Phaser.Scene {
 
 
   /** Furniture is interactive only in Construir — otherwise it steals staff taps (Luna under bar). */
+  /**
+   * In Construir characters must not take input: their hit areas (64x120) sit on top of furniture
+   * and, since Phaser only routes a press to the top-most interactive object, a wandering staff
+   * member standing on the sofa/bar swallowed the tap that should select (and so Eliminar) it.
+   */
+  private syncCharacterInput(): void {
+    const sprites = [
+      this.bartender?.sprite,
+      ...this.extraStaff.map((s) => s.sprite),
+      ...this.patrons.map((p) => p.sprite),
+    ];
+    for (const sp of sprites) {
+      if (sp?.input) sp.input.enabled = !this.buildMode;
+    }
+  }
+
   private syncFurnitureInteractive(): void {
+    this.syncCharacterInput();
     if (this.barImage) {
       if (this.buildMode) {
         this.barImage.setInteractive({ useHandCursor: true, draggable: false });
@@ -3469,34 +3285,18 @@ export class ClubScene extends Phaser.Scene {
     for (const it of items) this.shopCatalogById.set(it.id, it);
   }
 
-  private shopSpritesFromCatalog(
-    cat: ShopFurnitureItem
-  ): Partial<Record<IsoFacing, string>> {
-    if (cat.sprites) {
-      return {
-        se: cat.sprites.se ?? cat.sprite,
-        sw: cat.sprites.sw ?? cat.sprites.se ?? cat.sprite,
-        ne: cat.sprites.ne ?? cat.sprites.se ?? cat.sprite,
-        nw: cat.sprites.nw ?? cat.sprites.se ?? cat.sprite,
-      };
-    }
-    return { se: cat.sprite, sw: cat.sprite, ne: cat.sprite, nw: cat.sprite };
-  }
-
-  /** Refresh texture keys / facingSupport from catalog (upgrades old localStorage DJ booth). */
+  /** Refresh texture key / size / anchor from the catalog (keeps old saves in sync with the art). */
   private upgradeShopFurnitureFromCatalog(def: FurnitureDef): void {
     const cat = this.shopCatalogById.get(def.catalogId ?? def.type);
     if (!cat) return;
     def.sprite = cat.sprite;
-    def.sprites = this.shopSpritesFromCatalog(cat);
-    def.facingSupport = cat.facingSupport;
+    def.sprites = { se: cat.sprite };
+    def.facing = FIXED_FACING;
+    def.footprint = [cat.footprint[0], cat.footprint[1]];
     def.displayW = cat.displaySize[0];
     def.displayH = cat.displaySize[1];
     if (typeof cat.yBias === 'number') def.yBias = cat.yBias;
     def.baseVertex = cat.baseVertex;
-    if (cat.facingSupport === 'full') {
-      def.flipX = false;
-    }
   }
 
   private ensureShopFlags(def: FurnitureDef): void {
@@ -3518,7 +3318,6 @@ export class ClubScene extends Phaser.Scene {
     const cat = this.shopCatalogById.get(catalogId);
     if (!cat) return null;
     const id = instanceId || this.nextShopInstanceId(catalogId);
-    const facing = (cat.defaultFacing as IsoFacing) || 'se';
     const price = cat.price ?? STARTER_FURNITURE_PRICE;
     const stats = freshStatsForPrice(price);
     return {
@@ -3527,16 +3326,14 @@ export class ClubScene extends Phaser.Scene {
       sprite: cat.sprite,
       catalogId: cat.id,
       fromShop: true,
-      facing,
-      flipX: false,
-      sprites: this.shopSpritesFromCatalog(cat),
+      facing: FIXED_FACING,
+      sprites: { se: cat.sprite },
       tile: [4, 4],
       footprint: [cat.footprint[0], cat.footprint[1]],
       displayW: cat.displaySize[0],
       displayH: cat.displaySize[1],
       yBias: cat.yBias ?? -8,
       baseVertex: cat.baseVertex,
-      facingSupport: cat.facingSupport,
       price,
       ...stats,
       ...(cat.id === 'pinball' ? { comfort: 0, maxComfort: 0 } : {}),
@@ -3544,10 +3341,17 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private nextShopInstanceId(catalogId: string): string {
-    this.shopInstanceSeq += 1;
-    // Keep ids unique across reloads by including money-tick-ish seq + existing count
-    const n = this.scenario.furniture.filter((f) => f.catalogId === catalogId).length + 1;
-    return `${catalogId}_${n}_${this.shopInstanceSeq}`;
+    // Ids must be unique among ALL current pieces (the counter restarts on reload and a deleted
+    // piece frees a slot, so `${catalogId}_${n}_${seq}` could collide with a saved piece; a
+    // duplicate id made Eliminar remove two pieces at once and orphaned a sprite).
+    const used = new Set(this.scenario.furniture.map((f) => f.id));
+    let id = '';
+    do {
+      this.shopInstanceSeq += 1;
+      const n = this.scenario.furniture.filter((f) => f.catalogId === catalogId).length + 1;
+      id = `${catalogId}_${n}_${this.shopInstanceSeq}`;
+    } while (used.has(id) || this.shopImages.has(id));
+    return id;
   }
 
   private getFurnitureDef(id: string): FurnitureDef | null {
@@ -3576,42 +3380,27 @@ export class ClubScene extends Phaser.Scene {
     return this.shopImages.get(id) ?? null;
   }
 
-  private getFurnitureFacing(id: string): IsoFacing {
-    if (id === 'sofa') return this.sofaFacing;
-    if (id === 'bar') return this.barFacing;
-    const def = this.getFurnitureDef(id);
-    const f = (def?.facing as IsoFacing) || 'se';
-    return FACINGS.includes(f) ? f : 'se';
-  }
-
   /** True when DJ booth idle sheets are loaded (optional subtle loop). */
   private djBoothIdleReady(): boolean {
     return (
-      this.textures.exists('dj_booth_front_sheet') &&
-      this.textures.exists('dj_booth_back_sheet') &&
-      this.anims.exists('dj-booth-idle-front') &&
-      this.anims.exists('dj-booth-idle-back')
+      this.textures.exists('dj_booth_front_sheet') && this.anims.exists('dj-booth-idle-front')
     );
   }
 
+  /** DJ booth idle loop: front (SE) sheet only, never mirrored. */
   private applyDjBoothIdleVisual(
     img: Phaser.GameObjects.Image,
-    facing: IsoFacing,
     size: { w: number; h: number }
   ): void {
     if (!(img instanceof Phaser.GameObjects.Sprite) || !this.djBoothIdleReady()) return;
-    const front = facing === 'se' || facing === 'sw';
-    const sheet = front ? 'dj_booth_front_sheet' : 'dj_booth_back_sheet';
-    const anim = front ? 'dj-booth-idle-front' : 'dj-booth-idle-back';
-    img.setTexture(sheet, 0);
-    img.setFlipX(facing === 'sw' || facing === 'nw');
+    img.setTexture('dj_booth_front_sheet', 0);
+    img.setFlipX(false);
     img.setDisplaySize(size.w, size.h);
-    img.play(anim);
+    img.play('dj-booth-idle-front');
   }
 
   private spawnShopFurnitureVisual(def: FurnitureDef): void {
-    const facing = (def.facing as IsoFacing) || 'se';
-    const key = this.furnitureTextureKey(def.type, facing, def);
+    const key = this.furnitureTextureKey(def.type, def);
     this.requireTexture(key);
     const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
     const size = this.furnitureDisplaySize(def.type, def);
@@ -3621,9 +3410,7 @@ export class ClubScene extends Phaser.Scene {
       : this.add.image(pos.x, pos.y, key);
     img.setDisplaySize(size.w, size.h);
     if (useDjIdle) {
-      this.applyDjBoothIdleVisual(img, facing, size);
-    } else {
-      img.setFlipX(!!def.flipX);
+      this.applyDjBoothIdleVisual(img, size);
     }
     img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
     img.setInteractive({ useHandCursor: true });
@@ -3645,50 +3432,8 @@ export class ClubScene extends Phaser.Scene {
     this.shopImages.set(def.id, img);
   }
 
-  private rotateShopFurniture(id: string, dir: number): void {
-    const def = this.getFurnitureDef(id);
-    const img = this.shopImages.get(id);
-    if (!def || !img) return;
-    const support = def.facingSupport ?? 'flip';
-    if (support === 'none') return;
-
-    if (support === 'flip') {
-      // Single-angle asset: mirror until more facings exist
-      def.flipX = !def.flipX;
-      img.setFlipX(!!def.flipX);
-      const idx = FACINGS.indexOf(this.getFurnitureFacing(id));
-      const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
-      def.facing = next;
-      this.persistLayout();
-      return;
-    }
-
-    // full: cycle facing like sofa/bar (swap footprint axes)
-    const idx = FACINGS.indexOf(this.getFurnitureFacing(id));
-    const next = FACINGS[(idx + dir + FACINGS.length) % FACINGS.length];
-    const prevFp: [number, number] = [...def.footprint] as [number, number];
-    def.footprint = [prevFp[1], prevFp[0]];
-    if (!this.nudgeToValidTile(def, next)) {
-      def.footprint = prevFp;
-      return;
-    }
-    def.facing = next;
-    this.repositionFurnitureVisual(def.id);
-    def.flipX = false;
-    const size = this.furnitureDisplaySize(def.type, def);
-    if (def.catalogId === 'dj_booth' && this.djBoothIdleReady()) {
-      this.applyDjBoothIdleVisual(img, next, size);
-    } else {
-      img.setTexture(this.furnitureTextureKey(def.type, next, def));
-      img.setFlipX(false);
-      img.setDisplaySize(size.w, size.h);
-    }
-    this.persistLayout();
-    this.rebuildPathfinder();
-  }
-
-  private findFreeShopTile(def: FurnitureDef, facing: IsoFacing): [number, number] | null {
-    const found = this.findNearestValidTile(def, facing);
+  private findFreeShopTile(def: FurnitureDef): [number, number] | null {
+    const found = this.findNearestValidTile(def);
     if (found) return found;
     // Fallback: spiral from center
     const { cols, rows } = this.scenario.map;
@@ -3700,7 +3445,7 @@ export class ClubScene extends Phaser.Scene {
           if (Math.abs(dc) !== rad && Math.abs(dr) !== rad) continue;
           const c = cx + dc;
           const r = cy + dr;
-          if (this.poseAllowed(def, c, r, facing)) return [c, r];
+          if (this.poseAllowed(def, c, r)) return [c, r];
         }
       }
     }
@@ -3737,8 +3482,7 @@ export class ClubScene extends Phaser.Scene {
     }
     const def = this.defFromShopCatalog(catalogId);
     if (!def) return;
-    const facing = (def.facing as IsoFacing) || 'se';
-    const tile = this.findFreeShopTile(def, facing);
+    const tile = this.findFreeShopTile(def);
     if (!tile) {
       this.game.events.emit('shop-buy-failed', { id: catalogId, reason: 'space' });
       return;

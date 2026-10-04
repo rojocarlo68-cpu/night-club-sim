@@ -61,15 +61,10 @@ export const AI_TUNABLES = {
   pinballDecayMul: 2,
 } as const;
 
-/** Tile in front of the pinball (where patrons stand) per facing: [dCol, dRow] from its tile.
- *  The machine "faces" the screen direction of its name: se = lower-right (+col), sw = lower-left
- *  (+row), nw = upper-left (-col), ne = upper-right (-row). Adjust here if the art changes. */
-export const PINBALL_FRONT_OFFSET: Record<'se' | 'sw' | 'ne' | 'nw', [number, number]> = {
-  se: [1, 0],
-  sw: [0, 1],
-  nw: [-1, 0],
-  ne: [0, -1],
-};
+/** Tile in front of the pinball (where patrons stand): [dCol, dRow] from its tile. Every piece has
+ *  one fixed SE orientation (front toward the lower-right = +col), so there is a single offset.
+ *  Adjust here if the art changes. */
+export const PINBALL_FRONT_OFFSET: [number, number] = [1, 0];
 
 /** Furniture types patrons can sit at (one claimed tile per seat). */
 export const SEATABLE_TYPES = new Set([

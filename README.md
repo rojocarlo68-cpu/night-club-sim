@@ -14,7 +14,7 @@ Vite + TypeScript + Phaser 3. UI en espanol.
    - Cerrar noche: resumen de la sesion
    - Clientes van a barra o sofa; Luna atiende sola; paciencia baja mientras esperan
    - Arrastra / desliza la pantalla para mover la camara (un dedo o mouse). Toque corto = seleccionar.
-   - Construir: coloca sofa y barra (mover + girar 4 caras). Boton Muebles abre la tienda (Mesa de DJ, etc.). Listo vuelve al juego.
+   - Construir: mueve y compra muebles (sin girar: cada pieza tiene una sola orientacion fija, estilo Ultima Online). Boton Muebles abre la tienda (Mesa de DJ, etc.). Listo vuelve al juego.
    - ✕ o Escape cierra el panel; toque en vacio deselecciona.
 
 Meta: gana dinero sin dejar a Luna sin energia.
@@ -26,7 +26,7 @@ Instalar, luego build. Salida en carpeta dist. Preview disponible.
 ## Placement (Construir)
 
 Playable floor = iso diamond from `room_floor` neon rim, inset ~4% (`FloorBounds.ts`).
-Move/rotate reject if the furniture **visual footprint** (opaque-pixel floor-contact box) leaves that polygon.
+Move rejects if the furniture **visual footprint** (opaque-pixel floor-contact box) leaves that polygon.
 Tile snap + rim stay as a first filter; sprite-vs-neon is the authority. New decorations reuse `canPlaceVisual`.
 Shop items use the same neon bounds checks.
 
@@ -34,7 +34,7 @@ Shop items use the same neon bounds checks.
 
 - public/data/characters.json — bartender y clientes
 - public/data/scenario.json — mapa, muebles (sofa.facing), bebidas, duracion
-- public/data/shop_furniture.json — catalogo tienda Construir (id, name, price, category, sprite, footprint, facingSupport)
+- public/data/shop_furniture.json — catalogo tienda Construir (id, name, price, category, sprite, footprint)
 
 ## Arte — room + sofa (Carlo)
 
@@ -57,16 +57,19 @@ Sofas max ~512px ancho; room_floor.jpeg max ~1280 en el lado largo.
 ## Tienda Construir (Muebles / Decoracion)
 
 En modo Construir, boton **Muebles** abre catalogo data-driven (`shop_furniture.json`).
-Comprar deduce dinero, spawnea instancia en baldosa libre; arrastrar/girar como sofa/barra.
+Comprar deduce dinero, spawnea instancia en baldosa libre; arrastrar como sofa/barra (no se gira).
 Compras + placements + dinero persisten en localStorage con el layout.
 
 ### Mesa de DJ (`dj_booth`)
 - Precio: $120
-- Sheets: `dj_booth_front_sheet.png` (SE/SW, 2x4 idle) + `dj_booth_back_sheet.png` (NE/NW)
-- Placement: `dj_booth_{se,sw,ne,nw}.png` (SW/NW = horizontal flip of front/back frame 0)
-- Facing map: SE/SW = front sheet; NE/NW = back sheet (crowd sees neon front)
+- Sheet: `dj_booth_front_sheet.png` (SE, 2x4 idle); placement art `dj_booth_se.png`
+- Una sola orientacion fija (SE: frente abajo-derecha, espalda hacia el escenario arriba-izquierda)
 - **No** esta en el scenario inicial — solo via tienda
-- `facingSupport: full` — Girar como sofa/barra; saves antiguas se actualizan al cargar
+
+### Orientacion fija (sin girar)
+Camara fija, sin giro de piezas. Todo mueble usa su arte SE (`sofa_se`, `bar_se`, `pinball_se`, `dj_booth_se`).
+Los PNG sw/ne/nw siguen en `public/assets/furniture/` pero ya no se cargan. Saves antiguas con piezas
+giradas se migran al cargar: facing=se, huella SE y se mueven a la casilla valida mas cercana.
 
 ## Stack
 - Vite 5 + TypeScript + Phaser 3

@@ -1,7 +1,5 @@
-/** Catalog entry for Construir furniture/decor shop (data-driven). */
-export type ShopFacingSupport = 'full' | 'flip' | 'none';
-
-export type ShopIsoFacing = 'se' | 'sw' | 'ne' | 'nw';
+/** Catalog entry for Construir furniture/decor shop (data-driven). Every piece has ONE fixed
+ *  SE orientation (no rotation): `sprite` is its SE art. */
 
 export interface ShopFurnitureItem {
   id: string;
@@ -12,8 +10,6 @@ export interface ShopFurnitureItem {
   /** Phaser texture key (default / shop thumb) */
   sprite: string;
   spriteFile?: string;
-  /** Optional 4-dir texture map (full facingSupport). */
-  sprites?: Partial<Record<ShopIsoFacing, string>>;
   footprint: [number, number];
   displaySize: [number, number];
   /** Subtracted from tile screen Y when placing. */
@@ -23,11 +19,6 @@ export interface ShopFurnitureItem {
    * that vertex is pinned to the footprint's bottom vertex (sofa-style exact tile snapping).
    */
   baseVertex?: [number, number];
-  /**
-   * full = 4 iso angles; flip = mirror one sprite; none = no rotate.
-   */
-  facingSupport: ShopFacingSupport;
-  defaultFacing?: ShopIsoFacing;
   blurb?: string;
 }
 
