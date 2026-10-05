@@ -38,8 +38,11 @@ import {
   getShiftDebug as readShiftDebug,
   getShiftSnapshot,
   resetShiftState,
+  tickShiftClock,
+  formatGameClock,
   type ShiftPersist,
 } from '../systems/Shift';
+import { SCHEDULE_LABEL, SCHEDULE_LABEL_MOBILE } from '../config/shift';
 import {
   resetNightAccumulators,
   noteLeaveWithoutBuy,
@@ -3147,6 +3150,9 @@ export class ClubScene extends Phaser.Scene {
       currentDay: shift.currentDay,
       gameHour: shift.gameHour,
       gameMinute: shift.gameMinute,
+      gameClock: formatGameClock(shift.gameHour, shift.gameMinute),
+      scheduleLabel: SCHEDULE_LABEL,
+      scheduleLabelMobile: SCHEDULE_LABEL_MOBILE,
       bartender: this.bartender
         ? {
             name: this.bartender.displayName,
@@ -3709,6 +3715,9 @@ export class ClubScene extends Phaser.Scene {
     if (this.phase !== 'open') return;
     this.nightTimer -= dtSec;
 
+    // Prompt B Phase B2: advance game clock (OPEN/CLOSING). No auto-close at 02:00.
+    const minutesAdvanced = tickShiftClock(dtSec);
+
     // Phase 6: periodic peer observation (gradual competitiveness)
     this.competitionObserveAccum += dt;
     if (this.competitionObserveAccum >= OBSERVE_INTERVAL_MS) {
@@ -3748,7 +3757,12 @@ export class ClubScene extends Phaser.Scene {
       }
     }
 
-    if (Math.floor(this.nightTimer * 2) !== Math.floor((this.nightTimer + dtSec) * 2)) {
+    // B2: refresh HUD when the game minute flips (primary time source).
+    // Legacy half-second nightTimer pulse kept as fallback so other HUD fields still update.
+    if (
+      minutesAdvanced > 0 ||
+      Math.floor(this.nightTimer * 2) !== Math.floor((this.nightTimer + dtSec) * 2)
+    ) {
       this.game.events.emit('stats-updated', this.getHudState());
     }
     if (this.nightTimer <= 0) {

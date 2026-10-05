@@ -1,11 +1,16 @@
 /**
- * Prompt B Phase B1 — single source of truth for day / game clock / shift state.
- * Does not tick the clock, spawn patrons, or soft-close yet (B2+).
+ * Prompt B Phase B1–B2 — day / game clock / shift state (single source of truth).
  *
- * Maps to existing NightPhase for UI/AI compatibility:
+ * B2 clock policy (documented):
+ * - While CLOSED: clock frozen at day-start PRE_OPEN (17:00).
+ * - On Abrir (beginShiftOpen): snap clock to recommended open 18:00, then tick.
+ * - While OPEN or CLOSING: advance by REAL_SECONDS_PER_GAME_MINUTE.
+ * - Does NOT auto-close at 02:00 (legacy 75s nightTimer still ends the night until B7).
+ *
+ * Maps to existing NightPhase:
  *   closed  ↔ prep
  *   open    ↔ open
- *   closing ↔ (reserved; B7 — still treated as open for patrons until wired)
+ *   closing ↔ (reserved B7; treated as open for patrons)
  *   summary ↔ summary
  */
 
@@ -16,8 +21,10 @@ import {
   RECOMMENDED_CLOSE_MINUTE,
   RECOMMENDED_OPEN_HOUR,
   RECOMMENDED_OPEN_MINUTE,
+  REAL_SECONDS_PER_GAME_MINUTE,
   CLOCK_SPEED_GAME_MINUTES_PER_REAL_SECOND,
   SCHEDULE_LABEL,
+  SCHEDULE_LABEL_MOBILE,
   SCHEDULE_RANGE_SHORT,
 } from '../config/shift';
 
@@ -42,10 +49,8 @@ export interface ShiftPersist {
 
 const ALLOWED: Record<ShiftState, readonly ShiftState[]> = {
   closed: ['open'],
-  // summary allowed until B7 introduces a real CLOSING dwell
   open: ['closing', 'summary'],
   closing: ['summary'],
-  // Abrir noche from summary goes straight to open; Sleep (B10) will use closed
   summary: ['open', 'closed'],
 };
 
@@ -53,6 +58,8 @@ let currentDay = 1;
 let gameHour = PRE_OPEN_HOUR;
 let gameMinute = PRE_OPEN_MINUTE;
 let shiftState: ShiftState = 'closed';
+/** Fractional real-seconds accumulator toward the next game minute. */
+let clockAccumSec = 0;
 
 function clampHour(h: number): number {
   if (!Number.isFinite(h)) return PRE_OPEN_HOUR;
@@ -69,11 +76,20 @@ function clampDay(d: number): number {
   return Math.max(1, Math.floor(d));
 }
 
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+export function formatGameClock(hour = gameHour, minute = gameMinute): string {
+  return `${pad2(clampHour(hour))}:${pad2(clampMinute(minute))}`;
+}
+
 export function resetShiftState(): void {
   currentDay = 1;
   gameHour = PRE_OPEN_HOUR;
   gameMinute = PRE_OPEN_MINUTE;
   shiftState = 'closed';
+  clockAccumSec = 0;
 }
 
 /** Bootstrap or after load: set day/time/state without transition checks. */
@@ -89,6 +105,7 @@ export function initShift(opts?: {
   const s = opts?.shiftState;
   shiftState =
     s === 'closed' || s === 'open' || s === 'closing' || s === 'summary' ? s : 'closed';
+  clockAccumSec = 0;
 }
 
 export function getShiftSnapshot(): ShiftSnapshot {
@@ -112,6 +129,7 @@ export function getShiftState(): ShiftState {
 export function setGameTime(hour: number, minute: number): void {
   gameHour = clampHour(hour);
   gameMinute = clampMinute(minute);
+  clockAccumSec = 0;
 }
 
 /**
@@ -137,7 +155,8 @@ function transition(to: ShiftState): boolean {
 
 /**
  * Abrir noche: closed|summary → open.
- * Does not change spawn or real-second timer (caller still owns those in B1).
+ * B2: snaps game clock to recommended open (18:00) and starts ticking.
+ * Spawn + 75s real timer remain owned by ClubScene until later phases.
  */
 export function beginShiftOpen(): boolean {
   if (shiftState === 'open') return true;
@@ -145,29 +164,30 @@ export function beginShiftOpen(): boolean {
     console.warn('[Shift] cannot open while closing');
     return false;
   }
-  // From summary, go open directly (existing Abrir-from-summary flow).
-  if (shiftState === 'summary') {
-    return transition('open');
-  }
-  return transition('open');
+  const ok =
+    shiftState === 'summary' || shiftState === 'closed' ? transition('open') : false;
+  if (!ok) return false;
+  // B2 policy: early/default open always starts the clock at recommended open.
+  setGameTime(RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE);
+  return true;
 }
 
-/** Manual/auto close path until B7: open|closing → summary. */
+/** Manual/auto close path until B7: open|closing → summary. Clock freezes. */
 export function beginShiftSummary(): boolean {
   if (shiftState === 'summary') return true;
   if (shiftState === 'closed') {
     console.warn('[Shift] cannot summarize while closed');
     return false;
   }
+  clockAccumSec = 0;
   if (shiftState === 'open') {
-    // Skip dwelling in closing for B1 (instant finishNight).
     shiftState = 'summary';
     return true;
   }
   return transition('summary');
 }
 
-/** Reserved for B7 soft-close (stop new arrivals, keep patrons). */
+/** Reserved for B7 soft-close (stop new arrivals, keep patrons). Clock keeps ticking. */
 export function beginShiftClosing(): boolean {
   if (shiftState === 'closing') return true;
   return transition('closing');
@@ -176,19 +196,37 @@ export function beginShiftClosing(): boolean {
 /** Reserved for B10 Sleep → next day closed @ pre-open. */
 export function beginShiftClosed(nextDay?: number): boolean {
   if (typeof nextDay === 'number') currentDay = clampDay(nextDay);
-  if (shiftState === 'closed') {
-    setGameTime(PRE_OPEN_HOUR, PRE_OPEN_MINUTE);
-    return true;
-  }
-  if (shiftState !== 'summary' && shiftState !== 'closing') {
-    // Allow force-reset from open only via explicit summary first in normal flow.
-    if (shiftState === 'open') {
-      console.warn('[Shift] close-from-open should go via summary; forcing closed');
-    }
-  }
   shiftState = 'closed';
   setGameTime(PRE_OPEN_HOUR, PRE_OPEN_MINUTE);
   return true;
+}
+
+/**
+ * Advance game time while OPEN or CLOSING.
+ * @returns number of whole game-minutes that advanced (0 if none / not ticking).
+ */
+export function tickShiftClock(dtSec: number): number {
+  if (shiftState !== 'open' && shiftState !== 'closing') return 0;
+  if (!Number.isFinite(dtSec) || dtSec <= 0) return 0;
+  const pace = REAL_SECONDS_PER_GAME_MINUTE;
+  if (!(pace > 0)) return 0;
+
+  clockAccumSec += dtSec;
+  let advanced = 0;
+  while (clockAccumSec >= pace) {
+    clockAccumSec -= pace;
+    gameMinute += 1;
+    if (gameMinute >= 60) {
+      gameMinute = 0;
+      gameHour = (gameHour + 1) % 24;
+    }
+    advanced += 1;
+  }
+  return advanced;
+}
+
+export function isShiftClockTicking(): boolean {
+  return shiftState === 'open' || shiftState === 'closing';
 }
 
 export function serializeShift(): ShiftPersist {
@@ -215,15 +253,15 @@ export function loadShift(raw: ShiftPersist | null | undefined, fallbackDay: num
     raw?.shiftState === 'closing' ||
     raw?.shiftState === 'summary'
   ) {
-    // Never restore mid-open/closing from save — day starts closed (player must Abrir).
     state =
       raw.shiftState === 'open' || raw.shiftState === 'closing' ? 'closed' : raw.shiftState;
   }
-  // Summary at load → treat as closed ready for Abrir (same as fresh prep).
   if (state === 'summary') state = 'closed';
   initShift({ currentDay: day, gameHour: hour, gameMinute: minute, shiftState: state });
-  // Prefer pre-open time when forced closed from a mid-shift save.
   if (state === 'closed' && (raw?.shiftState === 'open' || raw?.shiftState === 'closing')) {
+    setGameTime(PRE_OPEN_HOUR, PRE_OPEN_MINUTE);
+  } else if (state === 'closed') {
+    // Day start always presents pre-open time when closed.
     setGameTime(PRE_OPEN_HOUR, PRE_OPEN_MINUTE);
   }
 }
@@ -232,15 +270,18 @@ export function getShiftDebug() {
   const snap = getShiftSnapshot();
   return {
     ...snap,
+    hhmm: formatGameClock(snap.gameHour, snap.gameMinute),
     legacyPhase: legacyPhaseFromShift(snap.shiftState),
     recommended: {
-      open: `${String(RECOMMENDED_OPEN_HOUR).padStart(2, '0')}:${String(RECOMMENDED_OPEN_MINUTE).padStart(2, '0')}`,
-      close: `${String(RECOMMENDED_CLOSE_HOUR).padStart(2, '0')}:${String(RECOMMENDED_CLOSE_MINUTE).padStart(2, '0')}`,
+      open: formatGameClock(RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE),
+      close: formatGameClock(RECOMMENDED_CLOSE_HOUR, RECOMMENDED_CLOSE_MINUTE),
       label: SCHEDULE_LABEL,
+      labelMobile: SCHEDULE_LABEL_MOBILE,
       rangeShort: SCHEDULE_RANGE_SHORT,
     },
-    preOpen: `${String(PRE_OPEN_HOUR).padStart(2, '0')}:${String(PRE_OPEN_MINUTE).padStart(2, '0')}`,
+    preOpen: formatGameClock(PRE_OPEN_HOUR, PRE_OPEN_MINUTE),
+    realSecondsPerGameMinute: REAL_SECONDS_PER_GAME_MINUTE,
     clockSpeedGameMinutesPerRealSecond: CLOCK_SPEED_GAME_MINUTES_PER_REAL_SECOND,
-    clockTicking: false, // B2
+    clockTicking: isShiftClockTicking(),
   };
 }

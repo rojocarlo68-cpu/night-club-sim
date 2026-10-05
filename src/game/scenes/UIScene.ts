@@ -19,6 +19,14 @@ interface HudState {
   nightTimer: number;
   /** Phase 7: absolute night index (1-based). */
   nightNumber?: number;
+  /** Prompt B Phase B2: game-time clock from Shift (source of truth). */
+  gameHour?: number;
+  gameMinute?: number;
+  gameClock?: string;
+  shiftState?: string;
+  currentDay?: number;
+  scheduleLabel?: string;
+  scheduleLabelMobile?: string;
   bartender: HudBartender | null;
   selectedNpc?: NpcInfo | null;
   nightEarned?: number;
@@ -77,6 +85,8 @@ const PANEL_BOTTOM_MARGIN = 60;
 export class UIScene extends Phaser.Scene {
   private moneyText!: Phaser.GameObjects.Text;
   private timerText!: Phaser.GameObjects.Text;
+  /** Prompt B Phase B2: discreet recommended hours under the clock. */
+  private scheduleText!: Phaser.GameObjects.Text;
   private openBtn!: Phaser.GameObjects.Container;
   private closeBtn!: Phaser.GameObjects.Container;
   private buildBtn!: Phaser.GameObjects.Container;
@@ -169,9 +179,17 @@ export class UIScene extends Phaser.Scene {
       .setScrollFactor(0);
 
     this.timerText = this.add
-      .text(cam.width / 2, 14, 'Noche: —', {
-        fontSize: '16px',
-        color: '#c8a0e0',
+      .text(cam.width / 2, 14, '17:00', {
+        fontSize: '18px',
+        color: '#f0e6ff',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0);
+    this.scheduleText = this.add
+      .text(cam.width / 2, 34, 'Horario sugerido: Lun–Dom · 18:00 — 02:00', {
+        fontSize: '11px',
+        color: '#9a80b0',
       })
       .setOrigin(0.5, 0)
       .setScrollFactor(0);
@@ -684,14 +702,8 @@ export class UIScene extends Phaser.Scene {
     this.phase = s.phase;
     if (this.inventoryPanelVisible) this.rebuildInventoryPanel();
     this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
-    const label = this.nightLabel(s);
-    if (s.phase === 'open') {
-      this.timerText.setText(`${label} · ${s.nightTimer}s`);
-    } else if (s.phase === 'prep') {
-      this.timerText.setText(`${label} · lista`);
-    } else if (s.phase === 'summary') {
-      this.timerText.setText(`${label} · cerrada`);
-    }
+    // Prompt B Phase B2: one visible time source = game clock (hide 75s countdown).
+    this.applyClockHud(s);
     if (this.panelVisible && s.selectedNpc) {
       this.selectedNpc = s.selectedNpc;
       this.refreshPanel(s.selectedNpc);
@@ -732,7 +744,7 @@ export class UIScene extends Phaser.Scene {
     this.openBtn.setVisible(true);
     this.closeBtn.setVisible(false);
     const label = this.nightLabel(s);
-    this.timerText.setText(`${label} · cerrada`);
+    this.applyClockHud(s);
     this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
 
     const lines: string[] = [
@@ -898,13 +910,54 @@ export class UIScene extends Phaser.Scene {
     this.summary.setPosition(cam.width / 2, cam.height / 2);
   }
 
-  /** Narrow screens: 'Noche N' goes under the money line (left) so it can't overlap it or the button. */
+  /**
+   * Prompt B Phase B2: permanent game clock HH:MM + discreet schedule hint.
+   * Narrow screens: under the money line (left). Desktop: centered top.
+   */
   private layoutTimerText(w: number): void {
-    if (w < 640) {
-      this.timerText.setOrigin(0, 0).setPosition(16, 34).setFontSize(12);
+    const mobile = w < 640;
+    if (mobile) {
+      this.timerText.setOrigin(0, 0).setPosition(16, 34).setFontSize(16);
+      this.scheduleText.setOrigin(0, 0).setPosition(16, 52).setFontSize(10);
     } else {
-      this.timerText.setOrigin(0.5, 0).setPosition(w / 2, 14).setFontSize(16);
+      this.timerText.setOrigin(0.5, 0).setPosition(w / 2, 10).setFontSize(20);
+      this.scheduleText.setOrigin(0.5, 0).setPosition(w / 2, 32).setFontSize(11);
     }
+  }
+
+  /** Drive clock + schedule from Shift fields in HudState (not nightTimer seconds). */
+  private applyClockHud(s: HudState): void {
+    const hh =
+      typeof s.gameHour === 'number' && Number.isFinite(s.gameHour)
+        ? ((Math.floor(s.gameHour) % 24) + 24) % 24
+        : 17;
+    const mm =
+      typeof s.gameMinute === 'number' && Number.isFinite(s.gameMinute)
+        ? Math.max(0, Math.min(59, Math.floor(s.gameMinute)))
+        : 0;
+    const clock =
+      typeof s.gameClock === 'string' && /^\d{1,2}:\d{2}$/.test(s.gameClock)
+        ? s.gameClock
+        : `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    const night = this.nightLabel(s);
+    const mobile = this.scale.width < 640;
+    if (s.phase === 'open') {
+      this.timerText.setText(clock);
+      this.timerText.setColor('#f0e6ff');
+    } else if (s.phase === 'prep') {
+      this.timerText.setText(clock);
+      this.timerText.setColor('#c8a0e0');
+    } else {
+      this.timerText.setText(clock);
+      this.timerText.setColor('#a090b0');
+    }
+    const full = s.scheduleLabel || 'Horario sugerido: Lun–Dom · 18:00 — 02:00';
+    const short = s.scheduleLabelMobile || 'Horario: 18:00 — 02:00';
+    let schedule = mobile ? short : full;
+    if (s.phase === 'summary') {
+      schedule = mobile ? `${short} · cerrada` : `${full} · ${night} cerrada`;
+    }
+    this.scheduleText.setText(schedule);
   }
 
   private onResize = (gameSize: Phaser.Structs.Size): void => {
