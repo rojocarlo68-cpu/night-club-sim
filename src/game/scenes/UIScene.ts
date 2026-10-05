@@ -110,6 +110,8 @@ export class UIScene extends Phaser.Scene {
   private summaryTitle!: Phaser.GameObjects.Text;
   private summaryBody!: Phaser.GameObjects.Text;
   private summaryAgain!: Phaser.GameObjects.Container;
+  /** Prompt B Phase B10 */
+  private summarySleep!: Phaser.GameObjects.Container;
   private summaryClose!: Phaser.GameObjects.Container;
   private lastSummaryBody = '';
   private energyBar!: Phaser.GameObjects.Rectangle;
@@ -377,11 +379,19 @@ export class UIScene extends Phaser.Scene {
       })
       .setOrigin(0.5, 0)
       .setName('body');
+    // B10: primary action is Dormir (ends day). Abrir noche is on the HUD after waking.
+    this.summarySleep = this.makeLocalButton(-100, 0, 200, 40, 'Dormir', () => {
+      if (this.buildMode) return;
+      this.summary.setVisible(false);
+      this.game.events.emit('cmd-sleep');
+    });
     this.summaryAgain = this.makeLocalButton(-100, 0, 200, 40, 'Abrir noche', () => {
+      // Kept hidden; Abrir is HUD-only after Dormir (B10 UX split).
       if (this.buildMode) return;
       this.summary.setVisible(false);
       this.game.events.emit('cmd-open-night');
     });
+    this.summaryAgain.setVisible(false);
     this.summaryClose = this.makeLocalButton(0, 0, 36, 32, '✕', () => {
       this.summary.setVisible(false);
     });
@@ -389,6 +399,7 @@ export class UIScene extends Phaser.Scene {
       this.summaryBg,
       this.summaryTitle,
       this.summaryBody,
+      this.summarySleep,
       this.summaryAgain,
       this.summaryClose,
     ]);
@@ -403,6 +414,7 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('night-started', this.onNightStarted, this);
     this.game.events.on('night-closing', this.onNightClosing, this);
     this.game.events.on('night-summary', this.onSummary, this);
+    this.game.events.on('day-started', this.onDayStarted, this);
     this.game.events.on('select-npc', this.onSelectNpc, this);
     // Back-compat: older emit still works
     this.game.events.on('select-bartender', this.onSelectBartenderLegacy, this);
@@ -692,16 +704,18 @@ export class UIScene extends Phaser.Scene {
   };
 
   private refreshBuildButtons(): void {
-    const canBuild = this.phase !== 'open';
+    const canBuild = this.phase === 'prep' || this.phase === 'summary';
     this.buildBtn.setVisible(canBuild && !this.buildMode);
     this.doneBuildBtn.setVisible(canBuild && this.buildMode);
     this.staffBtn.setVisible(!this.buildMode);
     this.inventBtn.setVisible(true);
     this.shopBtn.setVisible(canBuild && this.buildMode);
     this.openBtn.setAlpha(this.buildMode ? 0.35 : 1);
-    if (this.buildMode) {
-      this.openBtn.setVisible(this.phase !== 'open');
-    }
+    // B10: Abrir only when CLOSED (prep). Summary uses Dormir.
+    const showOpen = this.phase === 'prep' && !this.buildMode;
+    const showClose = this.phase === 'open';
+    this.openBtn.setVisible(showOpen);
+    this.closeBtn.setVisible(showClose);
   }
 
   private nightLabel(s: HudState): string {
@@ -759,8 +773,10 @@ export class UIScene extends Phaser.Scene {
   };
 
   private onSummary = (s: HudState): void => {
-    this.openBtn.setVisible(true);
+    this.phase = s.phase;
+    this.openBtn.setVisible(false);
     this.closeBtn.setVisible(false);
+    if (this.summarySleep) this.summarySleep.setVisible(true);
     const label = this.nightLabel(s);
     this.applyClockHud(s);
     this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
@@ -824,6 +840,47 @@ export class UIScene extends Phaser.Scene {
    * Auto-size the night-summary panel so payroll + utilities lines never
    * overlap the title or spill past the box / viewport.
    */
+  /** Prompt B Phase B10: after Dormir — closed @ 17:00, optional toast. */
+  private onDayStarted = (s: HudState & { toast?: string | null }): void => {
+    this.summary.setVisible(false);
+    this.phase = s.phase;
+    this.onStats(s);
+    this.refreshBuildButtons();
+    const msg = typeof s.toast === 'string' && s.toast.trim() ? s.toast.trim() : null;
+    if (msg) this.showDayToast(msg);
+  };
+
+  private dayToast?: Phaser.GameObjects.Text;
+
+  private showDayToast(msg: string): void {
+    this.dayToast?.destroy();
+    const cam = this.cameras.main;
+    this.dayToast = this.add
+      .text(cam.width / 2, cam.height - 90, msg, {
+        fontSize: '14px',
+        color: '#f0e6ff',
+        backgroundColor: '#12081ecc',
+        padding: { x: 12, y: 8 },
+        align: 'center',
+        wordWrap: { width: Math.min(420, cam.width - 40) },
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(9600)
+      .setAlpha(0);
+    this.tweens.add({
+      targets: this.dayToast,
+      alpha: 1,
+      duration: 400,
+      yoyo: true,
+      hold: 2800,
+      onComplete: () => {
+        this.dayToast?.destroy();
+        this.dayToast = undefined;
+      },
+    });
+  }
+
   private layoutSummary(bodyText: string): void {
     this.lastSummaryBody = bodyText;
     const cam = this.cameras.main;
@@ -922,7 +979,9 @@ export class UIScene extends Phaser.Scene {
     }
 
     const btnY = panelH / 2 - padBot - btnH / 2;
+    this.summarySleep.setPosition(-100, btnY);
     this.summaryAgain.setPosition(-100, btnY);
+    this.summaryAgain.setVisible(false);
 
     // makeLocalButton is top-left anchored
     const closeX = panelW / 2 - 36 - 8;

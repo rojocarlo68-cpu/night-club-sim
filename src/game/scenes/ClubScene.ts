@@ -34,6 +34,8 @@ import {
   beginShiftOpen,
   beginShiftClosing,
   beginShiftSummary,
+  beginShiftClosed,
+
   syncShiftDay,
   legacyPhaseFromShift,
   getShiftDebug as readShiftDebug,
@@ -53,6 +55,11 @@ import {
   CLOSING_NUDGE_AFTER_MS,
   CLOSING_FORCE_SUMMARY_MS,
 } from '../config/shift';
+import {
+  DAY_START_TOAST_CHANCE,
+  DAY_START_MESSAGES,
+  SLEEP_FADE_MS,
+} from '../config/dayMessages';
 import {
   beginArrivalsNight,
   stopArrivals,
@@ -410,6 +417,8 @@ export class ClubScene extends Phaser.Scene {
   /** B7: real-time ms when CLOSING began (0 if not closing). */
   private closingStartedAt = 0;
   private closingNudged = false;
+  /** B10: guard against double Dormir. */
+  private sleepInProgress = false;
   /** Phase 7: absolute night index (1-based). Increments when a night ends. */
   nightNumber = 1;
   /** Phase 6: ms accumulator toward next peer-observation tick. */
@@ -619,6 +628,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.emit('club-ready', this.getHudState());
     this.game.events.on('cmd-open-night', this.openNight, this);
     this.game.events.on('cmd-close-night', this.closeNight, this);
+    this.game.events.on('cmd-sleep', this.sleepDay, this);
     this.game.events.on('cmd-rest', this.orderRest, this);
     this.game.events.on('cmd-rest-staff', this.orderRestStaff, this);
     this.game.events.on('cmd-select-staff', this.onCmdSelectStaff, this);
@@ -1742,10 +1752,8 @@ export class ClubScene extends Phaser.Scene {
 
   openNight = (): void => {
     if (this.buildMode) return;
-    if (this.phase !== 'prep' && this.phase !== 'summary') return;
-    if (this.phase === 'summary') {
-      this.resetForNewNight();
-    }
+    // Prompt B Phase B10: Abrir only from CLOSED (prep). Use Dormir to leave SUMMARY.
+    if (this.phase !== 'prep') return;
     this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     this.rebuildPathfinder();
@@ -3017,6 +3025,59 @@ export class ClubScene extends Phaser.Scene {
     });
   }
 
+
+
+  /**
+   * Prompt B Phase B10: Dormir — end the day from SUMMARY.
+   * Fade out → CLOSED @ 17:00 (currentDay already advanced by NightCycle) → fade in.
+   * Does NOT auto-open. Does NOT bump nightNumber again.
+   */
+  sleepDay = (): void => {
+    if (this.phase !== 'summary') return;
+    if (this.sleepInProgress) return;
+    this.sleepInProgress = true;
+    const cam = this.cameras.main;
+    const fade = Math.max(200, SLEEP_FADE_MS);
+
+    // Apply day-roll immediately so headless / paused clocks still advance.
+    // Fade is cosmetic; do not gate state on camerafadeoutcomplete.
+    const applyClosedDay = () => {
+      // nightNumber already next day from finishNight / onNightEnd.
+      beginShiftClosed(this.nightNumber);
+      syncShiftDay(this.nightNumber);
+      this.phase = legacyPhaseFromShift(); // prep
+      this.resetForNewNight();
+      this.applyClubLighting('closed', false);
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.game.events.emit('day-started', {
+        ...this.getHudState(),
+        toast: this.rollDayStartToast(),
+      });
+    };
+    applyClosedDay();
+
+    const endFade = () => {
+      this.sleepInProgress = false;
+      try {
+        cam.fadeIn(fade, 0, 0, 0);
+      } catch {
+        /* ignore */
+      }
+    };
+    try {
+      cam.fadeOut(fade, 0, 0, 0);
+      cam.once('camerafadeoutcomplete', endFade);
+      this.time.delayedCall(fade + 80, endFade);
+    } catch {
+      endFade();
+    }
+  };
+
+  private rollDayStartToast(): string | null {
+    if (Math.random() > DAY_START_TOAST_CHANCE) return null;
+    const i = Math.floor(Math.random() * DAY_START_MESSAGES.length);
+    return DAY_START_MESSAGES[i] ?? null;
+  }
 
   closeNight = (): void => {
     const st = getShiftState();
@@ -4526,6 +4587,7 @@ export class ClubScene extends Phaser.Scene {
     this.scale.off('resize', this.onClubResize, this);
     this.game.events.off('cmd-open-night', this.openNight, this);
     this.game.events.off('cmd-close-night', this.closeNight, this);
+    this.game.events.off('cmd-sleep', this.sleepDay, this);
     this.game.events.off('cmd-rest', this.orderRest, this);
     this.game.events.off('cmd-rest-staff', this.orderRestStaff, this);
     this.game.events.off('cmd-select-staff', this.onCmdSelectStaff, this);
