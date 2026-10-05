@@ -124,6 +124,9 @@ export class Patron extends Character {
     // so re-fit it whenever the texture (frame size) changes.
     this.sprite.on('animationstart', this.syncHitArea, this);
     this.sprite.on('animationupdate', this.syncHitArea, this);
+    // The hoodie walk sheet only has the SE (semi-right) cycle: SW plays the same frames mirrored. Every other
+    // anim (idle SW is a pre-mirrored frame, patron_walk has its own SW/NE/NW rows) must not be flipped.
+    this.sprite.on('animationstart', this.syncWalkFlip, this);
     this.ring = scene.add.ellipse(0, -2, 18, 8, 0x2ad6ff, 0.0);
     this.add(this.ring);
     this.ring.setDepth(-1);
@@ -164,6 +167,11 @@ export class Patron extends Character {
       hitAreaCallback: Phaser.Geom.Rectangle.Contains,
       useHandCursor: true,
     });
+  }
+
+  private syncWalkFlip(anim: Phaser.Animations.Animation): void {
+    const tex = anim?.frames?.[0]?.textureKey;
+    this.sprite.setFlipX(anim?.key === 'patron-walk-sw' && tex === 'client_hoodie_walk');
   }
 
   /** Keep the click area at the same on-screen size when the frame size changes (see constructor). */

@@ -45,6 +45,13 @@ export class BootScene extends Phaser.Scene {
 
     this.load.setPath('./');
 
+    // Cache-busting: every asset URL gets ?v=<build id> so a new deploy never shows stale art (Pages caches 10 min).
+    const buildId = typeof __BUILD_ID__ !== 'undefined' ? __BUILD_ID__ : String(Date.now());
+    this.load.on(Phaser.Loader.Events.ADD, (_key: string, _type: string, _loader: unknown, file: Phaser.Loader.File) => {
+      const u = file?.url;
+      if (typeof u === 'string' && u && !u.startsWith('data:') && !u.includes('?v=')) file.url = `${u}?v=${buildId}`;
+    });
+
     this.load.on('progress', (v: number) => {
       fill.width = 4 + 272 * v;
       const pct = Math.round(v * 100);
@@ -137,6 +144,12 @@ export class BootScene extends Phaser.Scene {
     // Client (hoodie guy) hi-res idle for SE / SW: 2 frames of 560×960 (= patron 112×192 ×5; frame 1 = mirrored frame 0).
     // Same on-screen scale as patron_idle: Patron.ts display size is 112:192 → PATRON_DISPLAY_H whatever the frame px.
     this.load.spritesheet('client_hoodie_idle', 'assets/characters/client_hoodie_idle_sheet.png', {
+      frameWidth: 560,
+      frameHeight: 960,
+    });
+    // Client (hoodie guy) walk SE (semi-right, as drawn): 10 frames of 560×960 in a 5×2 grid, same frame/scale/soles as the idle.
+    // SW = the same frames mirrored with flipX (Patron.ts); NE / NW keep the old patron_walk art.
+    this.load.spritesheet('client_hoodie_walk', 'assets/characters/client_hoodie_walk_se_sheet.png', {
       frameWidth: 560,
       frameHeight: 960,
     });
@@ -235,11 +248,24 @@ export class BootScene extends Phaser.Scene {
         repeat: 0,
       });
     }
-    if (!this.anims.exists('nova-idle')) {
+    // Nova idle: new clean art, 2 static frames of 146×784 — frame 0 = SE (semi-right, as drawn), frame 1 = SW (pre-mirrored).
+    // No back-view art exists, so NE uses the SE frame and NW the SW frame (staff face NE/NW at the bar most of the time).
+    for (const [facing, frame] of [['se', 0], ['sw', 1], ['ne', 0], ['nw', 1]] as const) {
+      const k = `nova-idle-${facing}`;
+      if (!this.anims.exists(k) && this.textures.exists('nova_idle')) {
+        this.anims.create({
+          key: k,
+          frames: this.anims.generateFrameNumbers('nova_idle', { start: frame, end: frame }),
+          frameRate: 1,
+          repeat: -1,
+        });
+      }
+    }
+    if (!this.anims.exists('nova-idle') && this.textures.exists('nova_idle')) {
       this.anims.create({
         key: 'nova-idle',
-        frames: this.anims.generateFrameNumbers('nova_idle', { start: 0, end: 7 }),
-        frameRate: 9,
+        frames: this.anims.generateFrameNumbers('nova_idle', { start: 0, end: 0 }),
+        frameRate: 1,
         repeat: -1,
       });
     }
@@ -262,7 +288,19 @@ export class BootScene extends Phaser.Scene {
     ];
     for (const f of facings) {
       const walkKey = `patron-walk-${f.key}`;
-      if (!this.anims.exists(walkKey) && this.textures.exists('patron_walk')) {
+      if (
+        !this.anims.exists(walkKey) &&
+        (f.key === 'se' || f.key === 'sw') &&
+        this.textures.exists('client_hoodie_walk')
+      ) {
+        // New client walk (10 frames, 9 fps). SW uses the same SE frames; Patron.ts mirrors them with flipX.
+        this.anims.create({
+          key: walkKey,
+          frames: this.anims.generateFrameNumbers('client_hoodie_walk', { start: 0, end: 9 }),
+          frameRate: 9,
+          repeat: -1,
+        });
+      } else if (!this.anims.exists(walkKey) && this.textures.exists('patron_walk')) {
         this.anims.create({
           key: walkKey,
           frames: this.anims.generateFrameNumbers('patron_walk', {
@@ -275,9 +313,10 @@ export class BootScene extends Phaser.Scene {
       }
       const idleKey = `patron-idle-${f.key}`;
       if (!this.anims.exists(idleKey)) {
-        if ((f.key === 'se' || f.key === 'sw') && this.textures.exists('client_hoodie_idle')) {
-          // New clean client art: SE = frame 0, SW = frame 1 (mirrored). NE / NW keep the old patron_idle frames.
-          const hf = f.key === 'se' ? 0 : 1;
+        if (this.textures.exists('client_hoodie_idle')) {
+          // New clean client art for EVERY standing facing (waiting / seated / drinking / queue all face NE or NW,
+          // and there is no back-view art): SE & NE = frame 0 (looks semi-right), SW & NW = frame 1 (mirrored).
+          const hf = f.key === 'se' || f.key === 'ne' ? 0 : 1;
           this.anims.create({
             key: idleKey,
             frames: this.anims.generateFrameNumbers('client_hoodie_idle', { start: hf, end: hf }),

@@ -89,11 +89,13 @@ export class Bartender extends Character {
       const displayW = (NOVA_IDLE_FRAME_W / NOVA_IDLE_FRAME_H) * displayH;
       if (texture === 'nova_idle') {
         this.setupSheetIdle({
-          animKey: 'nova-idle',
+          animKey: 'nova-idle-se',
           originY: NOVA_FEET_ORIGIN_Y,
           displayWidth: displayW,
           displayHeight: displayH,
           y: 6,
+          // Directional idle: SE/NE = frame 0, SW/NW = pre-mirrored frame 1 (nova-idle-{se,sw,ne,nw}).
+          idleAnimPrefix: 'nova-idle',
         });
       } else {
         this.sprite.setOrigin(0.5, 0.92);
