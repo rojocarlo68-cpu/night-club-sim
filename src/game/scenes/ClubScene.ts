@@ -88,6 +88,15 @@ import {
   recordActionPerformed,
   getActionCounts,
 } from '../systems/TipActionPicker';
+import { getTipAction } from '../config/tipActions';
+import {
+  getActionTastes,
+  applyActionSatisfaction,
+  serializeActionTastes,
+  loadActionTastes,
+  setActionTaste,
+  peekActionTaste,
+} from '../systems/ActionTastes';
 import {
   getAffinity,
   applyAffinityToTipChance,
@@ -284,6 +293,8 @@ interface SavedLayout {
   };
   /** Prompt A Phase 4: stable patronName→drink preferences. Old saves omit → rolled fresh. */
   drinkPrefs?: Record<string, Record<string, number>>;
+  /** Prompt A Phase 9: stable patronName→actionId taste (−1..+1). Old saves omit → rolled fresh. */
+  actionTastes?: Record<string, Record<string, number>>;
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -324,6 +335,8 @@ export class ClubScene extends Phaser.Scene {
   nightNumber = 1;
   /** Phase 6: ms accumulator toward next peer-observation tick. */
   private competitionObserveAccum = 0;
+  /** Phase 9 test: when set, completeServe uses this tip action id (picker unchanged otherwise). */
+  private forcedTipActionId: string | null = null;
   buildMode = false;
   /** Currently selected NPC id (bartender profile id or patron runtime id). */
   private selectedNpcId: string | null = null;
@@ -679,6 +692,7 @@ export class ClubScene extends Phaser.Scene {
       loadCustomerTraits(saved?.customerTraits);
       loadInventory(saved?.inventory);
       loadDrinkPrefs(saved?.drinkPrefs);
+      loadActionTastes(saved?.actionTastes);
       loadCompetition(saved?.competition);
       loadPayrollHistory(saved?.payrollHistory);
       loadUtilitiesHistory(saved?.utilitiesHistory);
@@ -790,6 +804,7 @@ export class ClubScene extends Phaser.Scene {
       customerTraits: serializeCustomerTraits(),
       inventory: serializeInventory(),
       drinkPrefs: serializeDrinkPrefs(),
+      actionTastes: serializeActionTastes(),
       competition: serializeCompetition(),
       nightNumber: this.nightNumber,
       payrollHistory: serializePayrollHistory(),
@@ -1624,6 +1639,8 @@ export class ClubScene extends Phaser.Scene {
     createExperience(patron);
     // Prompt A Phase 4: roll/persist drink prefs (stable per profile.name).
     getDrinkPrefs(patron);
+    // Prompt A Phase 9: roll/persist action tastes (stable per profile.name).
+    getActionTastes(patron);
     this.chooseMainPatronGoal(patron);
   }
 
@@ -2898,6 +2915,22 @@ export class ClubScene extends Phaser.Scene {
   getTipActionCounts(staffId?: string) {
     return getActionCounts(staffId);
   }
+  /** Phase 9 test: force next serves to use this tip action id (null = normal picker). */
+  debugForceTipAction(actionId: string | null): void {
+    this.forcedTipActionId = actionId && getTipAction(actionId) ? actionId : null;
+  }
+
+  /** Phase 9 test: force patron taste score (−1..+1) for an action. */
+  debugSetActionTaste(patronName: string, actionId: string, score: number): boolean {
+    const ok = setActionTaste(patronName, actionId, score);
+    if (ok) this.persistLayout();
+    return ok;
+  }
+
+  debugPeekActionTaste(patronName: string, actionId: string) {
+    return peekActionTaste(patronName, actionId);
+  }
+
 
   /** Phase 5 test/debug: recent served affinity outcomes (ring ~50). */
   getAffinityDebug() {
@@ -3254,7 +3287,7 @@ export class ClubScene extends Phaser.Scene {
       staff.applyServeDrain();
       // Phase 3/4: personality-weighted tip action, gated by existing energy/mood
       const moodAtServe = staff.profile.mood;
-      const tipAction = pickTipAction(
+      let tipAction = pickTipAction(
         staff.profile.id,
         Math.random,
         undefined,
@@ -3264,6 +3297,10 @@ export class ClubScene extends Phaser.Scene {
         },
         getCompetitiveness(staff.profile.id)
       );
+      // Phase 9 test override only — does not change picker logic when unset.
+      if (this.forcedTipActionId) {
+        tipAction = getTipAction(this.forcedTipActionId) ?? tipAction;
+      }
       if (tipAction) {
         staff.applyTipActionCost(tipAction.energyCost, tipAction.moodCost);
         staff.setTipAction(
@@ -3273,6 +3310,8 @@ export class ClubScene extends Phaser.Scene {
         );
         recordActionPerformed(staff.profile.id, tipAction.id);
         staff.setServeLabel(`${tipAction.label} para el cliente`);
+        // Prompt A Phase 9: patron taste → one-shot act:<id> sat (before tip sat mods).
+        applyActionSatisfaction(patron, tipAction);
       }
       const payout = this.computeServePayout(
         patron,
