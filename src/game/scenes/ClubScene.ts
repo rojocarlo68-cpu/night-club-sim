@@ -1147,13 +1147,15 @@ export class ClubScene extends Phaser.Scene {
   }
 
 
-  /** Prompt B Phase B3: camera-fixed dim rectangle over the club view. */
+  /**
+   * Full-viewport dim overlay. scrollFactor 0 objects still scale with camera zoom,
+   * so size must be viewport/zoom (plus margin) or lit edges show around a small rectangle.
+   */
   private createLightsOverlay(): void {
     const cam = this.cameras.main;
-    const w = Math.max(cam.width, 64) + 40;
-    const h = Math.max(cam.height, 64) + 40;
+    const { w, h } = this.lightsOverlayCoverSize(cam);
     this.lightsOverlay = this.add
-      .rectangle(cam.centerX, cam.centerY, w, h, CLOSED_OVERLAY_COLOR, 1)
+      .rectangle(cam.width / 2, cam.height / 2, w, h, CLOSED_OVERLAY_COLOR, 1)
       .setScrollFactor(0)
       .setDepth(LIGHTS_OVERLAY_DEPTH)
       .setOrigin(0.5)
@@ -1162,11 +1164,26 @@ export class ClubScene extends Phaser.Scene {
     this.lightsOverlay.disableInteractive();
   }
 
+  /** Cover the entire screen even when zoomed out (mobile + PC). */
+  private lightsOverlayCoverSize(cam: Phaser.Cameras.Scene2D.Camera): { w: number; h: number } {
+    const z = Math.max(cam.zoom, 0.05);
+    // Generous padding so pinch-zoom / letterboxing never shows bright rims.
+    const pad = 240;
+    return {
+      w: cam.width / z + pad,
+      h: cam.height / z + pad,
+    };
+  }
+
   private layoutLightsOverlay(): void {
     if (!this.lightsOverlay) return;
     const cam = this.cameras.main;
-    this.lightsOverlay.setPosition(cam.centerX, cam.centerY);
-    this.lightsOverlay.setSize(Math.max(cam.width, 64) + 40, Math.max(cam.height, 64) + 40);
+    const { w, h } = this.lightsOverlayCoverSize(cam);
+    // scrollFactor 0 → screen space; keep anchored to the viewport centre (not world midPoint).
+    this.lightsOverlay.setPosition(cam.width / 2, cam.height / 2);
+    this.lightsOverlay.setSize(w, h);
+    // Phaser Rectangle: also refresh display size after setSize
+    this.lightsOverlay.setDisplaySize(w, h);
   }
 
   /**
@@ -1294,6 +1311,7 @@ export class ClubScene extends Phaser.Scene {
     this.refreshCameraBounds();
     const fc = this.floorCenter();
     cam.centerOn(fc.x, fc.y + 20);
+    this.layoutLightsOverlay();
   }
 
   /** World scroll bounds around the room — call after zoom so corners stay reachable. */
@@ -1330,6 +1348,7 @@ export class ClubScene extends Phaser.Scene {
     cam.scrollX += before.x - after.x;
     cam.scrollY += before.y - after.y;
     this.refreshCameraBounds();
+    this.layoutLightsOverlay();
   }
 
   private setupZoom(): void {

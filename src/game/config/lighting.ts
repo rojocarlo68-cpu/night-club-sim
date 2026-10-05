@@ -7,7 +7,7 @@
 export const CLOSED_OVERLAY_COLOR = 0x08060f;
 
 /** Overlay alpha when CLOSED or SUMMARY (0 = full bright, 1 = blackout). */
-export const CLOSED_OVERLAY_ALPHA = 0.78;
+export const CLOSED_OVERLAY_ALPHA = 0.88;
 
 /** Overlay alpha when OPEN or CLOSING. */
 export const OPEN_OVERLAY_ALPHA = 0;
@@ -16,7 +16,7 @@ export const OPEN_OVERLAY_ALPHA = 0;
 export const LIGHTS_FADE_MS = 600;
 
 /** Camera / void background while closed (slightly darker than open). */
-export const CLOSED_BG_COLOR = '#0a080c';
+export const CLOSED_BG_COLOR = '#06040a';
 
 /** Camera / void background while open (matches ClubScene BG_COLOR). */
 export const OPEN_BG_COLOR = '#1a1411';
