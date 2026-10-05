@@ -48,6 +48,9 @@ export class Bartender extends Character {
   aiNextThinkAt = 0;
   /** Drink id currently being prepared (cerveza, etc.), or null. */
   servingDrinkId: string | null = null;
+  /** Active tip-action status (Phase 3); null = none / expired. */
+  currentTipAction: { id: string; label: string; until: number } | null = null;
+
   private ring?: Phaser.GameObjects.Ellipse;
   private serveLabel?: Phaser.GameObjects.Text;
 
@@ -177,6 +180,25 @@ export class Bartender extends Character {
     this.playerCommanded = false;
     this.servingDrinkId = null;
     this.clearServeLabel();
+  }
+
+
+  /** Active tip-action label if not expired (scene.time.now). */
+  getActiveTipActionLabel(now: number): string | null {
+    if (!this.currentTipAction) return null;
+    if (now >= this.currentTipAction.until) {
+      this.currentTipAction = null;
+      return null;
+    }
+    return this.currentTipAction.label;
+  }
+
+  setTipAction(id: string, label: string, until: number): void {
+    this.currentTipAction = { id, label, until };
+  }
+
+  clearTipAction(): void {
+    this.currentTipAction = null;
   }
 
   /** Panel / roster state key (Spanish labels live in UIScene). */

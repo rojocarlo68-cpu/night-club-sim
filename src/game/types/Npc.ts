@@ -22,4 +22,8 @@ export interface NpcInfo {
   tipsTotal?: number;
   /** Personality summary for selection panel (Phase 2). */
   personality?: { label: string; level: string }[];
+  /** Active tip-action label (Phase 3), e.g. 'Bailando'. */
+  tipActionLabel?: string | null;
+  /** True while serving and seeking a tip (Phase 1/3). */
+  seekingTip?: boolean;
 }

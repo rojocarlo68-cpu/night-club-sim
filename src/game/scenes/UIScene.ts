@@ -534,8 +534,11 @@ export class UIScene extends Phaser.Scene {
       const tipsNight = npc.tipsNight ?? 0;
       const tipsDay = npc.tipsDay ?? 0;
       const tipsTotal = npc.tipsTotal ?? 0;
-      const seeking =
-        ['serving', 'serving_cerveza', 'serving_drink', 'busy'].includes(npc.state)
+      const tipAct = npc.tipActionLabel;
+      const seeking = tipAct
+        ? `\n${tipAct} para el cliente`
+        : npc.seekingTip ||
+            ['serving', 'serving_cerveza', 'serving_drink', 'busy'].includes(npc.state)
           ? '\nBuscando propina…'
           : '';
       const pers = npc.personality ?? [];
@@ -625,6 +628,9 @@ export class UIScene extends Phaser.Scene {
         tipsNight: this.selectedNpc.tipsNight,
         tipsDay: this.selectedNpc.tipsDay,
         tipsTotal: this.selectedNpc.tipsTotal,
+        tipActionLabel: this.selectedNpc.tipActionLabel,
+        seekingTip: this.selectedNpc.seekingTip,
+        personality: this.selectedNpc.personality,
       });
     }
     this.refreshBuildButtons();

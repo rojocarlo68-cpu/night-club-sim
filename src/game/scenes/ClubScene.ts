@@ -27,6 +27,12 @@ import {
   serializeTips,
 } from '../systems/Tips';
 import { getPersonality, personalitySummary } from '../config/personality';
+import { TipAction } from '../config/tipActions';
+import {
+  pickTipAction,
+  recordActionPerformed,
+  getActionCounts,
+} from '../systems/TipActionPicker';
 import {
   FurnitureInspectPayload,
   FurnitureRuntimeStats,
@@ -430,6 +436,11 @@ export class ClubScene extends Phaser.Scene {
     }
     const tips = getTips(b.profile.id);
     const personality = personalitySummary(getPersonality(b.profile.id));
+    const tipActionLabel = b.getActiveTipActionLabel(this.time.now);
+    const stateKey = b.getAiStateKey();
+    const seekingTip = ['serving', 'serving_cerveza', 'serving_drink', 'busy'].includes(
+      stateKey
+    );
     return {
       id: b.profile.id,
       name: b.displayName,
@@ -437,12 +448,14 @@ export class ClubScene extends Phaser.Scene {
       energy: Math.round(b.energy),
       mood: Math.round(b.mood),
       skill: Math.round(b.skill),
-      state: b.getAiStateKey(),
+      state: stateKey,
       portrait,
       tipsNight: tips.tipsNight,
       tipsDay: tips.tipsDay,
       tipsTotal: tips.tipsTotal,
       personality,
+      tipActionLabel,
+      seekingTip,
     };
   }
 
@@ -1667,10 +1680,12 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
-  /** Pay + tip from drink price scaled by venue quality / patience / broken furniture. */
+  /** Pay + tip from drink price scaled by venue quality / patience / broken furniture.
+   *  Optional tipAction (Phase 3) adds chance bonus + amount mult; does not alter serve flow. */
   private computeServePayout(
     patron: Patron,
-    drink: Drink
+    drink: Drink,
+    tipAction: TipAction | null = null
   ): { earned: number; tipped: boolean; tipAmount: number } {
     const q = this.qualityNearPatron(patron);
     const payMult = lerp(AI_TUNABLES.payQualityMin, AI_TUNABLES.payQualityMax, q);
@@ -1687,15 +1702,22 @@ export class ClubScene extends Phaser.Scene {
         break;
       }
     }
+    if (tipAction) {
+      tipChance += tipAction.tipChanceBonus;
+    }
     const drinkPay = Math.max(1, Math.round(drink.price * payMult));
     let tipAmount = 0;
     let tipped = false;
     if (Math.random() < tipChance) {
       const tipBase = Math.max(1, Math.ceil(drink.price * 0.25));
-      tipAmount = Math.max(
+      let amt = Math.max(
         1,
         Math.round(tipBase * lerp(AI_TUNABLES.tipQualityMin, AI_TUNABLES.tipQualityMax, q))
       );
+      if (tipAction) {
+        amt = Math.max(1, Math.round(amt * tipAction.tipAmountMult));
+      }
+      tipAmount = amt;
       tipped = true;
     }
     return { earned: drinkPay + tipAmount, tipped, tipAmount };
@@ -2329,7 +2351,12 @@ export class ClubScene extends Phaser.Scene {
     this.emitStaffRoster();
   }
 
-  getHudState() {
+  /** Phase 3 test/debug: per-staff tip-action performance counts. */
+  getTipActionCounts(staffId?: string) {
+    return getActionCounts(staffId);
+  }
+
+    getHudState() {
     return {
       money: this.money,
       phase: this.phase,
@@ -2527,7 +2554,18 @@ export class ClubScene extends Phaser.Scene {
         return;
       }
       staff.applyServeDrain();
-      const payout = this.computeServePayout(patron, drink);
+      // Phase 3: personality-weighted tip action (no energy/mood cost yet — Phase 4)
+      const tipAction = pickTipAction(staff.profile.id);
+      if (tipAction) {
+        staff.setTipAction(
+          tipAction.id,
+          tipAction.label,
+          this.time.now + tipAction.durationMs
+        );
+        recordActionPerformed(staff.profile.id, tipAction.id);
+        staff.setServeLabel(`${tipAction.label} para el cliente`);
+      }
+      const payout = this.computeServePayout(patron, drink, tipAction);
       this.money += payout.earned;
       this.nightEarned += payout.earned;
       this.servedCount++;
