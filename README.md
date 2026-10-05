@@ -12,9 +12,9 @@ Vite + TypeScript + Phaser 3. UI en espanol.
    - Toca bartender o cualquier cliente: panel unificado (Nombre, Rol, Energia/Paciencia, Animo, Habilidad, Estado)
    - Descansar: solo personal (Luna) cuando esta libre
    - Cerrar noche: resumen de la sesion
-   - Clientes van a barra o sofa; Luna atiende sola; paciencia baja mientras esperan
+   - Sin barra por ahora: los clientes se sientan en el sofa (y pagan al terminar) o pasean por el salon y se van; Luna/Nova limpian, descansan y deambulan
    - Arrastra / desliza la pantalla para mover la camara (un dedo o mouse). Toque corto = seleccionar.
-   - Construir: mueve y compra muebles (sin girar: cada pieza tiene una sola orientacion fija, estilo Ultima Online). Boton Muebles abre la tienda (Mesa de DJ, etc.). Listo vuelve al juego.
+   - Construir: mueve y compra muebles (sin girar: cada pieza tiene una sola orientacion fija, estilo Ultima Online). Boton Muebles abre la tienda (por ahora solo el Sofa medieval). Listo vuelve al juego.
    - ✕ o Escape cierra el panel; toque en vacio deselecciona.
 
 Meta: gana dinero sin dejar a Luna sin energia.
@@ -23,14 +23,18 @@ Meta: gana dinero sin dejar a Luna sin energia.
 
 Instalar, luego build. Salida en carpeta dist. Preview disponible.
 
-## Suelo (tema medieval) — tile-based
+## Suelo (tema medieval)
 
 Camara isometrica fija 2:1 (sin giros, estilo Ultima Online). Rejilla 12x12; tile = rombo 64x32 px a 1x.
 
-- `public/data/floor.json`: `types` (id, texture, file) + `grid[row][col]` con el id de cada casilla. Editarlo cambia el diseno sin tocar codigo.
-- `public/assets/tiles/floor_<id>.png`: **128x64 px RGBA** (una casilla a 2x, rombo exacto). Reemplazar estos PNG cambia el arte sin tocar codigo. Cualquier tamano 2:1 sirve (se reescala); el motor re-enmascara cada tile al rombo exacto (regla de centro de pixel) y los estampa en UNA textura al iniciar, asi que no hay costuras a ningun zoom.
-- `scripts/make_floor_tiles.py` genera los tiles placeholder (`--json` tambien reescribe floor.json con el diseno por defecto).
+- **Modo imagen unica (activo)**: `public/data/floor.json > image` apunta a `public/assets/tiles/floor_planks.png`, **1536x768 px RGBA** = el rombo completo de 12x12 (768x384 mostrado, textureScale 2), bordes exactos 2:1, sin costuras. Reemplazar ese PNG cambia el suelo. `scripts/process_medieval_floor.py` lo genera desde `art_src/medieval/floor_planks_src.jpg` (recorta el borde de la losa, quita el fondo blanco).
+- **Modo teselas** (queda disponible): quitar `image` de `floor.json` y usar `types` + `grid[row][col]` con PNG de 128x64 por tipo (`floor_<id>.png`; `scripts/make_floor_tiles.py` genera los de relleno stone/wood/carpet). El motor los estampa en UNA textura al iniciar.
 - En modo Construir aparece una rejilla tenue de rombos; en juego normal no se ve ninguna rejilla.
+
+## Muebles
+
+Solo hay un mueble: el **Sofa medieval** (`public/assets/furniture/sofa_medieval_sw.png`, arte final a 2x, 212x176, pose unica SW = frente hacia abajo a la izquierda, huella 2x1). `scripts/process_medieval_sofa.py` lo genera desde `art_src/medieval/sofa_sw_src.jpg` (recorte sin halo, escala uniforme 0.2385, sin deformar) e imprime el `baseVertex` (vertice inferior de la huella en px del arte) que va en `public/data/shop_furniture.json`. El arte original no es 2:1 exacto, asi que su base no calza al 100% con el rombo 2x1 (ver el reporte del commit).
+Barra, mesa de DJ, pinball y los muebles neon de relleno (silla, mesas, planta, altavoz, luz) se quitaron; los guardados viejos los descartan y conservan el sofa.
 
 ## Placement (Construir)
 
@@ -39,31 +43,17 @@ Tile-integer: la huella del mueble (casillas) debe caber en el 12x12 y no pisar 
 ## Datos
 
 - public/data/characters.json — bartender y clientes
-- public/data/scenario.json — mapa, muebles (sofa.facing), bebidas, duracion
+- public/data/scenario.json — mapa, muebles iniciales (un sofa), duracion de la noche
 - public/data/shop_furniture.json — catalogo tienda Construir (id, name, price, category, sprite, footprint)
 
-## Arte — room + sofa (Carlo)
+## Arte
 
-Room: public/assets/tiles/room_floor.jpeg (tambien .png)
-Sofa 4 angulos PNG transparente:
-- public/assets/furniture/sofa_se.png (frente abajo-derecha)
-- public/assets/furniture/sofa_sw.png (frente abajo-izquierda)
-- public/assets/furniture/sofa_ne.png (frente arriba-derecha)
-- public/assets/furniture/sofa_nw.png (frente arriba-izquierda)
-
-Reemplazar: sobrescribe esos archivos con los mismos nombres. Si cambias nombres, actualiza BootScene y scenario.json sprites.
-Barra 4 angulos PNG transparente (mismo pipeline que el sofa):
-- public/assets/furniture/bar_se.png (frente clientes abajo-derecha)
-- public/assets/furniture/bar_sw.png (frente clientes abajo-izquierda)
-- public/assets/furniture/bar_ne.png (frente clientes arriba-derecha)
-- public/assets/furniture/bar_nw.png (frente clientes arriba-izquierda)
-Personajes y tiles: PNG (sin load.svg). Paleta oscura + neon magenta/cyan.
-Sofas max ~512px ancho; room_floor.jpeg max ~1280 en el lado largo.
+Ver "Suelo" y "Muebles" arriba. Personajes (Luna, Nova, clientes): hojas PNG en `public/assets/characters/`. Para cambiar el arte del suelo o del sofa sobrescribe esos PNG (mismos nombres/tamanos) o regeneralos con los scripts de `scripts/`.
 
 ## Tienda Construir (Muebles / Decoracion)
 
 En modo Construir, boton **Muebles** abre catalogo data-driven (`shop_furniture.json`).
-Comprar deduce dinero, spawnea instancia en baldosa libre; arrastrar como sofa/barra (no se gira).
+Comprar deduce dinero, spawnea instancia en baldosa libre; arrastrar para mover (no se gira).
 Compras + placements + dinero persisten en localStorage con el layout.
 
 ### Mesa de DJ (`dj_booth`)

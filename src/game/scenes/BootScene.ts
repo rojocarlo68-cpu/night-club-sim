@@ -70,7 +70,6 @@ export class BootScene extends Phaser.Scene {
       }
       this.statusText.setText('Cargando 100%…');
       this.ensureCharacterAnims();
-      this.ensurePlaceholderFurniture();
       this.scene.start('ClubScene');
       this.scene.launch('UIScene');
       this.scene.bringToTop('UIScene');
@@ -80,26 +79,18 @@ export class BootScene extends Phaser.Scene {
     // (swap art by replacing public/assets/tiles/floor_<type>.png, no code change).
     this.load.json('floor', 'data/floor.json');
     this.load.once('filecomplete-json-floor', () => {
-      const floor = this.cache.json.get('floor') as { types?: Array<{ texture: string; file: string }> };
-      for (const t of floor?.types ?? []) this.load.image(t.texture, t.file);
+      const floor = this.cache.json.get('floor') as {
+        image?: { texture: string; file: string };
+        types?: Array<{ texture: string; file: string }>;
+      };
+      // Single-image mode (floor.image) loads only that picture; tile mode loads every tile type.
+      if (floor?.image) this.load.image(floor.image.texture, floor.image.file);
+      else for (const t of floor?.types ?? []) this.load.image(t.texture, t.file);
     });
 
-    this.load.image('furn_sofa_se', 'assets/furniture/sofa_se.png');
-    this.load.image('furn_bar_se', 'assets/furniture/bar_se.png');
-    this.load.image('furn_bar', 'assets/furniture/bar_se.png');
-    this.load.image('furn_dj_booth_se', 'assets/furniture/dj_booth_se.png');
-    // Legacy alias (shop thumb / old saves) → SE
-    this.load.image('furn_dj_booth', 'assets/furniture/dj_booth_se.png');
-    this.load.image('furn_pinball_se', 'assets/furniture/pinball_se.png');
-    // Fixed orientation (SE only, no rotation): the sw/ne/nw art files stay in the repo but are not loaded.
-    // Idle sheet (2×4): front (SE) only.
-    this.load.spritesheet('dj_booth_front_sheet', 'assets/furniture/dj_booth_front_sheet.png', {
-      frameWidth: 400,
-      frameHeight: 450,
-    });
-
-    this.load.image('tile_floor', 'assets/tiles/floor.png');
-    this.load.image('tile_wall', 'assets/tiles/wall.png');
+    // Furniture: ONLY the medieval sofa (single fixed pose, no rotation). Bar / DJ / pinball and the
+    // neon placeholder pieces are gone (their art files were deleted from the repo).
+    this.load.image('furn_sofa_medieval', 'assets/furniture/sofa_medieval_sw.png');
 
     this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_sheet.png', {
       frameWidth: 146,
@@ -207,16 +198,6 @@ export class BootScene extends Phaser.Scene {
       });
     }
 
-    // DJ booth idle (subtle 8-frame loop) — front (SE) sheet only
-    if (!this.anims.exists('dj-booth-idle-front') && this.textures.exists('dj_booth_front_sheet')) {
-      this.anims.create({
-        key: 'dj-booth-idle-front',
-        frames: this.anims.generateFrameNumbers('dj_booth_front_sheet', { start: 0, end: 7 }),
-        frameRate: 6,
-        repeat: -1,
-      });
-    }
-
     // patron_walk sheet: row0 SE 0-5, SW 6-11, NE 12-17, NW 18-23
     const facings: Array<{ key: string; start: number }> = [
       { key: 'se', start: 0 },
@@ -265,128 +246,4 @@ export class BootScene extends Phaser.Scene {
       }
     }
   }
-  /** Procedural iso placeholders for shop decor (no new art sheets). */
-  private ensurePlaceholderFurniture(): void {
-    const specs: Array<{
-      key: string;
-      color: number;
-      accent: number;
-      w: number;
-      h: number;
-      kind: 'box' | 'tall' | 'plant' | 'light' | 'speaker' | 'chair' | 'table';
-    }> = [
-      { key: 'furn_mesa_cocktail', color: 0x6b3d2e, accent: 0xc4a574, w: 96, h: 110, kind: 'table' },
-      { key: 'furn_silla', color: 0x3a2a4a, accent: 0xb48cff, w: 80, h: 100, kind: 'chair' },
-      { key: 'furn_banqueta', color: 0x2a2238, accent: 0xff9ad5, w: 84, h: 92, kind: 'chair' },
-      { key: 'furn_mesa_vip', color: 0x4a3058, accent: 0xffe066, w: 160, h: 120, kind: 'table' },
-      { key: 'furn_planta', color: 0x1e5c38, accent: 0x6dff9a, w: 72, h: 120, kind: 'plant' },
-      { key: 'furn_altavoz', color: 0x222028, accent: 0x2ad6ff, w: 88, h: 118, kind: 'speaker' },
-      { key: 'furn_luz_pista', color: 0x3a1048, accent: 0xff3ca0, w: 80, h: 108, kind: 'light' },
-    ];
-    for (const s of specs) {
-      if (this.textures.exists(s.key)) continue;
-      const g = this.add.graphics();
-g.setVisible(false);
-      const cx = s.w / 2;
-      const cy = s.h * 0.62;
-      const hw = Math.min(s.w, s.h) * 0.38;
-      const hh = hw * 0.5;
-      // Floor diamond shadow
-      g.fillStyle(0x000000, 0.35);
-      g.fillPoints(
-        [
-          { x: cx, y: cy + hh + 4 },
-          { x: cx + hw, y: cy + 4 },
-          { x: cx, y: cy - hh + 4 },
-          { x: cx - hw, y: cy + 4 },
-        ],
-        true
-      );
-      if (s.kind === 'plant') {
-        g.fillStyle(0x4a3020, 1);
-        g.fillRect(cx - 10, cy - 8, 20, 18);
-        g.fillStyle(s.color, 1);
-        g.fillEllipse(cx, cy - 36, 36, 48);
-        g.fillStyle(s.accent, 0.85);
-        g.fillEllipse(cx - 8, cy - 48, 18, 22);
-        g.fillEllipse(cx + 10, cy - 40, 16, 20);
-      } else if (s.kind === 'light') {
-        g.fillStyle(0x2a1838, 1);
-        g.fillRect(cx - 4, cy - 50, 8, 54);
-        g.fillStyle(s.accent, 0.95);
-        g.fillCircle(cx, cy - 56, 14);
-        g.fillStyle(0xffffff, 0.55);
-        g.fillCircle(cx - 3, cy - 59, 4);
-      } else if (s.kind === 'speaker') {
-        g.fillStyle(s.color, 1);
-        g.fillRoundedRect(cx - 22, cy - 58, 44, 70, 6);
-        g.lineStyle(2, s.accent, 1);
-        g.strokeRoundedRect(cx - 22, cy - 58, 44, 70, 6);
-        g.fillStyle(s.accent, 0.7);
-        g.fillCircle(cx, cy - 36, 12);
-        g.fillCircle(cx, cy - 10, 8);
-      } else if (s.kind === 'chair') {
-        g.fillStyle(s.color, 1);
-        g.fillPoints(
-          [
-            { x: cx, y: cy + hh * 0.7 },
-            { x: cx + hw * 0.7, y: cy },
-            { x: cx, y: cy - hh * 0.7 },
-            { x: cx - hw * 0.7, y: cy },
-          ],
-          true
-        );
-        g.fillStyle(s.accent, 0.9);
-        g.fillRect(cx - 14, cy - 48, 28, 34);
-        g.fillStyle(s.color, 1);
-        g.fillRect(cx - 16, cy - 52, 6, 40);
-      } else {
-        // table / box: iso diamond top + sides
-        const topY = cy - hh * 0.85;
-        g.fillStyle(s.accent, 1);
-        g.fillPoints(
-          [
-            { x: cx, y: topY - hh },
-            { x: cx + hw, y: topY },
-            { x: cx, y: topY + hh },
-            { x: cx - hw, y: topY },
-          ],
-          true
-        );
-        g.fillStyle(s.color, 1);
-        g.fillPoints(
-          [
-            { x: cx - hw, y: topY },
-            { x: cx, y: topY + hh },
-            { x: cx, y: cy + hh * 0.35 },
-            { x: cx - hw, y: cy - hh * 0.35 },
-          ],
-          true
-        );
-        g.fillStyle(0x1a1018, 1);
-        g.fillPoints(
-          [
-            { x: cx + hw, y: topY },
-            { x: cx, y: topY + hh },
-            { x: cx, y: cy + hh * 0.35 },
-            { x: cx + hw, y: cy - hh * 0.35 },
-          ],
-          true
-        );
-        g.lineStyle(1, 0xffffff, 0.25);
-        g.strokePoints(
-          [
-            { x: cx, y: topY - hh },
-            { x: cx + hw, y: topY },
-            { x: cx, y: topY + hh },
-            { x: cx - hw, y: topY },
-          ],
-          true
-        );
-      }
-      g.generateTexture(s.key, s.w, s.h);
-      g.destroy();
-    }
-  }
-
 }

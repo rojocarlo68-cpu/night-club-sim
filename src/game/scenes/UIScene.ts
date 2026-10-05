@@ -33,12 +33,9 @@ const STATE_ES: Record<string, string> = {
   angry: 'Enfadado',
   seated: 'Sentado',
   drinking: 'Bebiendo',
-  playing: 'Jugando pinball',
   leaving: 'Saliendo',
   relaxing: 'Sentado',
   serving: 'Atendiendo',
-  serving_cerveza: 'Sirviendo cerveza',
-  serving_drink: 'Sirviendo bebida',
   cleaning: 'Limpiando',
   wandering: 'Deambulando',
 };
@@ -545,25 +542,17 @@ export class UIScene extends Phaser.Scene {
       this.moodBar.setFillStyle(0xffb84d);
       this.moodBar.setVisible(true);
       this.moodLabel.setVisible(true);
-      const canRest = !['walking', 'busy', 'resting', 'serving', 'serving_cerveza', 'serving_drink', 'cleaning', 'wandering'].includes(npc.state);
+      const canRest = !['walking', 'busy', 'resting', 'serving', 'cleaning', 'wandering'].includes(npc.state);
       this.restBtn.setVisible(canRest);
       this.restBtn.setAlpha(canRest ? 1 : 0.4);
     } else {
-      const drink = npc.preferredDrink || '—';
-      this.panelStats.setText(
-        `Estado: ${estado}\nPreferencia: ${drink}\nHabilidad: —`
-      );
-      this.energyLabel.setText('Paciencia');
-      this.moodLabel.setText('Ánimo de la noche');
-      const pMax = Math.max(1, npc.patienceMax ?? 1);
-      const pCur = npc.patience ?? 0;
-      const mood = npc.mood ?? Math.round((pCur / pMax) * 100);
-      this.energyBar.width = 220 * Phaser.Math.Clamp(pCur / pMax, 0, 1);
-      this.moodBar.width = 220 * Phaser.Math.Clamp(mood / 100, 0, 1);
-      this.energyBar.setFillStyle(pCur / pMax < 0.3 ? 0xff4466 : 0x2ad6ff);
-      this.moodBar.setFillStyle(0xffb84d);
-      this.moodBar.setVisible(true);
-      this.moodLabel.setVisible(true);
+      this.panelStats.setText(`Estado: ${estado}`);
+      this.energyLabel.setText('Ánimo de la noche');
+      const mood = npc.mood ?? 100;
+      this.energyBar.width = 220 * Phaser.Math.Clamp(mood / 100, 0, 1);
+      this.energyBar.setFillStyle(mood < 30 ? 0xff4466 : 0x2ad6ff);
+      this.moodBar.setVisible(false);
+      this.moodLabel.setVisible(false);
       this.restBtn.setVisible(false);
     }
   }
@@ -637,7 +626,7 @@ export class UIScene extends Phaser.Scene {
     const body = this.summary.getByName('body') as Phaser.GameObjects.Text;
     body.setText(
       `Ganado esta noche: $${s.nightEarned ?? 0}\n` +
-        `Bebidas servidas: ${s.servedCount ?? 0}\n` +
+        `Clientes que se sentaron: ${s.servedCount ?? 0}\n` +
         `Dinero total: $${s.money}`
     );
     this.summary.setVisible(true);

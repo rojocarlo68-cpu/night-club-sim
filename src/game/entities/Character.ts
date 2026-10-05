@@ -203,6 +203,21 @@ export class Character extends Phaser.GameObjects.Container {
     this.sprite.y = -20;
   }
 
+  /**
+   * Kill the walk / bob tweens before the container goes away: a tween left running on a destroyed
+   * Container later fires followPath() on an object whose `scene` is gone ("reading 'anims'").
+   * Happens when a night ends while patrons are still walking.
+   */
+  destroy(fromScene?: boolean): void {
+    this.path = [];
+    this.onArrive = undefined;
+    if (this.scene) {
+      this.scene.tweens.killTweensOf(this);
+      this.bobTween?.stop();
+    }
+    super.destroy(fromScene);
+  }
+
   /** Cancel in-flight path tweens so a new walkTo can take over. */
   cancelWalk(): void {
     this.path = [];

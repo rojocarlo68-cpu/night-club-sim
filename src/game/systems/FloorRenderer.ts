@@ -1,4 +1,7 @@
 /**
+ * Floor. Either one full-floor image (floor.json `image`, drawn directly by ClubScene) or, as below,
+ * a tile-based floor.
+ *
  * Tile-based floor. Data-driven by public/data/floor.json (grid of tile type ids + type list with
  * texture keys / files); the art for each type is a 2:1 diamond PNG (128x64 = one 64x32 tile at 2x).
  *
@@ -25,6 +28,11 @@ export interface FloorData {
   types: FloorTileType[];
   /** grid[row][col] = tile type id. */
   grid: string[][];
+  /**
+   * Single-image mode: ONE picture of the whole floor diamond (e.g. 1536x768 for 12x12 at textureScale 2).
+   * When present the tile grid is not used / loaded; remove it to go back to tile mode.
+   */
+  image?: { texture: string; file: string };
 }
 
 export const FLOOR_TEXTURE_KEY = 'floor_composite';

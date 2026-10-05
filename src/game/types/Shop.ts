@@ -1,5 +1,5 @@
 /** Catalog entry for Construir furniture/decor shop (data-driven). Every piece has ONE fixed
- *  SE orientation (no rotation): `sprite` is its SE art. */
+ *  orientation (no rotation, Ultima Online style): `sprite` is its only art. */
 
 export interface ShopFurnitureItem {
   id: string;

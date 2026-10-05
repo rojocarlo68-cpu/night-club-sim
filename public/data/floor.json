@@ -1,8 +1,12 @@
 {
- "_doc": "grid[row][col] holds a type id. Replace public/assets/tiles/floor_<id>.png to swap art (128x64 px, 2:1 diamond). Add types freely.",
+ "_doc": "Two modes. (1) Single-image mode (active): 'image' is ONE picture of the whole 12x12 diamond (1536x768 px = 768x384 displayed at textureScale 2, exact 2:1 edges); replace public/assets/tiles/floor_planks.png to swap it. (2) Tile mode (used when 'image' is removed): grid[row][col] holds a type id and each type is a 128x64 2:1 diamond PNG that is stamped into one texture at startup (the stone/wood/carpet placeholder tiles are kept for this).",
  "tileWidth": 64,
  "tileHeight": 32,
  "textureScale": 2,
+ "image": {
+  "texture": "floor_planks",
+  "file": "assets/tiles/floor_planks.png"
+ },
  "types": [
   {
    "id": "stone_a",

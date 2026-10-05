@@ -15,7 +15,6 @@ import { StaffCandidate, StaffPoolFile, StaffRosterEntry, StaffRosterPayload } f
 import { ShopCatalogPayload, ShopFurnitureFile, ShopFurnitureItem } from '../types/Shop';
 import {
   AI_TUNABLES,
-  PINBALL_FRONT_OFFSET,
   SEATABLE_TYPES,
   STATUS_ES,
   lerp,
@@ -35,28 +34,19 @@ import {
   refundForWear,
 } from '../systems/FurnitureStats';
 
-interface Drink {
-  id: string;
-  name: string;
-  price: number;
-  serveTimeMs: number;
-}
-
-/** Single fixed orientation for every piece (Ultima Online style: fixed camera, no rotation). */
-type IsoFacing = 'se';
+/** Single fixed orientation for every piece (Ultima Online style: fixed camera, no rotation).
+ *  The medieval sofa's natural pose faces lower-left (SW): long side toward the viewer's left. */
+type IsoFacing = 'sw';
 
 interface FurnitureDef {
   id: string;
   type: string;
   sprite: string;
   facing?: IsoFacing;
-  /** Texture key of the (only) SE art. */
-  sprites?: { se?: string };
+  /** Texture key of the (only) art. */
+  sprites?: { sw?: string };
   tile: [number, number];
   footprint: [number, number];
-  interact?: [number, number];
-  staffSpot?: [number, number];
-  restSpot?: [number, number];
   /** Shop catalog id when this instance was purchased. */
   catalogId?: string;
   fromShop?: boolean;
@@ -88,7 +78,6 @@ interface Scenario {
   furniture: FurnitureDef[];
   spawnTile: [number, number];
   exitTile: [number, number];
-  drinks: Drink[];
 }
 
 interface CharactersFile {
@@ -131,21 +120,12 @@ interface SavedLayout {
   money?: number;
 }
 
-/** Every piece uses this single orientation: front toward the bottom-right, back toward the stage. */
-const FIXED_FACING: IsoFacing = 'se';
+/** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
+const FIXED_FACING: IsoFacing = 'sw';
 
 /** Backdrop beyond the floor: deep warm charcoal-brown (medieval tavern), no neon. */
 const BG_COLOR = '#1a1411';
 
-/**
- * Sofa art: final-res 256x192 PNG displayed at 128x96 (scale 0.5). The base parallelogram is an
- * exact 2:1 / 192x96 (96x48 displayed) footprint. (`vx`,`vy`) = lowest base vertex (measured by
- * fitting the +/-0.5-slope base edges), in px relative to the display-image centre (x right / y
- * down); that vertex is pinned to the footprint's bottom vertex. Footprint [1,2] (vertex left of
- * centre).
- */
-const SOFA_DISPLAY = { w: 128, h: 96 };
-const SOFA_ART = { vx: 96.51 / 2 - 64, vy: 192.95 / 2 - 48 };
 const LAYOUT_KEY = 'night-club-layout-v1';
 const TAP_THRESH = 10;
 const HUD_TOP = 56;
@@ -155,7 +135,7 @@ const ZOOM_MAX = 2.1;
 const WHEEL_ZOOM_STEP = 0.08;
 export type NightPhase = 'prep' | 'open' | 'summary';
 
-/** 'sofa' | 'bar' | shop instance id */
+/** Furniture instance id (the starter sofa is 'sofa'). */
 type SelectedFurniture = string | null;
 
 export class ClubScene extends Phaser.Scene {
@@ -179,29 +159,15 @@ export class ClubScene extends Phaser.Scene {
   private selectedNpcId: string | null = null;
   /** Set by NPC sprite handlers so empty-world tap can deselect / move. */
   private npcTapHandled = false;
-  /** Floating bar action menu (Pedir bebidas / Limpiar barra). */
-  private barMenu: Phaser.GameObjects.Container | null = null;
-  private barMenuVisible = false;
-  private barActionBusy = false;
   private statusFloat?: Phaser.GameObjects.Text;
 
   private spawnLeft = 0;
   private queueTiles: Set<string> = new Set();
-  private barInteract!: { col: number; row: number };
-  private sofaRest!: { col: number; row: number };
-  private staffSpot!: { col: number; row: number };
-  private drinks: Drink[] = [];
-
-  private sofaDef: FurnitureDef | null = null;
-  private barDef: FurnitureDef | null = null;
-  private sofaImage: Phaser.GameObjects.Image | null = null;
-  private barImage: Phaser.GameObjects.Image | null = null;
-  private barGlow: Phaser.GameObjects.Arc | null = null;
   private roomImage!: Phaser.GameObjects.Image;
   /** Faint tile-diamond grid, visible only in Construir mode. */
   private buildGrid: Phaser.GameObjects.Graphics | null = null;
   private floorPixelSize = { w: 768, h: 384 };
-  /** Purchased / decor furniture images keyed by instance id. */
+  /** Furniture images keyed by instance id (the starter sofa is 'sofa'). */
   private shopImages = new Map<string, Phaser.GameObjects.Image>();
   private shopCatalog: ShopFurnitureItem[] = [];
   private shopCatalogById = new Map<string, ShopFurnitureItem>();
@@ -223,12 +189,6 @@ export class ClubScene extends Phaser.Scene {
   /** True while UIScene delete-confirm modal is open (blocks Club input). */
   private deleteConfirmOpen = false;
   private buildHint!: Phaser.GameObjects.Text;
-
-  // Relative offsets from furniture tile (computed on load / after layout apply)
-  private sofaRestOff: [number, number] = [0, 0];
-  private sofaInteractOff: [number, number] = [0, -1];
-  private barInteractOff: [number, number] = [-1, 0];
-  private barStaffOff: [number, number] = [-1, 1];
 
   // Camera pan
   private panActive = false;
@@ -304,49 +264,29 @@ export class ClubScene extends Phaser.Scene {
     this.servedCount = 0;
     this.phase = 'prep';
     this.patrons = [];
-    this.drinks = this.scenario.drinks;
     this.buildMode = false;
     this.selectedFurniture = null;
 
     const { cols, rows, tileWidth, tileHeight } = this.scenario.map;
-    // Integer origin: the baked floor is pixel-exact, so tile vertices must sit on whole pixels.
+    // Integer origin: the floor art is pixel-exact, so tile vertices must sit on whole pixels.
     const originX = Math.round(this.cameras.main.width / 2);
     const originY = 70;
     this.iso = { tileWidth, tileHeight, originX, originY };
 
-    // Resolve furniture defs
-    const bar = this.scenario.furniture.find((f) => f.type === 'bar');
-    const sofa = this.scenario.furniture.find((f) => f.type === 'sofa');
-    if (!bar) throw new Error('Furniture bar missing in scenario');
-    if (!sofa) throw new Error('Furniture sofa missing in scenario');
-    if (!bar.interact) throw new Error('bar.interact missing');
-    if (!bar.staffSpot) throw new Error('bar.staffSpot missing');
-    if (!sofa.restSpot) throw new Error('sofa.restSpot missing');
-
-    this.barDef = bar;
-    this.sofaDef = sofa;
-    this.captureOffsets();
-    // Spots first so a saved layout that deleted sofa/bar still leaves AI fallbacks
-    this.syncSpotsFromFurniture();
-
+    // Saved layout first: it drops pieces that no longer exist (bar, DJ, pinball, neon placeholders)
+    // and keeps the sofa (and its wear / tile) when present.
     this.applySavedLayout();
 
     if (!this.cache.json.get('floor')) throw new Error('Falta JSON floor');
-    this.requireTexture('furn_sofa_se');
-    this.requireTexture('furn_bar_se');
     this.loadShopCatalog();
     this.upgradeAllShopFurnitureFromCatalog();
-    if (this.textures.exists('furn_dj_booth_se')) this.requireTexture('furn_dj_booth_se');
     for (const f of this.scenario.furniture) {
       this.ensureShopFlags(f);
-      if (f.fromShop || f.catalogId) {
-        this.requireTexture(this.furnitureTextureKey(f.type, f));
-      }
+      this.requireTexture(this.furnitureTextureKey(f.type, f));
     }
     this.requireTexture(this.chars.bartender.sprite || 'bartender');
 
     this.rebuildPathfinder();
-    this.syncSpotsFromFurniture();
 
     this.drawRoom(cols, rows);
     this.placeFurniture();
@@ -360,7 +300,7 @@ export class ClubScene extends Phaser.Scene {
     this.setupCamera();
 
     const bd = this.chars.bartender;
-    // Luna is free staff like Nova — spawn on the floor near sofa, not glued to bar.
+    // Luna is free staff like Nova — spawn on the floor near the sofa.
     const lunaSpawn = this.findFloorStaffSpawnTile();
     this.bartender = new Bartender(
       this,
@@ -375,14 +315,12 @@ export class ClubScene extends Phaser.Scene {
     this.bartender.refreshHitArea();
 
     this.loadStaffPool();
-    this.loadShopCatalog();
     this.ensureFreeStarterStaff();
     this.spawnHiredExtraStaff();
 
     this.setupPointerPan();
     this.setupZoom();
     this.input.mouse?.disableContextMenu();
-    this.buildBarMenu();
     this.syncFurnitureInteractive();
 
     this.buildHint = this.add
@@ -419,10 +357,6 @@ export class ClubScene extends Phaser.Scene {
     this.emitShopCatalog();
   }
 
-  private drinkDisplayName(id: string): string {
-    return this.drinks.find((d) => d.id === id)?.name ?? id;
-  }
-
   private bartenderNpcInfo(): NpcInfo {
     return {
       id: this.bartender.profile.id,
@@ -440,9 +374,6 @@ export class ClubScene extends Phaser.Scene {
       id: p.profile.id,
       name: p.displayName,
       role: 'patron',
-      patience: Math.round(p.patienceRemaining * 10) / 10,
-      patienceMax: p.profile.patience,
-      preferredDrink: p.preferredDrinkName,
       mood: p.nightMood,
       state: p.getActionKey(),
       portrait: this.textures.exists('patron_portrait') ? 'patron_portrait' : undefined,
@@ -487,7 +418,6 @@ export class ClubScene extends Phaser.Scene {
   private selectNpcStaff(id?: string): void {
     const target = id ? this.findStaffById(id) : this.bartender;
     if (!target) return;
-    this.hideBarMenu();
     this.clearFurnitureSelection();
     this.patrons.forEach((p) => p.setSelected(false));
     this.bartender.setSelected(target === this.bartender);
@@ -519,7 +449,6 @@ export class ClubScene extends Phaser.Scene {
     if (this.bartender) this.bartender.setSelected(false);
     this.extraStaff.forEach((s) => s.setSelected(false));
     this.patrons.forEach((p) => p.setSelected(false));
-    this.hideBarMenu();
   };
 
   private wirePatronClick(patron: Patron): void {
@@ -536,24 +465,6 @@ export class ClubScene extends Phaser.Scene {
     });
   }
 
-  private captureOffsets(): void {
-    const s = this.sofaDef;
-    const b = this.barDef;
-    if (!s || !b) return;
-    if (s.restSpot) {
-      this.sofaRestOff = [s.restSpot[0] - s.tile[0], s.restSpot[1] - s.tile[1]];
-    }
-    if (s.interact) {
-      this.sofaInteractOff = [s.interact[0] - s.tile[0], s.interact[1] - s.tile[1]];
-    }
-    if (b.interact) {
-      this.barInteractOff = [b.interact[0] - b.tile[0], b.interact[1] - b.tile[1]];
-    }
-    if (b.staffSpot) {
-      this.barStaffOff = [b.staffSpot[0] - b.tile[0], b.staffSpot[1] - b.tile[1]];
-    }
-  }
-
   private applySavedLayout(): void {
     try {
       const raw = localStorage.getItem(LAYOUT_KEY);
@@ -568,21 +479,31 @@ export class ClubScene extends Phaser.Scene {
       if (!Array.isArray(saved?.furniture)) return;
       // Ensure shop catalog available before restoring purchased pieces
       this.loadShopCatalog();
+      const kept = new Set<string>();
       for (const item of saved.furniture) {
+        if (!item || typeof item.id !== 'string') {
+          this.layoutMigrated = true;
+          continue;
+        }
         let def = this.scenario.furniture.find((f) => f.id === item.id);
         if (!def && item.catalogId) {
-          // Footprint always comes from the catalog (single SE orientation): a saved footprint
-          // may be a rotated one from before rotation was removed, so it is never trusted.
+          // Footprint always comes from the catalog (single fixed pose): a saved footprint may be a
+          // rotated / older one, so it is never trusted.
           const spawned = this.defFromShopCatalog(item.catalogId, item.id);
           if (spawned) {
             this.scenario.furniture.push(spawned);
             def = spawned;
           }
         }
-        if (!def) continue;
-        // Old saves: pieces rotated to sw/ne/nw (or with a swapped footprint / mirror flag) are
-        // forced back to the one SE pose. The saved tile is kept (clamped to the map for the SE
-        // footprint) and ensureAllFurnitureInsideFloor() nudges it to the nearest valid tile.
+        if (!def) {
+          // Removed piece (bar, DJ booth, pinball, neon placeholder furniture): drop it from the save.
+          this.layoutMigrated = true;
+          continue;
+        }
+        kept.add(def.id);
+        // Old saves: rotated pieces / other footprints (the old sofa was 1x2) / mirror flags are forced
+        // to the one fixed pose; the saved tile is kept (clamped to the map) and
+        // ensureAllFurnitureInsideFloor() nudges it to the nearest valid tile.
         const savedFp = Array.isArray(item.footprint) ? item.footprint : null;
         if (
           (item.facing && item.facing !== FIXED_FACING) ||
@@ -610,35 +531,9 @@ export class ClubScene extends Phaser.Scene {
         this.applyStatsFromSaved(def, item);
       }
       // Saved list is authoritative: deleted pieces stay gone across reload
-      const savedIds = new Set(saved.furniture.map((i) => i.id));
-      this.scenario.furniture = this.scenario.furniture.filter((f) => savedIds.has(f.id));
-      // Sofa/bar keep the scenario's SE footprint and spot offsets (captured before this runs).
-      // Re-apply relative spots from offsets (sofa/bar may have been deleted)
-      this.sofaDef = this.scenario.furniture.find((f) => f.type === 'sofa') ?? null;
-      this.barDef = this.scenario.furniture.find((f) => f.type === 'bar') ?? null;
-      if (this.sofaDef) {
-        this.applyOffsetsToDef(this.sofaDef, this.sofaRestOff, this.sofaInteractOff, 'sofa');
-      }
-      if (this.barDef) {
-        this.applyOffsetsToDef(this.barDef, this.barStaffOff, this.barInteractOff, 'bar');
-      }
+      this.scenario.furniture = this.scenario.furniture.filter((f) => kept.has(f.id));
     } catch {
       // ignore corrupt layout
-    }
-  }
-
-  private applyOffsetsToDef(
-    def: FurnitureDef,
-    primaryOff: [number, number],
-    interactOff: [number, number],
-    kind: 'sofa' | 'bar'
-  ): void {
-    if (kind === 'sofa') {
-      def.restSpot = [def.tile[0] + primaryOff[0], def.tile[1] + primaryOff[1]];
-      def.interact = [def.tile[0] + interactOff[0], def.tile[1] + interactOff[1]];
-    } else {
-      def.staffSpot = [def.tile[0] + primaryOff[0], def.tile[1] + primaryOff[1]];
-      def.interact = [def.tile[0] + interactOff[0], def.tile[1] + interactOff[1]];
     }
   }
 
@@ -668,24 +563,6 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
-  private syncSpotsFromFurniture(): void {
-    if (this.sofaDef) {
-      this.applyOffsetsToDef(this.sofaDef, this.sofaRestOff, this.sofaInteractOff, 'sofa');
-      if (this.sofaDef.restSpot) {
-        this.sofaRest = { col: this.sofaDef.restSpot[0], row: this.sofaDef.restSpot[1] };
-      }
-    }
-    if (this.barDef) {
-      this.applyOffsetsToDef(this.barDef, this.barStaffOff, this.barInteractOff, 'bar');
-      if (this.barDef.interact) {
-        this.barInteract = { col: this.barDef.interact[0], row: this.barDef.interact[1] };
-      }
-      if (this.barDef.staffSpot) {
-        this.staffSpot = { col: this.barDef.staffSpot[0], row: this.barDef.staffSpot[1] };
-      }
-    }
-  }
-
   /** Normal character depth vs furniture — Luna always full-body visible. */
   private syncBartenderBarDepth(): void {
     if (!this.bartender) return;
@@ -697,7 +574,7 @@ export class ClubScene extends Phaser.Scene {
   private rebuildPathfinder(): void {
     const { cols, rows } = this.scenario.map;
     const blocked = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
-    // Solid collision: every placed piece footprint (sofa/bar/shop) blocks pathfinding.
+    // Solid collision: every placed piece footprint blocks pathfinding.
     for (const f of this.scenario.furniture) {
       const fw = Math.max(1, f.footprint?.[0] ?? 1);
       const fh = Math.max(1, f.footprint?.[1] ?? 1);
@@ -733,6 +610,9 @@ export class ClubScene extends Phaser.Scene {
   private canPlaceFurniture(def: FurnitureDef, col: number, row: number): boolean {
     if (!this.tileInBounds(col, row, def.footprint)) return false;
     const wall = new Set(this.scenario.blocked.map(([c, r]) => `${c},${r}`));
+    // Never block where patrons enter / leave.
+    wall.add(`${this.scenario.spawnTile[0]},${this.scenario.spawnTile[1]}`);
+    wall.add(`${this.scenario.exitTile[0]},${this.scenario.exitTile[1]}`);
     for (let dc = 0; dc < def.footprint[0]; dc++) {
       for (let dr = 0; dr < def.footprint[1]; dr++) {
         const c = col + dc;
@@ -752,24 +632,14 @@ export class ClubScene extends Phaser.Scene {
     return true;
   }
 
-  /**
-   * Display size for any furniture type.
-   * Bar default sized so SE opaque ground-contact width ≈ 96px (2×1 on 64×32 tiles).
-   * Sofa is always 128x96 (256x192 art @0.5); base == 2x1 footprint.
-   * Shop items (DJ) use catalog displaySize; prefer booth base → footprint.
-   */
+  /** Display size (px) of a piece: per-instance override, else its catalog entry. */
   private furnitureDisplaySize(kind: string, def?: FurnitureDef): { w: number; h: number } {
-    if (kind === 'sofa') {
-      return { w: SOFA_DISPLAY.w, h: SOFA_DISPLAY.h };
-    }
     if (def?.displayW && def?.displayH) return { w: def.displayW, h: def.displayH };
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
     if (cat) return { w: cat.displaySize[0], h: cat.displaySize[1] };
-    if (kind === 'bar') return { w: 154, h: 120 };
     return { w: 96, h: 72 };
   }
 
-  /** World draw position (tile center + per-type vertical bias). */
   private furnitureWorldPos(
     kind: string,
     col: number,
@@ -777,24 +647,11 @@ export class ClubScene extends Phaser.Scene {
     def?: FurnitureDef
   ): { x: number; y: number } {
     const { x, y } = tileToScreen(col, row, this.iso);
-    if (kind === 'sofa') {
-      // Pin the sprite's lowest base vertex to the footprint's bottom vertex; the
-      // art's base edges are exactly 2:1 so the base coincides with the tile rect.
-      const d = def ?? this.sofaDef;
-      const a = SOFA_ART;
-      const fw = Math.max(1, d?.footprint?.[0] ?? 2);
-      const fh = Math.max(1, d?.footprint?.[1] ?? 1);
-      const half = this.iso.tileWidth / 2;
-      const q = this.iso.tileHeight / 2;
-      const vertX = (fw - fh) * half; // bottom vertex x offset from anchor-tile centre
-      const vertY = (fw + fh - 1) * q; // bottom vertex y offset from anchor-tile centre
-      return { x: x + vertX - a.vx, y: y + vertY - a.vy };
-    }
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
     const bv = def?.baseVertex ?? cat?.baseVertex;
     if (def && bv) {
-      // Sofa-style exact snapping for shop art with a measured base vertex: the sprite's lowest
-      // base vertex (2x art px) is pinned to the footprint's bottom vertex.
+      // Exact tile snapping: the sprite's measured base vertex (2x art px) is pinned to the footprint's
+      // bottom vertex, so the art's ground contact lands on the footprint diamond.
       const frame = this.textures.getFrame(this.furnitureTextureKey(kind, def));
       const size = this.furnitureDisplaySize(kind, def);
       const sx = size.w / frame.realWidth;
@@ -809,9 +666,7 @@ export class ClubScene extends Phaser.Scene {
       };
     }
     if (typeof def?.yBias === 'number') return { x, y: y + def.yBias };
-    if (cat) return { x, y: y + (cat.yBias ?? -8) };
-    if (kind === 'bar') return { x, y: y - 18 };
-    return { x, y: y - 8 };
+    return { x, y: y + (cat?.yBias ?? -8) };
   }
 
   /**
@@ -831,15 +686,9 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
     // Restore selection tint while dragging/selected
-    if (id === 'sofa') img.setTint(0xffc0e8);
-    else if (id === 'bar') img.setTint(0xffe0a0);
-    else img.setTint(0xc8b0ff);
+    img.setTint(0xffd8a8);
   }
 
-  /**
-   * If a saved/default pose fails sprite-vs-neon, spiral-search a nearby valid tile.
-   * Keeps old localStorage layouts from spawning already overflowing.
-   */
   private ensureAllFurnitureInsideFloor(): void {
     for (const def of this.scenario.furniture) {
       def.facing = FIXED_FACING;
@@ -848,19 +697,7 @@ export class ClubScene extends Phaser.Scene {
       if (!found) continue;
       def.tile = found;
       this.layoutMigrated = true;
-      if (def.type === 'sofa') {
-        this.sofaDef = def;
-        this.syncSpotsFromFurniture();
-        this.repositionFurnitureVisual('sofa');
-      } else if (def.type === 'bar') {
-        this.barDef = def;
-        this.syncSpotsFromFurniture();
-        this.repositionFurnitureVisual('bar');
-        // Luna stays on the floor — do not snap her into the bar when furniture moves.
-        this.syncBartenderBarDepth();
-      } else if (def.fromShop || def.catalogId) {
-        this.repositionFurnitureVisual(def.id);
-      }
+      this.repositionFurnitureVisual(def.id);
     }
     this.rebuildPathfinder();
   }
@@ -884,21 +721,37 @@ export class ClubScene extends Phaser.Scene {
   private drawRoom(cols: number, rows: number): void {
     const { originX, originY, tileWidth, tileHeight } = this.iso;
     const floor = this.cache.json.get('floor') as FloorData;
-    for (const t of floor.types) this.requireTexture(t.texture);
-
-    // Every tile (its own 128x64 diamond texture, masked to the exact 2:1 pixel diamond) is
-    // stamped into one canvas texture at startup: no seams/gaps at any zoom. The canvas is shown at
-    // 1/textureScale so one 64x32 tile == 64x32 world px, with canvas (rows*tw/2, 0) pinned to the
-    // top vertex of tile (0,0) = tile-centre minus half a tile height (integer pixels).
-    const built = buildFloorTexture(this, floor, cols, rows);
     const S = floor.textureScale || 2;
+    const dispW = ((cols + rows) * tileWidth) / 2;
+    const dispH = ((cols + rows) * tileHeight) / 2;
     const vx = originX;
-    const vy = originY - tileHeight / 2;
-    this.roomImage = this.add.image(vx, vy, built.key);
-    this.roomImage.setOrigin(built.vertexX / built.width, 0);
-    this.roomImage.setScale(1 / S);
-    this.roomImage.setDepth(0);
-    this.floorPixelSize = { w: built.width / S, h: built.height / S };
+    const vy = originY - tileHeight / 2; // top vertex of tile (0,0)
+
+    if (floor.image && this.textures.exists(floor.image.texture)) {
+      // Single-image floor: ONE picture of the whole 12x12 diamond (1536x768 px at 2x), exact 2:1
+      // edges, top vertex pinned to tile (0,0)'s top vertex, shown at 1/textureScale. No tiles, no seams.
+      const frame = this.textures.getFrame(floor.image.texture);
+      this.roomImage = this.add.image(vx, vy, floor.image.texture);
+      this.roomImage.setOrigin(0.5, 0);
+      this.roomImage.setDisplaySize(dispW, dispH);
+      if (Math.abs(frame.realWidth / S - dispW) > 0.5 || Math.abs(frame.realHeight / S - dispH) > 0.5) {
+        console.warn(
+          `[floor] image ${frame.realWidth}x${frame.realHeight} is not ${dispW * S}x${dispH * S}; stretched to fit the grid`
+        );
+      }
+      this.roomImage.setDepth(0);
+      this.floorPixelSize = { w: dispW, h: dispH };
+    } else {
+      for (const t of floor.types) this.requireTexture(t.texture);
+      // Tile mode: every tile (its own 128x64 diamond texture, masked to the exact 2:1 pixel diamond)
+      // is stamped into one canvas texture at startup: no seams/gaps at any zoom.
+      const built = buildFloorTexture(this, floor, cols, rows);
+      this.roomImage = this.add.image(vx, vy, built.key);
+      this.roomImage.setOrigin(built.vertexX / built.width, 0);
+      this.roomImage.setScale(1 / S);
+      this.roomImage.setDepth(0);
+      this.floorPixelSize = { w: built.width / S, h: built.height / S };
+    }
 
     // Construir-only faint grid of tile diamonds (never shown in normal play).
     const g = this.add.graphics();
@@ -1117,7 +970,7 @@ export class ClubScene extends Phaser.Scene {
       this.panDragging = false;
       this.blockPanGesture = false;
 
-      // World tap with staff selected: bar menu / walk / ignore scenery
+      // World tap with staff selected: walk / inspect furniture
       // (NPC handlers set npcTapHandled first; ✕ still deselects via panel)
       if (
         !wasPanDrag &&
@@ -1128,7 +981,6 @@ export class ClubScene extends Phaser.Scene {
       ) {
         this.handleWorldTap(p);
       } else if (!wasPanDrag && !this.npcTapHandled) {
-        this.hideBarMenu();
       }
       this.npcTapHandled = false;
     });
@@ -1151,98 +1003,27 @@ export class ClubScene extends Phaser.Scene {
     return false;
   }
 
-  /** Texture key of a piece's single SE art. */
+  /** Texture key of a piece's single art. */
   private furnitureTextureKey(kind: string, def?: FurnitureDef): string {
-    const src =
-      def ??
-      (kind === 'sofa'
-        ? this.sofaDef
-        : kind === 'bar'
-          ? this.barDef
-          : this.scenario.furniture.find((f) => f.id === kind || f.type === kind));
-    const fromScenario = src?.sprites?.se;
+    const src = def ?? this.scenario.furniture.find((f) => f.id === kind || f.type === kind);
+    const fromScenario = src?.sprites?.sw;
     if (fromScenario) return fromScenario;
     const cat =
       this.shopCatalogById.get(src?.catalogId ?? '') ||
       this.shopCatalogById.get(src?.type ?? '') ||
       this.shopCatalogById.get(kind);
     if (cat) return cat.sprite;
-    if ((src?.fromShop || src?.catalogId) && src.sprite && this.textures.exists(src.sprite)) {
-      return src.sprite;
-    }
-    return `furn_${kind}_se`;
-  }
-
-  private applyBarDisplaySize(): void {
-    if (!this.barImage) return;
-    const size = this.furnitureDisplaySize('bar');
-    this.barImage.setDisplaySize(size.w, size.h);
-    this.barImage.setAlpha(1);
-    this.barImage.setBlendMode(Phaser.BlendModes.NORMAL);
+    if (src?.sprite && this.textures.exists(src.sprite)) return src.sprite;
+    return `furn_${kind}`;
   }
 
 
   private placeFurniture(): void {
     for (const f of this.scenario.furniture) {
-      const { x, y } = tileToScreen(f.tile[0], f.tile[1], this.iso);
-      if (f.type === 'bar') {
-        this.barDef = f;
-        const bkey = this.furnitureTextureKey('bar', f);
-        this.requireTexture(bkey);
-        this.barImage = this.add.image(x, y - 18, bkey);
-        this.applyBarDisplaySize();
-        const barDepth = depthForFurniture(f.tile[0], f.tile[1], f.footprint);
-        this.barImage.setDepth(barDepth);
-        this.barGlow = this.add.circle(x, y - 20, 36, 0xaa44ff, 0.08);
-        this.barGlow.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint, 2));
-        this.barImage.setInteractive({ useHandCursor: true, draggable: false });
-        this.barImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
-          if (p.rightButtonDown()) return;
-          if (!this.buildMode) return;
-          this.beginFurniturePointer(p, 'bar');
-        });
-        this.barImage.on('pointerup', (p: Phaser.Input.Pointer) => {
-          if (this.deleteConfirmOpen) return;
-          if (this.panDragging || this.skipNextTap) return;
-          if (!this.buildMode) return;
-          if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;
-          if (!this.furnDragging || this.furnDragId !== 'bar') {
-            this.selectFurniture('bar');
-          }
-        });
-      } else if (f.type === 'sofa') {
-        this.sofaDef = f;
-        const key = this.furnitureTextureKey('sofa', f);
-        this.requireTexture(key);
-        const sofaPos = this.furnitureWorldPos('sofa', f.tile[0], f.tile[1], f);
-        this.sofaImage = this.add.image(sofaPos.x, sofaPos.y, key);
-        const sofaSize = this.furnitureDisplaySize('sofa', f);
-        this.sofaImage.setDisplaySize(sofaSize.w, sofaSize.h);
-        this.sofaImage.setDepth(depthForFurniture(f.tile[0], f.tile[1], f.footprint));
-        this.sofaImage.setInteractive({ useHandCursor: true });
-        this.sofaImage.on('pointerdown', (p: Phaser.Input.Pointer) => {
-          if (p.rightButtonDown()) return;
-          if (!this.buildMode) return;
-          this.beginFurniturePointer(p, 'sofa');
-        });
-        this.sofaImage.on('pointerup', (p: Phaser.Input.Pointer) => {
-          if (this.deleteConfirmOpen) return;
-          if (this.panDragging || this.skipNextTap) return;
-          if (!this.buildMode) return;
-          if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;
-          if (!this.furnDragging || this.furnDragId !== 'sofa') {
-            this.selectFurniture('sofa');
-          }
-        });
-      } else {
-        // Shop / catalog pieces (silla, planta, altavoz, DJ, …) — never skip placeholders
-        this.ensureShopFlags(f);
-        if (f.fromShop || f.catalogId || this.shopCatalogById.has(f.type)) {
-          this.spawnShopFurnitureVisual(f);
-        }
-      }
+      this.ensureShopFlags(f);
+      if (f.fromShop || f.catalogId) this.spawnShopFurnitureVisual(f);
     }
-    const anchor = this.sofaDef || this.barDef || this.scenario.furniture[0];
+    const anchor = this.scenario.furniture[0];
     const pos = anchor
       ? tileToScreen(anchor.tile[0], anchor.tile[1], this.iso)
       : { x: this.iso.originX, y: this.iso.originY + 120 };
@@ -1282,7 +1063,6 @@ export class ClubScene extends Phaser.Scene {
       this.setFurnitureDragTint(this.furnDragId, true);
       this.persistLayout();
       this.rebuildPathfinder();
-      this.syncSpotsFromFurniture();
       this.syncBartenderBarDepth();
     }
     this.furnDragging = false;
@@ -1302,7 +1082,6 @@ export class ClubScene extends Phaser.Scene {
     if (!this.poseAllowed(def, col, row)) return;
     if (def.tile[0] === col && def.tile[1] === row) return;
     def.tile = [col, row];
-    if (id === 'sofa' || id === 'bar') this.syncSpotsFromFurniture();
     this.repositionFurnitureVisual(id);
     if (persist) {
       this.persistLayout();
@@ -1313,49 +1092,16 @@ export class ClubScene extends Phaser.Scene {
 
   private repositionFurnitureVisual(id: SelectedFurniture): void {
     if (!id) return;
-    if (id === 'sofa') {
-      if (!this.sofaDef || !this.sofaImage) return;
-      const pos = this.furnitureWorldPos('sofa', this.sofaDef.tile[0], this.sofaDef.tile[1], this.sofaDef);
-      this.sofaImage.setPosition(pos.x, pos.y);
-      this.sofaImage.setDepth(
-        depthForFurniture(this.sofaDef.tile[0], this.sofaDef.tile[1], this.sofaDef.footprint)
-      );
-      if (this.selectedFurniture === 'sofa') {
-        this.selectionHud.setPosition(pos.x, pos.y - 66);
-      }
-    } else if (id === 'bar') {
-      if (!this.barDef || !this.barImage) return;
-      const pos = this.furnitureWorldPos('bar', this.barDef.tile[0], this.barDef.tile[1]);
-      const barDepth = depthForFurniture(
-        this.barDef.tile[0],
-        this.barDef.tile[1],
-        this.barDef.footprint
-      );
-      this.barImage.setPosition(pos.x, pos.y);
-      this.barImage.setDepth(barDepth);
-      if (this.barGlow) {
-        this.barGlow.setPosition(pos.x, pos.y - 4);
-        this.barGlow.setDepth(
-          depthForFurniture(this.barDef.tile[0], this.barDef.tile[1], this.barDef.footprint, 2)
-        );
-      }
-      if (this.selectedFurniture === 'bar') {
-        this.selectionHud.setPosition(pos.x, pos.y - 70);
-      }
-      this.syncBartenderBarDepth();
-    } else {
-      const def = this.getFurnitureDef(id);
-      const img = this.shopImages.get(id);
-      if (!def || !img) return;
-      const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
-      img.setPosition(pos.x, pos.y);
-      img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
-      if (this.selectedFurniture === id) {
-        this.selectionHud.setPosition(pos.x, pos.y - 78);
-      }
+    const def = this.getFurnitureDef(id);
+    const img = this.shopImages.get(def?.id ?? id);
+    if (!def || !img) return;
+    const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
+    img.setPosition(pos.x, pos.y);
+    img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
+    if (this.selectedFurniture === def.id) {
+      this.selectionHud.setPosition(pos.x, pos.y - 78);
     }
-    const moved = this.getFurnitureDef(id);
-    if (moved) this.refreshDirtOverlay(moved);
+    this.refreshDirtOverlay(def);
   }
 
   private buildSelectionHud(x: number, y: number): void {
@@ -1408,14 +1154,12 @@ export class ClubScene extends Phaser.Scene {
     return refundForWear(price, st.durability, st.maxDurability);
   }
 
-  /** Catalog / recorded purchase price; starters use STARTER_FURNITURE_PRICE. */
   private purchasePriceOf(def: FurnitureDef): number {
     if (typeof def.price === 'number' && def.price > 0) return Math.floor(def.price);
     if (def.catalogId) {
       const cat = this.shopCatalogById.get(def.catalogId);
       if (cat && cat.price > 0) return Math.floor(cat.price);
     }
-    if (def.type === 'sofa' || def.type === 'bar') return STARTER_FURNITURE_PRICE;
     const cat = this.shopCatalogById.get(def.type);
     if (cat && cat.price > 0) return Math.floor(cat.price);
     return 0;
@@ -1480,21 +1224,7 @@ export class ClubScene extends Phaser.Scene {
       if (this.inspectedFurnitureId === fid) this.closeFurnitureInspect();
     });
 
-    // Destroy visuals for every kind (sofa/bar aliases + shop instance ids)
-    const isSofa = id === 'sofa' || def.type === 'sofa' || fid === 'sofa';
-    const isBar = id === 'bar' || def.type === 'bar' || fid === 'bar';
-    if (isSofa) {
-      this.sofaImage?.destroy();
-      this.sofaImage = null;
-      this.sofaDef = null;
-    } else if (isBar) {
-      this.barImage?.destroy();
-      this.barImage = null;
-      this.barGlow?.destroy();
-      this.barGlow = null;
-      this.barDef = null;
-    }
-    // Shop placeholders keyed by instance id (also try selection alias)
+    // Destroy the sprite (keyed by instance id; also try the selection alias)
     for (const key of new Set([fid, id])) {
       const img = this.shopImages.get(key);
       if (img) {
@@ -1506,7 +1236,6 @@ export class ClubScene extends Phaser.Scene {
     this.scenario.furniture = this.scenario.furniture.filter((f) => f.id !== fid);
     this.clearFurnitureSelection();
     this.rebuildPathfinder();
-    this.syncSpotsFromFurniture();
     this.persistLayout();
     this.syncFurnitureInteractive();
     this.game.events.emit('stats-updated', this.getHudState());
@@ -1518,17 +1247,14 @@ export class ClubScene extends Phaser.Scene {
     this.buildHint.setText(hint).setVisible(true);
   }
 
-  /** Drop seat claims / seated patrons tied to a removed piece. */
   private releasePatronsAtFurniture(furnitureId: string): void {
     for (const patron of this.patrons) {
-      if (patron.playFurnitureId === furnitureId) {
-        this.endPinballWalk(patron);
-        continue;
-      }
       if (patron.seatedFurnitureId !== furnitureId) continue;
       this.releasePatronSlot(patron);
       patron.seated = false;
       patron.refreshStatusLabel();
+      // Continue the visit on foot instead of freezing where the sofa used to be.
+      if (patron.active && this.phase === 'open') this.sendPatronWandering(patron);
     }
   }
 
@@ -1537,42 +1263,20 @@ export class ClubScene extends Phaser.Scene {
     this.deselectNpc();
     this.game.events.emit('npc-deselected');
     this.clearFurnitureSelection();
-    this.selectedFurniture = id;
-    if (id === 'sofa') {
-      if (!this.sofaImage || !this.sofaDef) return;
-      this.sofaImage.setTint(0xffc0e8);
-      this.selectionHud.setVisible(true);
-      const { x, y } = tileToScreen(this.sofaDef.tile[0], this.sofaDef.tile[1], this.iso);
-      this.selectionHud.setPosition(x, y - 72);
-      this.buildHint.setText('Arrastra el sofá · Eliminar').setVisible(true);
-    } else if (id === 'bar') {
-      if (!this.barImage || !this.barDef) return;
-      this.barImage.setTint(0xffe0a0);
-      this.selectionHud.setVisible(true);
-      const { x, y } = tileToScreen(this.barDef.tile[0], this.barDef.tile[1], this.iso);
-      this.selectionHud.setPosition(x, y - 86);
-      this.buildHint.setText('Arrastra la barra · Eliminar').setVisible(true);
-    } else {
-      const def = this.getFurnitureDef(id);
-      const img = this.shopImages.get(id);
-      if (!def || !img) return;
-      img.setTint(0xc8b0ff);
-      this.selectionHud.setVisible(true);
-      const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
-      this.selectionHud.setPosition(pos.x, pos.y - 78);
-      const name = this.shopCatalogById.get(def.catalogId ?? '')?.name ?? 'mueble';
-      this.buildHint.setText(`Arrastra ${name} · Eliminar`).setVisible(true);
-    }
+    const def = this.getFurnitureDef(id);
+    const img = def ? this.shopImages.get(def.id) : null;
+    if (!def || !img) return;
+    this.selectedFurniture = def.id;
+    img.setTint(0xffd8a8);
+    this.selectionHud.setVisible(true);
+    const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
+    this.selectionHud.setPosition(pos.x, pos.y - 78);
+    const name = this.furnitureDisplayName(def).toLowerCase();
+    this.buildHint.setText(`Arrastra ${name} · Eliminar`).setVisible(true);
   }
 
   private clearFurnitureSelection(): void {
-    if (this.selectedFurniture === 'sofa' && this.sofaImage) {
-      this.sofaImage.clearTint();
-    } else if (this.selectedFurniture === 'bar' && this.barImage) {
-      this.barImage.clearTint();
-    } else if (this.selectedFurniture) {
-      this.shopImages.get(this.selectedFurniture)?.clearTint();
-    }
+    if (this.selectedFurniture) this.shopImages.get(this.selectedFurniture)?.clearTint();
     this.selectedFurniture = null;
     if (this.selectionHud) this.selectionHud.setVisible(false);
     // Do NOT hide delete confirm here — UIScene holds pendingDelete.id for Sí;
@@ -1588,7 +1292,6 @@ export class ClubScene extends Phaser.Scene {
     this.buildGrid?.setVisible(on);
     this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
-    this.hideBarMenu();
     this.closeFurnitureInspect();
     this.deselectNpc();
     this.game.events.emit('npc-deselected');
@@ -1602,7 +1305,6 @@ export class ClubScene extends Phaser.Scene {
       this.buildHint.setVisible(false);
       this.persistLayout();
       this.rebuildPathfinder();
-      this.syncSpotsFromFurniture();
       this.syncBartenderBarDepth();
     }
     this.game.events.emit('build-mode-changed', this.buildMode);
@@ -1617,7 +1319,6 @@ export class ClubScene extends Phaser.Scene {
     this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     this.rebuildPathfinder();
-    this.syncSpotsFromFurniture();
     this.phase = 'open';
     this.nightEarned = 0;
     this.servedCount = 0;
@@ -1662,7 +1363,6 @@ export class ClubScene extends Phaser.Scene {
       col: this.scenario.spawnTile[0],
       row: this.scenario.spawnTile[1],
     };
-    const drinkName = this.drinkDisplayName(pdata.preferredDrink);
     const patron = new Patron(
       this,
       pdata.sprite,
@@ -1670,189 +1370,117 @@ export class ClubScene extends Phaser.Scene {
       this.iso,
       this.pathfinder,
       pdata,
-      drinkName
+      ''
     );
     patron.reapplyDisplaySize();
     this.wirePatronClick(patron);
     this.patrons.push(patron);
-
-    // Sometimes play pinball first (placeholder machine), then carry on to a seat / the bar.
-    if (this.tryStartPinball(patron, () => this.chooseMainPatronGoal(patron, pdata))) return;
-    this.chooseMainPatronGoal(patron, pdata);
+    this.chooseMainPatronGoal(patron);
   }
 
-  /** Choose seat vs bar from comfort / cleanliness; claim slot (anti-stack). */
-  private chooseMainPatronGoal(patron: Patron, pdata: PatronData): void {
+  private chooseMainPatronGoal(patron: Patron): void {
     if (!patron.active || this.phase !== 'open') return;
-    const seats = this.listFreeSeats(patron.profile.id);
-    const bestSeat = seats[0] ?? null;
-    const barSlots = this.listBarQueueSlots(patron.profile.id);
-    const preferSeat =
-      !!bestSeat &&
-      (bestSeat.comfort >= AI_TUNABLES.barComfortEquivalent
-        ? Math.random() < AI_TUNABLES.seatPreferBias
-        : Math.random() < AI_TUNABLES.seatPreferBias * 0.35);
-
-    if (preferSeat && bestSeat && this.claimPatronSlot(patron, bestSeat)) {
-      patron.goal = 'sofa';
-      patron.seatedFurnitureId = bestSeat.furnitureId;
-      const ok = patron.walkTo(bestSeat, () => {
-        if (!patron.active || this.phase !== 'open') return;
-        patron.seated = true;
-        patron.waiting = false;
-        patron.refreshStatusLabel();
-        patron.showBubble('😌');
-        // Nearby dirt / broken furniture hurts mood while seated
-        const q = this.qualityNearPatron(patron);
-        if (q < 0.4) patron.showBubble('¡Qué sucio!');
-        const sitMs = Phaser.Math.Between(
-          AI_TUNABLES.sitDurationMinMs,
-          AI_TUNABLES.sitDurationMaxMs
-        );
-        this.time.delayedCall(sitMs, () => {
-          if (!patron.active || this.phase !== 'open') return;
-          patron.seated = false;
-          this.releasePatronSlot(patron);
-          this.sendPatronHome(patron);
-        });
-      });
-      if (!ok) {
-        this.releasePatronSlot(patron);
-        this.sendPatronToBarQueue(patron, pdata.preferredDrink);
-      }
-    } else {
-      this.sendPatronToBarQueue(patron, pdata.preferredDrink);
-    }
-  }
-
-  // ─── Pinball (placeholder): patrons stand in front of the machine for a few seconds ──
-
-  private isPinballDef(def: FurnitureDef): boolean {
-    return def.catalogId === 'pinball' || def.type === 'pinball';
-  }
-
-  /** Tile in front of the machine (its fixed SE front; null if out of bounds). */
-  private pinballFrontTile(def: FurnitureDef): { col: number; row: number } | null {
-    const off = PINBALL_FRONT_OFFSET;
-    const col = def.tile[0] + off[0];
-    const row = def.tile[1] + off[1];
-    const { cols, rows } = this.scenario.map;
-    if (col < 0 || row < 0 || col >= cols || row >= rows) return null;
-    return { col, row };
-  }
-
-  private pinballUsable(def: FurnitureDef): boolean {
-    this.ensureFurnitureStats(def);
-    const st = this.statsOf(def);
-    const cond = conditionFromDurability(st.durability, st.maxDurability);
-    return cond !== 'Inservible' && cond !== 'Se rompió' && st.durability > 0;
-  }
-
-  /** Random usable machine whose front tile is walkable and unclaimed. */
-  private pickPinballSpot(
-    patronId: string
-  ): { def: FurnitureDef; spot: { col: number; row: number } } | null {
-    const options: Array<{ def: FurnitureDef; spot: { col: number; row: number } }> = [];
-    for (const f of this.scenario.furniture) {
-      if (!this.isPinballDef(f) || !this.pinballUsable(f)) continue;
-      const spot = this.pinballFrontTile(f);
-      if (!spot || !this.isPatronSlotFree(spot, patronId)) continue;
-      options.push({ def: f, spot });
-    }
-    if (!options.length) return null;
-    return options[Phaser.Math.Between(0, options.length - 1)];
-  }
-
-  /** Maybe send the patron to play pinball; `onDone` continues the normal flow afterwards. */
-  private tryStartPinball(patron: Patron, onDone: () => void): boolean {
-    if (this.phase !== 'open' || Math.random() >= AI_TUNABLES.pinballPlayChance) return false;
-    const pick = this.pickPinballSpot(patron.profile.id);
-    if (!pick || !this.claimPatronSlot(patron, pick.spot)) return false;
-    patron.goal = 'pinball';
-    patron.playFurnitureId = pick.def.id;
-    const furnId = pick.def.id;
-    const ok = patron.walkTo(pick.spot, () => this.beginPinballPlay(patron, furnId, onDone));
-    if (!ok) {
-      this.releasePatronSlot(patron);
-      patron.goal = 'bar';
-      patron.playFurnitureId = null;
-      return false;
-    }
-    return true;
-  }
-
-  private endPinballWalk(patron: Patron): void {
-    patron.playing = false;
-    patron.playFurnitureId = null;
-    this.releasePatronSlot(patron);
-    patron.refreshStatusLabel();
-  }
-
-  private beginPinballPlay(patron: Patron, furnId: string, onDone: () => void): void {
-    if (!patron.active || this.phase !== 'open') return;
-    const def = this.getFurnitureDef(furnId);
-    if (!def || !this.pinballUsable(def)) {
-      this.endPinballWalk(patron);
-      onDone();
+    const bestSeat = this.listFreeSeats(patron.profile.id)[0] ?? null;
+    if (
+      !bestSeat ||
+      Math.random() >= AI_TUNABLES.seatChance ||
+      !this.claimPatronSlot(patron, bestSeat)
+    ) {
+      // No sofa (or none free / not feeling like sitting): just wander the floor, then leave.
+      this.sendPatronWandering(patron);
       return;
     }
-    patron.playing = true;
-    patron.waiting = false;
-    patron.faceToward({ col: def.tile[0], row: def.tile[1] });
-    patron.refreshStatusLabel();
-    patron.showBubble('🎮');
-    const ms = Phaser.Math.Between(AI_TUNABLES.pinballPlayMinMs, AI_TUNABLES.pinballPlayMaxMs);
-    this.time.delayedCall(ms, () => this.finishPinballPlay(patron, furnId, onDone));
-  }
-
-  private finishPinballPlay(patron: Patron, furnId: string, onDone: () => void): void {
-    if (!patron.active || this.phase !== 'open') return;
-    this.endPinballWalk(patron);
-    const def = this.getFurnitureDef(furnId);
-    if (def && this.isPinballDef(def)) {
-      this.ensureFurnitureStats(def);
-      const st = this.statsOf(def);
-      const durR = st.durability / Math.max(1, st.maxDurability);
-      const cleanR = st.cleanliness / Math.max(1, st.maxCleanliness);
-      const quality = Math.max(0, Math.min(1, 0.6 * durR + 0.4 * cleanR));
-      const scale = lerp(AI_TUNABLES.pinballQualityMin, AI_TUNABLES.pinballQualityMax, quality);
-      const base = Phaser.Math.Between(AI_TUNABLES.pinballPayMin, AI_TUNABLES.pinballPayMax);
-      const earned = this.pinballUsable(def) ? Math.max(1, Math.round(base * scale)) : 0;
-      if (earned > 0) {
-        this.money += earned;
-        this.nightEarned += earned;
-        patron.showBubble(`+$${earned}`);
-      }
-      // Wear + dirt per play
-      st.durability = Math.max(0, st.durability - AI_TUNABLES.pinballPlayWear);
-      st.cleanliness = Math.max(0, st.cleanliness - AI_TUNABLES.pinballPlayDirt);
-      this.writeStatsToDef(def, st);
-      this.refreshDirtOverlay(def);
-      this.reemitFurnitureInspectIf(def.id);
-      this.persistLayout();
-      this.game.events.emit('stats-updated', this.getHudState());
-    }
-    onDone();
-  }
-
-  /** Claim a bar queue tile and walk there to wait for service. */
-  private sendPatronToBarQueue(patron: Patron, preferredDrinkId: string): void {
-    patron.goal = 'bar';
-    const slots = this.listBarQueueSlots(patron.profile.id);
-    const spot =
-      slots[0] ??
-      this.findFreeNear(this.barInteract || { col: 4, row: 4 }, patron.profile.id);
-    this.claimPatronSlot(patron, spot);
-    patron.walkTo(spot, () => {
+    patron.goal = 'sofa';
+    patron.seatedFurnitureId = bestSeat.furnitureId;
+    const ok = patron.walkTo(bestSeat, () => {
       if (!patron.active || this.phase !== 'open') return;
-      patron.waiting = true;
-      patron.seated = false;
+      patron.seated = true;
+      patron.waiting = false;
+      // Face the sofa (the tile behind the standing spot is the footprint's front row).
+      patron.faceToward({ col: bestSeat.col, row: bestSeat.row - 1 });
       patron.refreshStatusLabel();
-      const drink =
-        this.drinks.find((d) => d.id === preferredDrinkId) || this.drinks[0];
-      patron.showBubble(drink.name);
-      this.tryServe(patron, drink);
+      patron.showBubble('😌');
+      // Nearby dirt / broken furniture hurts mood while seated
+      if (this.qualityNearPatron(patron) < 0.4) patron.showBubble('¡Qué sucio!');
+      const sitMs = Phaser.Math.Between(AI_TUNABLES.sitDurationMinMs, AI_TUNABLES.sitDurationMaxMs);
+      this.time.delayedCall(sitMs, () => {
+        if (!patron.active || this.phase !== 'open' || !patron.seated) return;
+        patron.seated = false;
+        this.paySofaSit(patron);
+        this.releasePatronSlot(patron);
+        this.sendPatronHome(patron);
+      });
     });
+    if (!ok) {
+      this.releasePatronSlot(patron);
+      this.sendPatronWandering(patron);
+    }
+  }
+
+  /** Placeholder income while there is no bar: a patron pays when they finish sitting on a sofa. */
+  private paySofaSit(patron: Patron): void {
+    const q = this.qualityNearPatron(patron);
+    const base = Phaser.Math.Between(AI_TUNABLES.sofaSitPayMin, AI_TUNABLES.sofaSitPayMax);
+    const earned = Math.max(
+      1,
+      Math.round(base * lerp(AI_TUNABLES.payQualityMin, AI_TUNABLES.payQualityMax, q))
+    );
+    this.money += earned;
+    this.nightEarned += earned;
+    this.servedCount++;
+    patron.showBubble(`+$${earned}`);
+    this.persistLayout();
+    this.game.events.emit('stats-updated', this.getHudState());
+  }
+
+  /** Random free, walkable tile for a wandering patron (not the one they are standing on). */
+  private pickWanderTile(patron: Patron): { col: number; row: number } | null {
+    const { cols, rows } = this.scenario.map;
+    for (let i = 0; i < 30; i++) {
+      const pos = { col: Phaser.Math.Between(0, cols - 1), row: Phaser.Math.Between(0, rows - 1) };
+      if (Math.abs(pos.col - patron.grid.col) + Math.abs(pos.row - patron.grid.row) < 3) continue;
+      if (!this.isPatronSlotFree(pos, patron.profile.id)) continue;
+      return pos;
+    }
+    return null;
+  }
+
+  /**
+   * Walk to a few random tiles (pausing at each), then leave. This is what patrons do whenever they
+   * do not sit — there is no bar service any more, so nobody ever waits for anything.
+   */
+  private sendPatronWandering(patron: Patron, stopsLeft?: number): void {
+    if (!patron.active || this.phase !== 'open') return;
+    const stops =
+      stopsLeft ?? Phaser.Math.Between(AI_TUNABLES.wanderStopsMin, AI_TUNABLES.wanderStopsMax);
+    patron.goal = 'wander';
+    patron.waiting = false;
+    patron.seated = false;
+    if (stops <= 0) {
+      this.sendPatronHome(patron);
+      return;
+    }
+    const spot = this.pickWanderTile(patron);
+    if (!spot || !this.claimPatronSlot(patron, spot)) {
+      this.sendPatronHome(patron);
+      return;
+    }
+    const ok = patron.walkTo(spot, () => {
+      if (!patron.active || this.phase !== 'open') return;
+      const idleMs = Phaser.Math.Between(
+        AI_TUNABLES.wanderStopIdleMinMs,
+        AI_TUNABLES.wanderStopIdleMaxMs
+      );
+      this.time.delayedCall(idleMs, () => {
+        if (!patron.active || this.phase !== 'open' || patron.goal !== 'wander') return;
+        this.releasePatronSlot(patron);
+        this.sendPatronWandering(patron, stops - 1);
+      });
+    });
+    if (!ok) {
+      this.releasePatronSlot(patron);
+      this.sendPatronHome(patron);
+    }
   }
 
   // ─── Patron seats / queues / venue quality ───────────────────────────
@@ -1900,34 +1528,24 @@ export class ClubScene extends Phaser.Scene {
     return true;
   }
 
-  /** Adjacent walkable seat candidates for a seatable furniture piece. */
+  /** Row of tiles just in front of a piece (its fixed SW pose faces +row): where patrons stand to sit. */
+  private frontTiles(def: FurnitureDef): Array<{ col: number; row: number }> {
+    const fw = Math.max(1, def.footprint[0]);
+    const fh = Math.max(1, def.footprint[1]);
+    const out: Array<{ col: number; row: number }> = [];
+    for (let i = 0; i < fw; i++) out.push({ col: def.tile[0] + i, row: def.tile[1] + fh });
+    return out;
+  }
+
+  /** Walkable seat tiles for a seatable piece (the sofa: its front row). */
   private seatSlotsForFurniture(def: FurnitureDef): Array<{ col: number; row: number; comfort: number; furnitureId: string }> {
     this.ensureFurnitureStats(def);
     const st = this.statsOf(def);
     const cond = conditionFromDurability(st.durability, st.maxDurability);
     if (cond === 'Inservible' || st.durability <= 0) return [];
-    const fw = Math.max(1, def.footprint[0]);
-    const fh = Math.max(1, def.footprint[1]);
-    const candidates: Array<{ col: number; row: number }> = [];
-    // Prefer interact / restSpot when walkable
-    if (def.interact) candidates.push({ col: def.interact[0], row: def.interact[1] });
-    if (def.restSpot) candidates.push({ col: def.restSpot[0], row: def.restSpot[1] });
-    for (let dc = 0; dc < fw; dc++) {
-      for (let dr = 0; dr < fh; dr++) {
-        const bc = def.tile[0] + dc;
-        const br = def.tile[1] + dr;
-        for (const [oc, or_] of [[0, -1], [0, 1], [-1, 0], [1, 0], [-1, -1], [1, -1], [-1, 1], [1, 1]] as Array<[number, number]>) {
-          candidates.push({ col: bc + oc, row: br + or_ });
-        }
-      }
-    }
-    const seen = new Set<string>();
-    const out: Array<{ col: number; row: number; comfort: number; furnitureId: string }> = [];
     const comfortScore = st.comfort * (0.55 + 0.45 * (st.cleanliness / Math.max(1, st.maxCleanliness)));
-    for (const pos of candidates) {
-      const k = this.slotKey(pos);
-      if (seen.has(k)) continue;
-      seen.add(k);
+    const out: Array<{ col: number; row: number; comfort: number; furnitureId: string }> = [];
+    for (const pos of this.frontTiles(def)) {
       if (!this.pathfinder.isWalkable(pos.col, pos.row)) continue;
       out.push({ col: pos.col, row: pos.row, comfort: comfortScore, furnitureId: def.id });
     }
@@ -1946,29 +1564,6 @@ export class ClubScene extends Phaser.Scene {
     }
     seats.sort((a, b) => b.comfort - a.comfort);
     return seats;
-  }
-
-  /** Short queue tiles near bar interact (anti-stack). */
-  private listBarQueueSlots(exceptPatronId?: string): Array<{ col: number; row: number }> {
-    const c = this.barInteract || { col: 4, row: 4 };
-    const ring = [
-      c,
-      { col: c.col - 1, row: c.row },
-      { col: c.col, row: c.row + 1 },
-      { col: c.col + 1, row: c.row },
-      { col: c.col - 1, row: c.row + 1 },
-      { col: c.col + 1, row: c.row + 1 },
-      { col: c.col, row: c.row - 1 },
-      { col: c.col - 1, row: c.row - 1 },
-      { col: c.col + 1, row: c.row - 1 },
-    ];
-    const out: Array<{ col: number; row: number }> = [];
-    for (const pos of ring) {
-      if (out.length >= AI_TUNABLES.barQueueMaxSlots) break;
-      if (!this.isPatronSlotFree(pos, exceptPatronId)) continue;
-      out.push(pos);
-    }
-    return out;
   }
 
   /** 0–1 venue quality from club-average cleanliness & comfort (broken pieces hurt). */
@@ -2014,69 +1609,9 @@ export class ClubScene extends Phaser.Scene {
     return Math.max(0, Math.min(1, club * 0.45 + best * 0.55));
   }
 
-  /** Pay + tip from drink price scaled by venue quality / patience / broken furniture. */
-  private computeServePayout(patron: Patron, drink: Drink): { earned: number; tipped: boolean; angryWalkout: boolean } {
-    if (patron.angry) return { earned: 0, tipped: false, angryWalkout: true };
-    const q = this.qualityNearPatron(patron);
-    const payMult = lerp(AI_TUNABLES.payQualityMin, AI_TUNABLES.payQualityMax, q);
-    let tipChance = patron.profile.tipChance * (0.55 + 0.9 * q);
-    if (patron.impatient) tipChance *= AI_TUNABLES.impatientTipChanceScale;
-    // Broken nearby further hurts tips
-    for (const f of this.scenario.furniture) {
-      const dist = Math.abs(f.tile[0] - patron.grid.col) + Math.abs(f.tile[1] - patron.grid.row);
-      if (dist > 3) continue;
-      this.ensureFurnitureStats(f);
-      const st = this.statsOf(f);
-      const cond = conditionFromDurability(st.durability, st.maxDurability);
-      if (cond === 'Inservible' || cond === 'Se rompió') {
-        tipChance *= 0.4;
-        break;
-      }
-    }
-    let earned = Math.max(1, Math.round(drink.price * payMult));
-    let tipped = false;
-    if (Math.random() < tipChance) {
-      const tipBase = Math.max(1, Math.ceil(drink.price * 0.25));
-      const tip = Math.max(1, Math.round(tipBase * lerp(AI_TUNABLES.tipQualityMin, AI_TUNABLES.tipQualityMax, q)));
-      earned += tip;
-      tipped = true;
-    }
-    return { earned, tipped, angryWalkout: false };
-  }
-
-
-  private findFreeNear(center: { col: number; row: number }, exceptPatronId?: string): { col: number; row: number } {
-    const candidates = [
-      center,
-      { col: center.col - 1, row: center.row },
-      { col: center.col, row: center.row + 1 },
-      { col: center.col - 1, row: center.row + 1 },
-      { col: center.col + 1, row: center.row },
-      { col: center.col + 1, row: center.row + 1 },
-      { col: center.col - 1, row: center.row - 1 },
-    ];
-    for (const c of candidates) {
-      if (!this.isPatronSlotFree(c, exceptPatronId)) continue;
-      const k = this.slotKey(c);
-      this.queueTiles.add(k);
-      return c;
-    }
-    return center;
-  }
 
   private releaseTile(pos: { col: number; row: number }): void {
     this.queueTiles.delete(`${pos.col},${pos.row}`);
-  }
-
-  /**
-   * Patron arrived at bar and is waiting. Staff AI (Luna/Nova) will Atender;
-   * drink is resolved again when a staff member picks up the job.
-   */
-  private tryServe(patron: Patron, drink: Drink): void {
-    if (this.phase !== 'open' || !patron.active) return;
-    void drink;
-    // Immediate try: if a free waitress is available, assign now.
-    this.tryAssignServeAi(patron);
   }
 
   private sendPatronHome(patron: Patron): void {
@@ -2090,14 +1625,16 @@ export class ClubScene extends Phaser.Scene {
       col: this.scenario.exitTile[0],
       row: this.scenario.exitTile[1],
     };
-    patron.walkTo(exit, () => {
+    const gone = () => {
       if (this.selectedNpcId === patron.profile.id) {
         this.deselectNpc();
         this.game.events.emit('npc-deselected');
       }
       this.patrons = this.patrons.filter((p) => p !== patron);
       patron.destroy();
-    });
+    };
+    // No route to the exit (boxed in by furniture): leave on the spot instead of freezing forever.
+    if (!patron.walkTo(exit, gone)) gone();
   }
 
 
@@ -2130,16 +1667,10 @@ export class ClubScene extends Phaser.Scene {
     };
   }
 
-  /**
-   * Free walkable tile near sofa/floor for Luna & Nova (not inside the bar).
-   * Both are independent waitresses — bar is only a destination for menu actions.
-   */
   private findFloorStaffSpawnTile(): { col: number; row: number } {
-    const base = this.sofaRest ?? {
-      col: this.sofaDef?.tile[0] ?? 3,
-      row: this.sofaDef?.tile[1] ?? 5,
-    };
+    const base = this.restTile();
     const offsets: [number, number][] = [
+      [0, 0],
       [0, 1],
       [1, 1],
       [-1, 1],
@@ -2159,19 +1690,26 @@ export class ClubScene extends Phaser.Scene {
       const row = base.row + dr;
       if (this.isTileFreeForStaff(col, row)) return { col, row };
     }
-    // Fallback: south of bar interact (still on floor, not staffSpot)
-    const alt = this.barInteract ?? { col: 4, row: 4 };
-    for (const [dc, dr] of [
-      [0, 2],
-      [-1, 2],
-      [1, 2],
-      [0, 3],
-    ] as [number, number][]) {
-      const col = alt.col + dc;
-      const row = alt.row + dr;
-      if (this.isTileFreeForStaff(col, row)) return { col, row };
+    // Any free walkable tile at all.
+    const { cols, rows } = this.scenario.map;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        if (this.isTileFreeForStaff(c, r)) return { col: c, row: r };
+      }
     }
-    return { col: 4, row: 6 };
+    return { col: base.col, row: base.row };
+  }
+
+  /** Tile in front of the first sofa (staff rest / spawn anchor); mid-floor when there is no sofa. */
+  private restTile(): { col: number; row: number } {
+    for (const f of this.scenario.furniture) {
+      if (f.type !== 'sofa') continue;
+      for (const t of this.frontTiles(f)) {
+        if (this.pathfinder?.isWalkable(t.col, t.row)) return t;
+      }
+    }
+    const { cols, rows } = this.scenario.map;
+    return { col: Math.floor(cols / 2), row: Math.floor(rows / 2) };
   }
 
   /** Alias — hired Nova uses the same floor spawn as Luna. */
@@ -2183,7 +1721,6 @@ export class ClubScene extends Phaser.Scene {
     if (!this.pathfinder?.isWalkable(col, row)) return false;
     if (this.bartender && this.bartender.grid.col === col && this.bartender.grid.row === row) return false;
     if (this.extraStaff.some((s) => s.grid.col === col && s.grid.row === row)) return false;
-    if (this.staffSpot && this.staffSpot.col === col && this.staffSpot.row === row) return false;
     return true;
   }
 
@@ -2341,11 +1878,11 @@ export class ClubScene extends Phaser.Scene {
   };
 
 
-  /** Furniture is interactive only in Construir — otherwise it steals staff taps (Luna under bar). */
+  /** Furniture is interactive only in Construir — otherwise it steals staff taps (Luna on the sofa). */
   /**
    * In Construir characters must not take input: their hit areas (64x120) sit on top of furniture
    * and, since Phaser only routes a press to the top-most interactive object, a wandering staff
-   * member standing on the sofa/bar swallowed the tap that should select (and so Eliminar) it.
+   * member standing on the sofa swallowed the tap that should select (and so Eliminar) it.
    */
   private syncCharacterInput(): void {
     const sprites = [
@@ -2360,20 +1897,6 @@ export class ClubScene extends Phaser.Scene {
 
   private syncFurnitureInteractive(): void {
     this.syncCharacterInput();
-    if (this.barImage) {
-      if (this.buildMode) {
-        this.barImage.setInteractive({ useHandCursor: true, draggable: false });
-      } else if (this.barImage.input) {
-        this.barImage.disableInteractive();
-      }
-    }
-    if (this.sofaImage) {
-      if (this.buildMode) {
-        this.sofaImage.setInteractive({ useHandCursor: true });
-      } else if (this.sofaImage.input) {
-        this.sofaImage.disableInteractive();
-      }
-    }
     for (const img of this.shopImages.values()) {
       if (this.buildMode) {
         img.setInteractive({ useHandCursor: true });
@@ -2381,48 +1904,6 @@ export class ClubScene extends Phaser.Scene {
         img.disableInteractive();
       }
     }
-  }
-
-  private buildBarMenu(): void {
-    this.barMenu = this.add.container(0, 0).setDepth(9200).setVisible(false);
-    const bg = this.add.rectangle(0, 0, 168, 78, 0x1a0e28, 0.94);
-    bg.setStrokeStyle(1, 0xff3ca0);
-    const mk = (oy: number, label: string, action: 'serve' | 'clean') => {
-      const c = this.add.container(0, oy);
-      const b = this.add.rectangle(0, 0, 148, 28, 0xb43282, 1);
-      b.setStrokeStyle(1, 0xff7ac8);
-      b.setInteractive({ useHandCursor: true });
-      const t = this.add
-        .text(0, 0, label, { fontSize: '12px', color: '#ffffff', fontStyle: 'bold' })
-        .setOrigin(0.5);
-      b.on('pointerover', () => b.setFillStyle(0xd44a9a));
-      b.on('pointerout', () => b.setFillStyle(0xb43282));
-      b.on('pointerdown', (p: Phaser.Input.Pointer) => {
-        p.event.stopPropagation();
-        this.blockPanGesture = true;
-        this.panActive = false;
-        this.npcTapHandled = true;
-        if (action === 'serve') this.doBarServeDrinks();
-        else this.doBarClean();
-      });
-      c.add([b, t]);
-      return c;
-    };
-    this.barMenu.add([bg, mk(-18, 'Pedir bebidas', 'serve'), mk(18, 'Limpiar barra', 'clean')]);
-  }
-
-  private showBarMenu(): void {
-    if (!this.barMenu || !this.barImage) return;
-    const x = this.barImage.x;
-    const y = this.barImage.y - 78;
-    this.barMenu.setPosition(x, y);
-    this.barMenu.setVisible(true);
-    this.barMenuVisible = true;
-  }
-
-  private hideBarMenu(): void {
-    if (this.barMenu) this.barMenu.setVisible(false);
-    this.barMenuVisible = false;
   }
 
   private isPointerOverGameObject(
@@ -2444,24 +1925,17 @@ export class ClubScene extends Phaser.Scene {
     const furnId = this.furnitureIdAtPointer(p);
 
     if (staff) {
-      // Interactive scenery: bar → menu; other furniture → inspect (no walk-through)
-      if (this.isPointerOverGameObject(p, this.barImage)) {
-        this.showBarMenu();
-        return;
-      }
+      // Furniture → inspect panel (no walk-through); empty floor → walk there
       if (furnId) {
-        this.hideBarMenu();
         this.openFurnitureInspect(furnId);
         return;
       }
-      this.hideBarMenu();
       this.closeFurnitureInspect();
       this.moveSelectedStaffToPointer(p, staff);
       return;
     }
 
     // No staff selected: tap furniture → inspect panel; empty → deselect
-    this.hideBarMenu();
     if (furnId) {
       this.openFurnitureInspect(furnId);
       return;
@@ -2474,7 +1948,6 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private moveSelectedStaffToPointer(p: Phaser.Input.Pointer, staff: Bartender): void {
-    if (this.barActionBusy && staff.playerCommanded) return;
     if (staff.state === 'resting') return;
     // Player override: cancel autonomous AI job
     if (!staff.playerCommanded && staff.aiJob !== 'none') {
@@ -2544,103 +2017,6 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
-  private selectedStaffOrNull(): Bartender | null {
-    if (!this.selectedNpcId) return null;
-    return this.findStaffById(this.selectedNpcId);
-  }
-
-  private doBarServeDrinks(): void {
-    const staff = this.selectedStaffOrNull();
-    if (!staff || this.barActionBusy || this.buildMode) return;
-    if (staff.state === 'resting') return;
-    this.hideBarMenu();
-    this.barActionBusy = true;
-    this.releaseStaffAiClaims(staff);
-    staff.cancelWalk();
-    staff.beginPlayerCommand('serve');
-    staff.servingDrinkId = 'generic';
-    staff.state = 'busy';
-    const finish = () => {
-      if (staff === this.bartender) this.syncBartenderBarDepth();
-      staff.stopBob();
-      staff.setServeLabel('Sirviendo bebida');
-      this.playStaffActionTween(staff, () => {
-        const earned = Phaser.Math.Between(8, 15);
-        this.money += earned;
-        this.nightEarned += earned;
-        staff.profile.mood = Math.min(100, staff.profile.mood + Phaser.Math.Between(2, 5));
-        staff.profile.energy = Math.max(
-          0,
-          staff.profile.energy - Math.max(2, Math.floor(staff.profile.energyDrainPerServe / 2))
-        );
-        staff.state = 'idle';
-        staff.servingDrinkId = null;
-        staff.clearServeLabel();
-        this.releaseStaffTileClaims(staff);
-        staff.clearPlayerCommand();
-        staff.startBob();
-        this.barActionBusy = false;
-        this.showStatusFloat(`+$${earned} · Bebidas`);
-        this.persistLayout();
-        this.game.events.emit('stats-updated', this.getHudState());
-        this.emitStaffRoster();
-      });
-    };
-    const go = () => {
-      if (!this.claimBarSpot(staff)) {
-        this.time.delayedCall(300, go);
-        return;
-      }
-      const ok = staff.walkTo(this.staffSpot, finish);
-      if (!ok) finish();
-    };
-    go();
-  }
-
-  private doBarClean(): void {
-    const staff = this.selectedStaffOrNull();
-    if (!staff || this.barActionBusy || this.buildMode) return;
-    if (staff.state === 'resting') return;
-    this.hideBarMenu();
-    this.barActionBusy = true;
-    this.releaseStaffAiClaims(staff);
-    staff.cancelWalk();
-    staff.beginPlayerCommand('clean');
-    staff.state = 'busy';
-    this.claimBarSpot(staff);
-    const finish = () => {
-      if (staff === this.bartender) this.syncBartenderBarDepth();
-      staff.stopBob();
-      this.playStaffActionTween(staff, () => {
-        const tip = Phaser.Math.Between(3, 6);
-        this.money += tip;
-        this.nightEarned += tip;
-        staff.profile.energy = Math.max(0, staff.profile.energy - Phaser.Math.Between(8, 14));
-        staff.profile.mood = Math.min(100, staff.profile.mood + Phaser.Math.Between(1, 3));
-        if (this.barDef) {
-          this.ensureFurnitureStats(this.barDef);
-          applyCleanRestore(this.statsOf(this.barDef));
-          this.writeStatsToDef(this.barDef, this.statsOf(this.barDef));
-          this.refreshDirtOverlay(this.barDef);
-        }
-        staff.state = 'idle';
-        this.releaseStaffTileClaims(staff);
-        staff.clearPlayerCommand();
-        staff.startBob();
-        this.barActionBusy = false;
-        this.showStatusFloat(`Barra limpia · +$${tip}`);
-        this.persistLayout();
-        this.game.events.emit('stats-updated', this.getHudState());
-        this.emitStaffRoster();
-        this.reemitFurnitureInspectIf(this.barDef?.id);
-      }, CLEAN_DURATION_MS);
-    };
-    const ok = staff.walkTo(this.staffSpot, finish);
-    if (!ok) {
-      finish();
-    }
-  }
-
   /** Short bob / scale tween while serving or cleaning (no new sheets required). */
   private playStaffActionTween(staff: Bartender, onDone: () => void, totalMs = 900): void {
     const spr = staff.sprite;
@@ -2666,13 +2042,13 @@ export class ClubScene extends Phaser.Scene {
     });
   }
 
-  private showStatusFloat(msg: string): void {
+  private showStatusFloat(msg: string, at?: { x: number; y: number }): void {
     if (this.statusFloat) {
       this.statusFloat.destroy();
       this.statusFloat = undefined;
     }
-    const x = this.barImage?.x ?? this.cameras.main.centerX;
-    const y = (this.barImage?.y ?? 120) - 100;
+    const x = at?.x ?? this.cameras.main.midPoint.x;
+    const y = (at?.y ?? this.cameras.main.midPoint.y) - 60;
     this.statusFloat = this.add
       .text(x, y, msg, {
         fontSize: '14px',
@@ -2717,7 +2093,6 @@ export class ClubScene extends Phaser.Scene {
     this.patrons = [];
     this.queueTiles.clear();
     this.patronSlotClaims.clear();
-    this.serveClaim.clear();
     for (const s of this.allStaff()) {
       s.clearAiJob();
       s.state = 'idle';
@@ -2762,25 +2137,12 @@ export class ClubScene extends Phaser.Scene {
     return list;
   }
 
-  private waitingBarPatrons(): Patron[] {
-    return this.patrons.filter(
-      (p) => p.active && p.waiting && !p.served && p.goal === 'bar' && !this.serveClaim.has(p.profile.id)
-    );
-  }
-
-  /** patronId → staffId while an Atender job is in flight. */
-  private serveClaim = new Map<string, string>();
-  /** Destination / job tile → staffId (bar staffSpot, sofa, wander). */
+  /** Destination / job tile → staffId (rest spot, cleaning, wander). */
   private staffTileClaims = new Map<string, string>();
-  /** Soft bar queue: only one staff may occupy staffSpot at a time. */
-  private barSpotHolderId: string | null = null;
-  /** Seat / bar-queue tile key `col,row` → patron id (anti-stack + occupy). */
+  /** Seat / wander tile key `col,row` → patron id (anti-stack + occupy). */
   private patronSlotClaims = new Map<string, string>();
 
   private releaseStaffAiClaims(staff: Bartender): void {
-    for (const [pid, sid] of [...this.serveClaim.entries()]) {
-      if (sid === staff.profile.id) this.serveClaim.delete(pid);
-    }
     for (const [fid, sid] of [...this.cleanClaim.entries()]) {
       if (sid === staff.profile.id) this.cleanClaim.delete(fid);
     }
@@ -2798,7 +2160,6 @@ export class ClubScene extends Phaser.Scene {
     for (const [k, sid] of [...this.staffTileClaims.entries()]) {
       if (sid === id) this.staffTileClaims.delete(k);
     }
-    if (this.barSpotHolderId === id) this.barSpotHolderId = null;
   }
 
   /** True if another staff occupies or has reserved this tile. */
@@ -2826,36 +2187,6 @@ export class ClubScene extends Phaser.Scene {
     return true;
   }
 
-  private claimBarSpot(staff: Bartender): boolean {
-    if (this.barSpotHolderId && this.barSpotHolderId !== staff.profile.id) return false;
-    this.barSpotHolderId = staff.profile.id;
-    this.claimStaffTile(staff, this.staffSpot);
-    return true;
-  }
-
-  /** Adjacent wait tile near bar when staffSpot is held. */
-  private findStaffWaitNearBar(staff: Bartender): { col: number; row: number } {
-    const c = this.staffSpot;
-    const candidates = [
-      { col: c.col - 1, row: c.row },
-      { col: c.col, row: c.row + 1 },
-      { col: c.col + 1, row: c.row },
-      { col: c.col, row: c.row - 1 },
-      { col: c.col - 1, row: c.row + 1 },
-      { col: c.col + 1, row: c.row + 1 },
-      { col: c.col - 1, row: c.row - 1 },
-      { col: c.col + 1, row: c.row - 1 },
-    ];
-    for (const pos of candidates) {
-      if (!this.pathfinder.isWalkable(pos.col, pos.row)) continue;
-      if (pos.col === c.col && pos.row === c.row) continue;
-      if (this.isStaffTileBlocked(pos, staff)) continue;
-      return pos;
-    }
-    // Last resort: stay put
-    return { col: staff.grid.col, row: staff.grid.row };
-  }
-
   private findFreeStaffGoal(
     staff: Bartender,
     preferred: { col: number; row: number }
@@ -2878,169 +2209,6 @@ export class ClubScene extends Phaser.Scene {
       return pos;
     }
     return null;
-  }
-
-  private tryAssignServeAi(patron: Patron): boolean {
-    if (!patron.active || !patron.waiting || patron.served || patron.goal !== 'bar') return false;
-    if (this.serveClaim.has(patron.profile.id)) return false;
-    if (this.buildMode || this.phase !== 'open') return false;
-    const staff = this.allStaff().find(
-      (s) =>
-        !s.playerCommanded &&
-        s.aiJob === 'none' &&
-        s.state === 'idle' &&
-        s.profile.energy >= s.profile.energyDrainPerServe
-    );
-    if (!staff) return false;
-    this.beginAiServe(staff, patron);
-    return true;
-  }
-
-  private beginAiServe(staff: Bartender, patron: Patron): void {
-    const drink =
-      this.drinks.find((d) => d.id === patron.profile.preferredDrink) || this.drinks[0];
-    staff.aiJob = 'serve';
-    staff.playerCommanded = false;
-    staff.state = 'busy';
-    staff.servingDrinkId = drink.id;
-    staff.setServeLabel('Atendiendo');
-    this.serveClaim.set(patron.profile.id, staff.profile.id);
-    this.game.events.emit('stats-updated', this.getHudState());
-    this.emitStaffRoster();
-
-    const release = () => {
-      this.serveClaim.delete(patron.profile.id);
-      staff.servingDrinkId = null;
-      staff.clearServeLabel();
-      this.releaseStaffTileClaims(staff);
-      staff.clearAiJob();
-      staff.state = 'idle';
-      staff.startBob();
-      if (staff === this.bartender) this.syncBartenderBarDepth();
-    };
-
-    const completeServe = () => {
-      if (!patron.active || this.phase !== 'open') {
-        release();
-        this.game.events.emit('stats-updated', this.getHudState());
-        this.emitStaffRoster();
-        return;
-      }
-      staff.applyServeDrain();
-      const payout = this.computeServePayout(patron, drink);
-      const earned = payout.earned;
-      if (payout.angryWalkout || earned <= 0) {
-        patron.angry = true;
-        patron.showBubble('¡Sin pagar!');
-        patron.refreshStatusLabel();
-      } else if (payout.tipped) {
-        patron.showBubble('¡Propina!');
-      } else {
-        patron.showBubble('¡Gracias!');
-      }
-      this.money += earned;
-      this.nightEarned += earned;
-      if (earned > 0) this.servedCount++;
-      patron.served = true;
-      patron.waiting = false;
-      this.releasePatronSlot(patron);
-      this.releaseTile(patron.grid);
-      staff.clearServeLabel();
-      staff.servingDrinkId = null;
-      release();
-      this.persistLayout();
-      this.game.events.emit('stats-updated', this.getHudState());
-      this.emitStaffRoster();
-      this.time.delayedCall(600, () => this.sendPatronHome(patron));
-    };
-
-    const startPrepare = () => {
-      if (staff === this.bartender) this.syncBartenderBarDepth();
-      staff.stopBob();
-      if (!patron.active || !patron.waiting || patron.served || this.phase !== 'open') {
-        release();
-        this.game.events.emit('stats-updated', this.getHudState());
-        this.emitStaffRoster();
-        return;
-      }
-
-      const label =
-        drink.id === 'cerveza' ? 'Sirviendo cerveza' : 'Sirviendo bebida';
-      staff.setServeLabel(label);
-      this.game.events.emit('stats-updated', this.getHudState());
-      this.emitStaffRoster();
-
-      // Cerveza: fixed 2000ms + Luna/Nova pour anim. Others: skill-scaled serveTime.
-      const skillBonus = staff.skill / 200;
-      const prepareMs =
-        drink.id === 'cerveza'
-          ? drink.serveTimeMs
-          : drink.serveTimeMs * (1 - skillBonus * 0.3);
-
-      let playedBeer = false;
-      if (drink.id === 'cerveza') {
-        playedBeer = staff.playServeBeerAnim();
-      }
-      if (!playedBeer) {
-        // Missing pour sheet: keep idle/bob during prepare
-        staff.startBob();
-      }
-
-      this.time.delayedCall(prepareMs, () => {
-        completeServe();
-      });
-    };
-
-    const goToBarAndServe = () => {
-      if (!this.claimBarSpot(staff)) {
-        // Soft queue: wait nearby until spot frees
-        const wait = this.findStaffWaitNearBar(staff);
-        this.claimStaffTile(staff, wait);
-        const okWait = staff.walkTo(wait, () => {
-          const poll = () => {
-            if (!patron.active || !patron.waiting || patron.served || this.phase !== 'open') {
-              release();
-              this.game.events.emit('stats-updated', this.getHudState());
-              this.emitStaffRoster();
-              return;
-            }
-            if (this.barSpotHolderId && this.barSpotHolderId !== staff.profile.id) {
-              this.time.delayedCall(280, poll);
-              return;
-            }
-            if (!this.claimBarSpot(staff)) {
-              this.time.delayedCall(280, poll);
-              return;
-            }
-            const okBar = staff.walkTo(this.staffSpot, startPrepare);
-            if (!okBar) startPrepare();
-          };
-          poll();
-        });
-        if (!okWait) {
-          this.time.delayedCall(400, goToBarAndServe);
-        }
-        return;
-      }
-      const ok = staff.walkTo(this.staffSpot, startPrepare);
-      if (!ok) startPrepare();
-    };
-
-    goToBarAndServe();
-  }
-
-  private beginAiClean(staff: Bartender): void {
-    // Prefer any dirty piece; fall back to bar polish at staffSpot
-    const dirty = this.findDirtiestFurniture(CLEAN_THRESHOLD);
-    if (dirty) {
-      this.beginAiCleanFurniture(staff, dirty);
-      return;
-    }
-    if (!this.barDef) {
-      staff.aiNextThinkAt = this.time.now + 2000;
-      return;
-    }
-    this.beginAiCleanFurniture(staff, this.barDef);
   }
 
   /** Walk adjacent to furniture, bob 2–3s, restore cleanliness (+bit comfort). */
@@ -3089,7 +2257,7 @@ export class ClubScene extends Phaser.Scene {
           staff.profile.mood = Math.min(100, staff.profile.mood + 2);
           staff.aiNextThinkAt = this.time.now + Phaser.Math.Between(5000, 9000);
           release();
-          this.showStatusFloat(`Limpió ${this.furnitureDisplayName(def)}`);
+          this.showStatusFloat(`Limpió ${this.furnitureDisplayName(def).toLowerCase()}`, this.shopImages.get(def.id));
           this.persistLayout();
           this.game.events.emit('stats-updated', this.getHudState());
           this.emitStaffRoster();
@@ -3103,7 +2271,7 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private beginStaffRest(npc: Bartender, asPlayer: boolean): void {
-    const restGoal = this.findFreeStaffGoal(npc, this.sofaRest);
+    const restGoal = this.findFreeStaffGoal(npc, this.restTile());
     if (!restGoal) {
       if (!asPlayer) npc.aiNextThinkAt = this.time.now + 800;
       return;
@@ -3192,20 +2360,9 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
-  /**
-   * Autonomous staff AI — ONLY when staff has no active player order.
-   * Player taps/commands always cancel AI and take priority.
-   * Priority: 1 Atender → 2 Limpiar (any dirty furniture) → 3 Descansar → 4 Deambular
-   */
   private tickStaffAi(): void {
     if (this.buildMode) return;
     const now = this.time.now;
-    const waiting = this.waitingBarPatrons();
-
-    // First pass: claim serves for waiting patrons (idle non-player staff only)
-    for (const patron of waiting) {
-      this.tryAssignServeAi(patron);
-    }
 
     for (const staff of this.allStaff()) {
       // Player command ALWAYS outranks autonomous AI
@@ -3214,35 +2371,20 @@ export class ClubScene extends Phaser.Scene {
       if (staff.state !== 'idle') continue;
       if (now < staff.aiNextThinkAt) continue;
 
-      const barQueue = this.phase === 'open' ? this.waitingBarPatrons().length : 0;
-      const canServe =
-        staff.profile.energy >= staff.profile.energyDrainPerServe;
-
-      // 1) Atender handled above. While patrons wait, free staff stay ready;
-      //    only rest if too exhausted to serve.
-      if (barQueue > 0) {
-        if (!canServe && staff.profile.energy < AI_TUNABLES.restEnergyThreshold) {
-          this.beginStaffRest(staff, false);
-        } else {
-          staff.aiNextThinkAt = now + 400;
-        }
-        continue;
-      }
-
-      // 2) Limpiar — ANY furniture with cleanliness < threshold
+      // 1) Limpiar — ANY furniture with cleanliness < threshold
       const dirty = this.findDirtiestFurniture(AI_TUNABLES.cleanThreshold);
       if (dirty && !this.cleanClaim.has(dirty.id)) {
         this.beginAiCleanFurniture(staff, dirty);
         continue;
       }
 
-      // 3) Descansar — low energy
+      // 2) Descansar — low energy
       if (staff.profile.energy < AI_TUNABLES.restEnergyThreshold) {
         this.beginStaffRest(staff, false);
         continue;
       }
 
-      // 4) Deambular
+      // 3) Deambular
       if (Math.random() < 0.55) {
         this.beginAiWander(staff);
       } else {
@@ -3264,22 +2406,6 @@ export class ClubScene extends Phaser.Scene {
     if (this.phase !== 'open') return;
     this.nightTimer -= dtSec;
 
-    for (const patron of [...this.patrons]) {
-      if (!patron.active) continue;
-      if (patron.tickPatience(dtSec)) {
-        patron.angry = true;
-        patron.waiting = false;
-        patron.refreshStatusLabel();
-        patron.showBubble('¡Enfadado!');
-        this.serveClaim.delete(patron.profile.id);
-        this.releasePatronSlot(patron);
-        // Walk out with no pay / no tip
-        this.sendPatronHome(patron);
-      } else {
-        patron.refreshStatusLabel();
-      }
-    }
-
     if (Math.floor(this.nightTimer * 2) !== Math.floor((this.nightTimer + dtSec) * 2)) {
       this.game.events.emit('stats-updated', this.getHudState());
     }
@@ -3299,12 +2425,11 @@ export class ClubScene extends Phaser.Scene {
     for (const it of items) this.shopCatalogById.set(it.id, it);
   }
 
-  /** Refresh texture key / size / anchor from the catalog (keeps old saves in sync with the art). */
   private upgradeShopFurnitureFromCatalog(def: FurnitureDef): void {
     const cat = this.shopCatalogById.get(def.catalogId ?? def.type);
     if (!cat) return;
     def.sprite = cat.sprite;
-    def.sprites = { se: cat.sprite };
+    def.sprites = { sw: cat.sprite };
     def.facing = FIXED_FACING;
     def.footprint = [cat.footprint[0], cat.footprint[1]];
     def.displayW = cat.displaySize[0];
@@ -3314,7 +2439,6 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private ensureShopFlags(def: FurnitureDef): void {
-    if (def.type === 'sofa' || def.type === 'bar') return;
     if (!def.catalogId && this.shopCatalogById.has(def.type)) {
       def.catalogId = def.type;
     }
@@ -3341,7 +2465,7 @@ export class ClubScene extends Phaser.Scene {
       catalogId: cat.id,
       fromShop: true,
       facing: FIXED_FACING,
-      sprites: { se: cat.sprite },
+      sprites: { sw: cat.sprite },
       tile: [4, 4],
       footprint: [cat.footprint[0], cat.footprint[1]],
       displayW: cat.displaySize[0],
@@ -3350,7 +2474,6 @@ export class ClubScene extends Phaser.Scene {
       baseVertex: cat.baseVertex,
       price,
       ...stats,
-      ...(cat.id === 'pinball' ? { comfort: 0, maxComfort: 0 } : {}),
     };
   }
 
@@ -3370,47 +2493,17 @@ export class ClubScene extends Phaser.Scene {
 
   private getFurnitureDef(id: string): FurnitureDef | null {
     if (!id) return null;
-    // Instance id is authoritative (shop pieces like silla_1_2)
+    // Instance id is authoritative (the starter sofa is 'sofa', bought ones sofa_1_2, …)
     const byId = this.scenario.furniture.find((f) => f.id === id);
     if (byId) return byId;
-    // Starter drag/select aliases
-    if (id === 'sofa') {
-      return this.sofaDef ?? this.scenario.furniture.find((f) => f.type === 'sofa') ?? null;
-    }
-    if (id === 'bar') {
-      return this.barDef ?? this.scenario.furniture.find((f) => f.type === 'bar') ?? null;
-    }
-    // Legacy / unique catalog-id-as-instance-id saves
-    const byCat = this.scenario.furniture.filter(
-      (f) => f.catalogId === id || f.type === id
-    );
+    // Legacy / unique catalog-id-as-instance-id
+    const byCat = this.scenario.furniture.filter((f) => f.catalogId === id || f.type === id);
     if (byCat.length === 1) return byCat[0];
     return null;
   }
 
   private getFurnitureImage(id: string): Phaser.GameObjects.Image | null {
-    if (id === 'sofa') return this.sofaImage ?? null;
-    if (id === 'bar') return this.barImage ?? null;
     return this.shopImages.get(id) ?? null;
-  }
-
-  /** True when DJ booth idle sheets are loaded (optional subtle loop). */
-  private djBoothIdleReady(): boolean {
-    return (
-      this.textures.exists('dj_booth_front_sheet') && this.anims.exists('dj-booth-idle-front')
-    );
-  }
-
-  /** DJ booth idle loop: front (SE) sheet only, never mirrored. */
-  private applyDjBoothIdleVisual(
-    img: Phaser.GameObjects.Image,
-    size: { w: number; h: number }
-  ): void {
-    if (!(img instanceof Phaser.GameObjects.Sprite) || !this.djBoothIdleReady()) return;
-    img.setTexture('dj_booth_front_sheet', 0);
-    img.setFlipX(false);
-    img.setDisplaySize(size.w, size.h);
-    img.play('dj-booth-idle-front');
   }
 
   private spawnShopFurnitureVisual(def: FurnitureDef): void {
@@ -3418,14 +2511,8 @@ export class ClubScene extends Phaser.Scene {
     this.requireTexture(key);
     const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
     const size = this.furnitureDisplaySize(def.type, def);
-    const useDjIdle = def.catalogId === 'dj_booth' && this.djBoothIdleReady();
-    const img = useDjIdle
-      ? this.add.sprite(pos.x, pos.y, key)
-      : this.add.image(pos.x, pos.y, key);
+    const img = this.add.image(pos.x, pos.y, key);
     img.setDisplaySize(size.w, size.h);
-    if (useDjIdle) {
-      this.applyDjBoothIdleVisual(img, size);
-    }
     img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
     img.setInteractive({ useHandCursor: true });
     const instanceId = def.id;
@@ -3525,14 +2612,11 @@ export class ClubScene extends Phaser.Scene {
       const cat = this.shopCatalogById.get(def.catalogId);
       if (cat) return cat.price;
     }
-    if (def.type === 'sofa' || def.type === 'bar') return STARTER_FURNITURE_PRICE;
     const cat = this.shopCatalogById.get(def.type);
     return cat?.price ?? STARTER_FURNITURE_PRICE;
   }
 
   private furnitureDisplayName(def: FurnitureDef): string {
-    if (def.type === 'sofa') return 'Sofá';
-    if (def.type === 'bar') return 'Barra';
     const cat =
       this.shopCatalogById.get(def.catalogId ?? '') || this.shopCatalogById.get(def.type);
     return cat?.name ?? 'Mueble';
@@ -3551,11 +2635,6 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private writeStatsToDef(def: FurnitureDef, st: FurnitureRuntimeStats): void {
-    // Pinball is not a seat: comfort is fixed at 0/0 (and ignored by venue-quality averages).
-    if (this.isPinballDef(def)) {
-      st.comfort = 0;
-      st.maxComfort = 0;
-    }
     def.durability = st.durability;
     def.comfort = st.comfort;
     def.cleanliness = st.cleanliness;
@@ -3601,8 +2680,7 @@ export class ClubScene extends Phaser.Scene {
       // Dirt snowballs: already-dirty pieces decay faster (stains escalate)
       const boost =
         before < DIRT_VISUAL_THRESHOLD ? AI_TUNABLES.dirtyDecayBoost : before < 75 ? 1.2 : 1;
-      const wearMul = f.catalogId === 'pinball' ? AI_TUNABLES.pinballDecayMul : 1;
-      applyDecay(st, dtSec * boost * wearMul, this.furniturePrice(f));
+      applyDecay(st, dtSec * boost, this.furniturePrice(f));
       this.writeStatsToDef(f, st);
       const crossed =
         (before >= DIRT_VISUAL_THRESHOLD) !== (st.cleanliness >= DIRT_VISUAL_THRESHOLD) ||
@@ -3675,12 +2753,6 @@ export class ClubScene extends Phaser.Scene {
   private furnitureIdAtPointer(p: Phaser.Input.Pointer): string | null {
     type Hit = { id: string; depth: number };
     const hits: Hit[] = [];
-    if (this.isPointerOverGameObject(p, this.barImage) && this.barDef) {
-      hits.push({ id: this.barDef.id, depth: this.barImage!.depth });
-    }
-    if (this.isPointerOverGameObject(p, this.sofaImage) && this.sofaDef) {
-      hits.push({ id: this.sofaDef.id, depth: this.sofaImage!.depth });
-    }
     for (const [id, img] of this.shopImages) {
       if (this.isPointerOverGameObject(p, img)) hits.push({ id, depth: img.depth });
     }
