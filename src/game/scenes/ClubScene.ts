@@ -39,6 +39,15 @@ import {
   getActionCounts,
 } from '../systems/TipActionPicker';
 import {
+  getAffinity,
+  applyAffinityToTipChance,
+  applySatisfactionBonus,
+  pushAffinityDebug,
+  getAffinityDebug as readAffinityDebug,
+  serializeAffinities,
+  loadAffinities,
+} from '../systems/Affinity';
+import {
   FurnitureInspectPayload,
   FurnitureRuntimeStats,
   STARTER_FURNITURE_PRICE,
@@ -149,6 +158,8 @@ interface SavedLayout {
   seeded?: string[];
   /** Per-staff tip ledger (Phase 1). Old saves omit this → zeros. */
   staffTips?: Record<string, { tipsNight?: number; tipsDay?: number; tipsTotal?: number }>;
+  /** Phase 5: hidden patronName→staffId affinity map. Old saves omit → empty. */
+  affinities?: Record<string, Record<string, 'baja' | 'normal' | 'alta'>>;
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -527,6 +538,7 @@ export class ClubScene extends Phaser.Scene {
         this.money = Math.max(0, Math.floor(saved.money));
       }
       loadTips(saved?.staffTips);
+      loadAffinities(saved?.affinities);
       if (!Array.isArray(saved?.furniture)) return;
       // Ensure shop catalog available before restoring purchased pieces
       this.loadShopCatalog();
@@ -625,6 +637,7 @@ export class ClubScene extends Phaser.Scene {
       money: this.money,
       seeded: ['bar'],
       staffTips: serializeTips(),
+      affinities: serializeAffinities(),
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -1687,12 +1700,14 @@ export class ClubScene extends Phaser.Scene {
   }
 
   /** Pay + tip from drink price scaled by venue quality / patience / broken furniture.
-   *  Optional tipAction (Phase 3) adds chance bonus + amount mult; does not alter serve flow. */
+   *  Optional tipAction (Phase 3) adds chance bonus + amount mult; does not alter serve flow.
+   *  Phase 5: hidden client↔staff affinity only modifies chance/amount/satisfaction here. */
   private computeServePayout(
     patron: Patron,
     drink: Drink,
     tipAction: TipAction | null = null,
-    staffMood?: number
+    staffMood?: number,
+    staffId?: string
   ): { earned: number; tipped: boolean; tipAmount: number } {
     const q = this.qualityNearPatron(patron);
     const payMult = lerp(AI_TUNABLES.payQualityMin, AI_TUNABLES.payQualityMax, q);
@@ -1716,6 +1731,17 @@ export class ClubScene extends Phaser.Scene {
     if (tipAction) {
       tipChance += tipAction.tipChanceBonus;
     }
+    // Phase 5: affinity (outcome only — staff never reads this for decisions)
+    let affinityAmountMult = 1;
+    let satisfactionBonus = 0;
+    let affinityLevel: 'baja' | 'normal' | 'alta' = 'normal';
+    if (staffId) {
+      affinityLevel = getAffinity(patron, staffId);
+      const mods = applyAffinityToTipChance(tipChance, affinityLevel);
+      tipChance = mods.tipChance;
+      affinityAmountMult = mods.tipAmountMult;
+      satisfactionBonus = mods.satisfactionBonus;
+    }
     const drinkPay = Math.max(1, Math.round(drink.price * payMult));
     let tipAmount = 0;
     let tipped = false;
@@ -1728,8 +1754,23 @@ export class ClubScene extends Phaser.Scene {
       if (tipAction) {
         amt = Math.max(1, Math.round(amt * tipAction.tipAmountMult));
       }
+      amt = Math.max(1, Math.round(amt * affinityAmountMult));
       tipAmount = amt;
       tipped = true;
+    }
+    // Phase 5: satisfaction → existing nightMood (patienceRemaining)
+    if (satisfactionBonus) {
+      applySatisfactionBonus(patron, satisfactionBonus);
+      patron.refreshStatusLabel();
+    }
+    if (staffId) {
+      pushAffinityDebug({
+        patronName: patron.profile.name,
+        staffId,
+        level: affinityLevel,
+        tipped,
+        amount: tipAmount,
+      });
     }
     return { earned: drinkPay + tipAmount, tipped, tipAmount };
   }
@@ -2367,6 +2408,11 @@ export class ClubScene extends Phaser.Scene {
     return getActionCounts(staffId);
   }
 
+  /** Phase 5 test/debug: recent served affinity outcomes (ring ~50). */
+  getAffinityDebug() {
+    return readAffinityDebug();
+  }
+
     getHudState() {
     return {
       money: this.money,
@@ -2581,7 +2627,13 @@ export class ClubScene extends Phaser.Scene {
         recordActionPerformed(staff.profile.id, tipAction.id);
         staff.setServeLabel(`${tipAction.label} para el cliente`);
       }
-      const payout = this.computeServePayout(patron, drink, tipAction, moodAtServe);
+      const payout = this.computeServePayout(
+        patron,
+        drink,
+        tipAction,
+        moodAtServe,
+        staff.profile.id
+      );
       this.money += payout.earned;
       this.nightEarned += payout.earned;
       this.servedCount++;
