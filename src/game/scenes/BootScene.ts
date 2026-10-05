@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import { PATRON_FRAME_W, PATRON_FRAME_H } from '../entities/Patron';
+import { ensureShopPlaceholders } from '../systems/PlaceholderFurniture';
+import { ShopFurnitureFile } from '../types/Shop';
 
 export class BootScene extends Phaser.Scene {
   private loadFailed = false;
@@ -76,6 +78,22 @@ export class BootScene extends Phaser.Scene {
         return;
       }
       this.statusText.setText('Cargando 100%…');
+      // Procedural placeholders for catalog items without final art.
+      try {
+        const shop = this.cache.json.get('shop_furniture') as ShopFurnitureFile | undefined;
+        if (shop?.items?.length) {
+          ensureShopPlaceholders(
+            this,
+            shop.items.map((it) => ({
+              sprite: it.sprite,
+              name: it.name,
+              placeholderColor: it.placeholderColor,
+            }))
+          );
+        }
+      } catch (e) {
+        console.warn('[BootScene] placeholder furniture', e);
+      }
       this.ensureCharacterAnims();
       this.scene.start('ClubScene');
       this.scene.launch('UIScene');

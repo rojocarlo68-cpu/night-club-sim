@@ -4,6 +4,7 @@ import { StaffRosterEntry, StaffRosterPayload } from '../types/Staff';
 import { ShopCatalogPayload } from '../types/Shop';
 import { FurnitureInspectPayload } from '../systems/FurnitureStats';
 import { listInventory } from '../systems/Inventory';
+import { SNACK_LOCKED_HINT } from '../config/snacks';
 
 interface HudBartender {
   name: string;
@@ -58,6 +59,8 @@ interface HudState {
     staffHours: { name: string; durationLabel: string }[];
     summaryLines: string[];
   };
+  /** Botanas unlock: club has ≥1 functional table. */
+  snacksUnlocked?: boolean;
 }
 
 const STATE_ES: Record<string, string> = {
@@ -86,6 +89,8 @@ function formatMoney(n: number): string {
   if (v < 0) return `-$${Math.abs(v)}`;
   return `$${v}`;
 }
+
+type ShopTabId = 'funcional' | 'ambiente' | 'entretenimiento' | 'identidad';
 
 const PANEL_W = 260;
 const PANEL_H = 400;
@@ -158,7 +163,9 @@ export class UIScene extends Phaser.Scene {
   private shopPanelVisible = false;
   private shopCatalog: ShopCatalogPayload | null = null;
   private shopRows: Phaser.GameObjects.GameObject[] = [];
-  private shopTab: 'muebles' | 'decoracion' = 'muebles';
+  private shopTab: ShopTabId = 'funcional';
+  private shopScroll = 0;
+  private snacksUnlocked = false;
 
   private deleteConfirm!: Phaser.GameObjects.Container;
   private deleteConfirmVisible = false;
@@ -190,8 +197,10 @@ export class UIScene extends Phaser.Scene {
   private hudBg!: Phaser.GameObjects.Rectangle;
   /** Primary press that started on an "outside" surface while a modal was open. */
   private outsidePress: { id: number; downTime: number } | null = null;
-  /** HUD button to reopen the night summary after closing it (Dormir lives there). */
+  /** HUD button to reopen the night summary after closing it. */
   private summaryBtn!: Phaser.GameObjects.Container;
+  /** Persistent Dormir while phase===summary and the summary panel is closed (never trap the player). */
+  private sleepHudBtn!: Phaser.GameObjects.Container;
 
   constructor() {
     super({ key: 'UIScene', active: false });
@@ -255,6 +264,13 @@ export class UIScene extends Phaser.Scene {
       this.reopenSummary();
     });
     this.summaryBtn.setVisible(false);
+    this.sleepHudBtn = this.makeButton(cam.width - 150, 48, 130, 36, 'Dormir', () => {
+      if (this.buildMode) return;
+      if (this.phase !== 'summary') return;
+      this.summary.setVisible(false);
+      this.game.events.emit('cmd-sleep');
+    });
+    this.sleepHudBtn.setVisible(false);
 
     this.buildBtn = this.makeButton(16, cam.height - 48, 110, 36, 'Construir', () => {
       if (this.phase === 'open') return;
@@ -906,10 +922,10 @@ export class UIScene extends Phaser.Scene {
     const showClose = this.phase === 'open';
     this.openBtn.setVisible(showOpen);
     this.closeBtn.setVisible(showClose);
-    // Summary closed (✕ / outside / right-click) -> let the player reopen it to Dormir.
-    if (this.summaryBtn) {
-      this.summaryBtn.setVisible(this.phase === 'summary' && !this.summary.visible);
-    }
+    // Summary closed → persistent Ver resumen + Dormir (player must never be stuck).
+    const summaryIdle = this.phase === 'summary' && !this.summary.visible;
+    if (this.summaryBtn) this.summaryBtn.setVisible(summaryIdle);
+    if (this.sleepHudBtn) this.sleepHudBtn.setVisible(summaryIdle);
   }
 
   private nightLabel(s: HudState): string {
@@ -919,6 +935,7 @@ export class UIScene extends Phaser.Scene {
 
   private onStats = (s: HudState): void => {
     this.phase = s.phase;
+    if (typeof s.snacksUnlocked === 'boolean') this.snacksUnlocked = s.snacksUnlocked;
     if (this.inventoryPanelVisible) this.rebuildInventoryPanel();
     this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
     // Prompt B Phase B2: one visible time source = game clock (hide 75s countdown).
@@ -1037,6 +1054,7 @@ export class UIScene extends Phaser.Scene {
   /** Prompt B Phase B10: after Dormir — closed @ 17:00, optional toast. */
   private onDayStarted = (s: HudState & { toast?: string | null }): void => {
     this.summary.setVisible(false);
+    this.lastSummaryBody = '';
     this.phase = s.phase;
     this.onStats(s);
     this.refreshBuildButtons();
@@ -1247,6 +1265,10 @@ export class UIScene extends Phaser.Scene {
     this.openBtn.setX(w - 150);
     this.closeBtn.setX(w - 150);
     this.summaryBtn.setX(w - 150);
+    if (this.sleepHudBtn) {
+      this.sleepHudBtn.setX(w - 150);
+      this.sleepHudBtn.setY(48);
+    }
     this.buildBtn.setPosition(16, h - 48);
     this.doneBuildBtn.setPosition(16, h - 48);
     this.staffBtn.setPosition(136, h - 48);
@@ -1274,7 +1296,13 @@ export class UIScene extends Phaser.Scene {
 
   private onRestockFailed = (info: { id?: string; reason?: string }): void => {
     if (!this.inventoryPanelVisible) return;
-    this.flashInventoryMsg(info?.reason === 'money' ? 'Sin dinero' : 'No se pudo comprar');
+    const msg =
+      info?.reason === 'money'
+        ? 'Sin dinero'
+        : info?.reason === 'need_table'
+          ? SNACK_LOCKED_HINT
+          : 'No se pudo comprar';
+    this.flashInventoryMsg(msg);
   };
 
   private flashInventoryMsg(msg: string): void {
@@ -1404,7 +1432,10 @@ export class UIScene extends Phaser.Scene {
       this.inventoryFlash.destroy();
       this.inventoryFlash = null;
     }
-    const lines = listInventory();
+    const lines = listInventory({
+      snacksUnlocked: this.snacksUnlocked,
+      snackLockHint: SNACK_LOCKED_HINT,
+    });
     const camW = this.cameras.main.width;
     const camH = this.cameras.main.height;
     // Wide: one row per product. Narrow (phones): row 1 = data, row 2 = [−] price [+] and restock.
@@ -1451,7 +1482,8 @@ export class UIScene extends Phaser.Scene {
       };
       const stockColor = line.stock <= 0 ? '#ff6688' : '#e8d0ff';
       const marginColor = line.margin < 0 ? '#ff6688' : '#3cff9a';
-      mk(cols.name, y + 4, line.name, '#ff9ad5');
+      const nameColor = (line as { kind?: string }).kind === 'snack' ? '#ffcc66' : '#ff9ad5';
+      mk(cols.name, y + 4, line.name, nameColor);
       mk(cols.stock, y + 4, String(line.stock), stockColor);
       mk(cols.sold, y + 4, String(line.soldTonight));
       mk(cols.cost, y + 4, this.fmtMoney(line.supplierCost));
@@ -1478,18 +1510,37 @@ export class UIScene extends Phaser.Scene {
       const plus = this.makeInvBtn(cols.price + btn + priceW, rowY2, btn, btn - 2, '+', () => {
         this.game.events.emit('cmd-set-drink-price', { id: line.id, delta: step });
       }, !atMax);
-      // Restock +5 / +20
+      // Restock +5 / +20 (botanas locked without a table)
+      const snackLocked = !!(line as { locked?: boolean }).locked;
       const b5 = this.makeInvBtn(cols.rest, rowY2, 34, btn - 2, '+5', () => {
+        if (snackLocked) {
+          this.flashInventoryMsg((line as { lockHint?: string }).lockHint || SNACK_LOCKED_HINT);
+          return;
+        }
         this.game.events.emit('cmd-restock-drink', { id: line.id, units: 5 });
-      });
+      }, !snackLocked);
       const b20 = this.makeInvBtn(cols.rest + 38, rowY2, 38, btn - 2, '+20', () => {
+        if (snackLocked) {
+          this.flashInventoryMsg((line as { lockHint?: string }).lockHint || SNACK_LOCKED_HINT);
+          return;
+        }
         this.game.events.emit('cmd-restock-drink', { id: line.id, units: 20 });
-      });
+      }, !snackLocked);
       for (const o of [minus, priceLabel, plus, b5, b20]) {
         this.inventoryPanel.add(o);
         this.inventoryRows.push(o);
       }
-      y += rowH;
+      if (snackLocked) {
+        const lock = this.add
+          .text(cols.rest, rowY2 + (twoRow ? -18 : 28), SNACK_LOCKED_HINT, {
+            fontSize: '10px',
+            color: '#ff8866',
+          })
+          .setOrigin(0, 0);
+        this.inventoryPanel.add(lock);
+        this.inventoryRows.push(lock);
+      }
+      y += rowH + (snackLocked && !twoRow ? 14 : 0);
     }
 
     const hint = this.add
@@ -1709,19 +1760,42 @@ export class UIScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setVisible(false)
       .setDepth(9650);
-    const bg = this.add.rectangle(0, 0, 420, 480, 0x140a22, 0.96);
+    const bg = this.add.rectangle(0, 0, 440, 500, 0x140a22, 0.96);
     bg.setStrokeStyle(2, 0xff3ca0);
     bg.setInteractive();
     const title = this.add
-      .text(0, -218, 'Tienda — Muebles', {
-        fontSize: '20px',
+      .text(0, -228, 'Tienda — Funcional', {
+        fontSize: '18px',
         color: '#ff9ad5',
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
       .setName('shopTitle');
-    const close = this.makeLocalButton(170, -228, 36, 32, '✕', () => this.hideShopPanel());
+    const close = this.makeLocalButton(180, -236, 36, 32, '✕', () => this.hideShopPanel());
     this.shopPanel.add([bg, title, close]);
+  }
+
+  private shopTabTitle(tab: ShopTabId): string {
+    const map: Record<string, string> = {
+      funcional: 'Tienda — Funcional',
+      ambiente: 'Tienda — Ambiente',
+      entretenimiento: 'Tienda — Entretenimiento',
+      identidad: 'Tienda — Identidad',
+    };
+    return map[tab] ?? 'Tienda';
+  }
+
+  private shopItemMatchesTab(it: { category?: string }, tab: ShopTabId): boolean {
+    const cat = (it.category || 'funcional').toLowerCase();
+    if (tab === 'funcional') {
+      return cat === 'funcional' || cat === 'muebles' || cat === 'furniture';
+    }
+    if (tab === 'ambiente') {
+      return cat === 'ambiente' || cat === 'decoracion' || cat === 'decor' || cat === 'decoration';
+    }
+    if (tab === 'entretenimiento') return cat === 'entretenimiento' || cat === 'entertainment';
+    if (tab === 'identidad') return cat === 'identidad' || cat === 'identity';
+    return false;
   }
 
   private createDeleteConfirm(): void {
@@ -1929,7 +2003,7 @@ export class UIScene extends Phaser.Scene {
     title.setText(msg);
     title.setColor('#ff6688');
     this.time.delayedCall(1600, () => {
-      title.setText(this.shopTab === 'muebles' ? 'Tienda — Muebles' : 'Tienda — Decoración');
+      title.setText(this.shopTabTitle(this.shopTab));
       title.setColor('#ff9ad5');
     });
   };
@@ -1944,24 +2018,29 @@ export class UIScene extends Phaser.Scene {
     this.clearShopRows();
     const catalog = this.shopCatalog;
 
-    const tabY = -185;
-    const mkTab = (x: number, label: string, tab: 'muebles' | 'decoracion') => {
-      const active = this.shopTab === tab;
-      const btn = this.makeLocalButton(x, tabY, 120, 30, label, () => {
-        this.shopTab = tab;
+    const tabY = -198;
+    const tabs: Array<{ label: string; tab: ShopTabId; x: number }> = [
+      { label: 'Funcional', tab: 'funcional', x: -165 },
+      { label: 'Ambiente', tab: 'ambiente', x: -55 },
+      { label: 'Ocio', tab: 'entretenimiento', x: 50 },
+      { label: 'Identidad', tab: 'identidad', x: 155 },
+    ];
+    for (const tb of tabs) {
+      const active = this.shopTab === tb.tab;
+      const btn = this.makeLocalButton(tb.x - 45, tabY, 90, 26, tb.label, () => {
+        this.shopTab = tb.tab;
+        this.shopScroll = 0;
         const title = this.shopPanel.getByName('shopTitle') as Phaser.GameObjects.Text | null;
         if (title) {
-          title.setText(tab === 'muebles' ? 'Tienda — Muebles' : 'Tienda — Decoración');
+          title.setText(this.shopTabTitle(tb.tab));
           title.setColor('#ff9ad5');
         }
         this.rebuildShopPanel();
       });
-      btn.setAlpha(active ? 1 : 0.55);
+      btn.setAlpha(active ? 1 : 0.5);
       this.shopPanel.add(btn);
       this.shopRows.push(btn);
-    };
-    mkTab(-130, 'Muebles', 'muebles');
-    mkTab(10, 'Decoración', 'decoracion');
+    }
 
     if (!catalog) {
       const wait = this.add
@@ -1973,7 +2052,7 @@ export class UIScene extends Phaser.Scene {
     }
 
     const moneyHint = this.add
-      .text(0, -148, `Dinero: ${formatMoney(catalog.money)}`, {
+      .text(0, -165, `Dinero: ${formatMoney(catalog.money)}`, {
         fontSize: '13px',
         color: '#ffe066',
       })
@@ -1981,16 +2060,15 @@ export class UIScene extends Phaser.Scene {
     this.shopPanel.add(moneyHint);
     this.shopRows.push(moneyHint);
 
-    const items = catalog.items.filter((it) => {
-      const cat = (it.category || 'muebles').toLowerCase();
-      if (this.shopTab === 'muebles') return cat === 'muebles' || cat === 'furniture';
-      return cat === 'decoracion' || cat === 'decor' || cat === 'decoration';
-    });
+    const items = catalog.items.filter((it) => this.shopItemMatchesTab(it, this.shopTab));
+    const pageSize = 3;
+    const maxScroll = Math.max(0, items.length - pageSize);
+    if (this.shopScroll > maxScroll) this.shopScroll = maxScroll;
+    if (this.shopScroll < 0) this.shopScroll = 0;
 
-    let y = -120;
     if (!items.length) {
       const empty = this.add
-        .text(0, y + 40, 'Nada en esta sección todavía.', {
+        .text(0, -40, 'Nada en esta sección todavía.', {
           fontSize: '13px',
           color: '#a080c0',
           align: 'center',
@@ -2001,9 +2079,35 @@ export class UIScene extends Phaser.Scene {
       return;
     }
 
-    for (const it of items) {
+    // Scroll controls
+    if (items.length > pageSize) {
+      const up = this.makeLocalButton(-190, -130, 36, 28, '▲', () => {
+        this.shopScroll = Math.max(0, this.shopScroll - 1);
+        this.rebuildShopPanel();
+      });
+      up.setAlpha(this.shopScroll > 0 ? 1 : 0.35);
+      const down = this.makeLocalButton(-190, 200, 36, 28, '▼', () => {
+        this.shopScroll = Math.min(maxScroll, this.shopScroll + 1);
+        this.rebuildShopPanel();
+      });
+      down.setAlpha(this.shopScroll < maxScroll ? 1 : 0.35);
+      const page = this.add
+        .text(-190, 40, `${this.shopScroll + 1}/${maxScroll + 1}`, {
+          fontSize: '11px',
+          color: '#a080c0',
+        })
+        .setOrigin(0.5);
+      this.shopPanel.add(up);
+      this.shopPanel.add(down);
+      this.shopPanel.add(page);
+      this.shopRows.push(up, down, page);
+    }
+
+    let y = -140;
+    const slice = items.slice(this.shopScroll, this.shopScroll + pageSize);
+    for (const it of slice) {
       y = this.addShopItemRow(it, y, catalog.money);
-      y += 10;
+      y += 8;
     }
   }
 

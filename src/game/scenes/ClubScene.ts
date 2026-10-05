@@ -16,9 +16,30 @@ import { ShopCatalogPayload, ShopFurnitureFile, ShopFurnitureItem } from '../typ
 import {
   AI_TUNABLES,
   SEATABLE_TYPES,
+  TABLE_TYPES,
   STATUS_ES,
   lerp,
 } from '../systems/AiTunables';
+import {
+  BEER_TAP_BONUS,
+  BEER_TAP_CATALOG_ID,
+  BEER_TAP_DRINK_ID,
+  prefersBeerTap,
+  rollBeerServicePref,
+} from '../config/beerTap';
+import {
+  SNACK_EXPERIENCE,
+  SNACK_LOCKED_HINT,
+  TABLE_CATALOG_IDS,
+  getSnackProduct,
+  isTableCatalogId,
+} from '../config/snacks';
+import {
+  getSupplierCost as inventorySupplierCost,
+  isSnackId,
+  productExists as inventoryProductExists,
+} from '../systems/Inventory';
+import { ensureShopPlaceholders } from '../systems/PlaceholderFurniture';
 import {
   getTips,
   loadTips,
@@ -172,6 +193,7 @@ import {
   getDrinkPrefs,
   serializeDrinkPrefs,
   loadDrinkPrefs,
+  prefFor,
 } from '../systems/DrinkPreferences';
 import {
   evaluateDrinkPrice,
@@ -1923,6 +1945,9 @@ export class ClubScene extends Phaser.Scene {
     getDrinkPrefs(patron);
     // Prompt A Phase 9: roll/persist action tastes (stable per profile.name).
     getActionTastes(patron);
+    patron.beerServicePref = rollBeerServicePref();
+    patron.servedAtBeerTap = false;
+    patron.ateSnack = false;
     this.chooseMainPatronGoal(patron);
   }
 
@@ -2088,10 +2113,14 @@ export class ClubScene extends Phaser.Scene {
   }
 
   restockDrink(id: string, units: number): boolean {
-    const prod = getDrinkProduct(id);
     const n = Math.max(0, Math.floor(units));
-    if (!prod || n <= 0) return false;
-    const cost = Math.max(1, Math.round(prod.supplierCost * n));
+    if (!inventoryProductExists(id) || n <= 0) return false;
+    if (isSnackId(id) && !this.hasFunctionalTable()) {
+      this.game.events.emit('restock-failed', { id, reason: 'need_table' });
+      return false;
+    }
+    const supplier = inventorySupplierCost(id);
+    const cost = Math.max(1, Math.round(supplier * n));
     if (this.money < cost) return false;
     this.deductClubMoney(cost);
     inventoryAddStock(id, n);
@@ -2133,6 +2162,11 @@ export class ClubScene extends Phaser.Scene {
 
   private chooseMainPatronGoal(patron: Patron): void {
     if (!patron.active || this.phase !== 'open') return;
+    // Beer + functional tap → specialized service point; other drinks → bar.
+    if (this.shouldRoutePatronToBeerTap(patron)) {
+      this.sendPatronToBeerTap(patron);
+      return;
+    }
     // With a working bar everyone goes to order first (then sits or wanders); without one they
     // sit on a sofa (placeholder income) or wander.
     if (this.barUsable()) {
@@ -2171,7 +2205,11 @@ export class ClubScene extends Phaser.Scene {
       if (this.qualityNearPatron(patron) < 0.4) patron.showBubble('¡Qué sucio!');
       // Prompt A Phase 2: perceive the seat actually used (comfort + cleanliness), once.
       this.perceiveUsedFurniture(patron, seat.furnitureId, true);
-      const sitMs = Phaser.Math.Between(AI_TUNABLES.sitDurationMinMs, AI_TUNABLES.sitDurationMaxMs);
+      let sitMs = Phaser.Math.Between(AI_TUNABLES.sitDurationMinMs, AI_TUNABLES.sitDurationMaxMs);
+      const seatDef = this.scenario.furniture.find((f) => f.id === seat.furnitureId);
+      if (seatDef && this.isTableFurniture(seatDef)) {
+        sitMs = this.tryTableSnack(patron, sitMs);
+      }
       this.time.delayedCall(sitMs, () => {
         if (!patron.active || this.phase !== 'open' || !patron.seated) return;
         patron.seated = false;
@@ -2185,6 +2223,37 @@ export class ClubScene extends Phaser.Scene {
       this.releasePatronSlot(patron);
       this.sendPatronWandering(patron);
     }
+  }
+
+  /**
+   * Table snack utility: optional botanas while seated.
+   * Uses existing botanas inventory; slight sat + longer stay. Returns adjusted sitMs.
+   */
+  private tryTableSnack(patron: Patron, sitMs: number): number {
+    if (patron.ateSnack) return sitMs;
+    const snack = getSnackProduct('botanas');
+    if (!snack) return sitMs;
+    if (!inventoryCanSell('botanas')) return sitMs;
+    if (Math.random() >= snack.orderChance) return sitMs;
+    const price = inventoryGetPrice('botanas');
+    if (!inventoryRecordSale('botanas')) return sitMs;
+    this.money += price;
+    this.nightEarned += price;
+    patron.ateSnack = true;
+    applyPerceivedExperience(
+      patron,
+      `snack:botanas:${patron.profile.id}`,
+      SNACK_EXPERIENCE.satDelta,
+      'comfortSens',
+      'Botanas en la mesa'
+    );
+    patron.showBubble('Botanas');
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.game.events.emit('inventory-updated');
+    const boosted = Math.round(
+      sitMs * SNACK_EXPERIENCE.sitDurationMult + SNACK_EXPERIENCE.sitDurationBonusMs
+    );
+    return Math.max(sitMs, boosted);
   }
 
   /** Fallback income when no bar exists: a patron pays when they finish sitting on a sofa. */
@@ -2303,6 +2372,148 @@ export class ClubScene extends Phaser.Scene {
     const spawn = { col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] };
     return this.pathfinder.findPath(spawn, spots.staffSpot).length > 0;
   }
+
+  /** First functional beer tap (catalog beer_tap, not destroyed). */
+  private activeBeerTap(): FurnitureDef | null {
+    for (const f of this.scenario.furniture) {
+      const id = (f.catalogId || f.type || '').toLowerCase();
+      if (id !== BEER_TAP_CATALOG_ID && f.type !== 'beer_tap') continue;
+      this.ensureFurnitureStats(f);
+      const st = this.statsOf(f);
+      if (conditionFromDurability(st.durability, st.maxDurability) === 'Inservible' || st.durability <= 0) {
+        continue;
+      }
+      return f;
+    }
+    return null;
+  }
+
+  /** Service tiles for the beer tap (front row = order / pour). */
+  private beerTapSpots(): {
+    tap: FurnitureDef;
+    interact: { col: number; row: number } | null;
+    staffSpot: { col: number; row: number };
+  } | null {
+    const tap = this.activeBeerTap();
+    if (!tap || !this.pathfinder) return null;
+    const front = this.frontTiles(tap).filter((t) => this.pathfinder.isWalkable(t.col, t.row));
+    if (front.length >= 2) return { tap, interact: front[0], staffSpot: front[1] };
+    if (front.length === 1) return { tap, interact: null, staffSpot: front[0] };
+    const fw = Math.max(1, tap.footprint[0]);
+    const fh = Math.max(1, tap.footprint[1]);
+    for (let c = tap.tile[0] - 1; c <= tap.tile[0] + fw; c++) {
+      for (let r = tap.tile[1] - 1; r <= tap.tile[1] + fh; r++) {
+        const inside =
+          c >= tap.tile[0] && c < tap.tile[0] + fw && r >= tap.tile[1] && r < tap.tile[1] + fh;
+        if (!inside && this.pathfinder.isWalkable(c, r)) {
+          return { tap, interact: null, staffSpot: { col: c, row: r } };
+        }
+      }
+    }
+    return null;
+  }
+
+  private beerTapUsable(): boolean {
+    const spots = this.beerTapSpots();
+    if (!spots) return false;
+    const spawn = { col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] };
+    return this.pathfinder.findPath(spawn, spots.staffSpot).length > 0;
+  }
+
+  /** Patron wants cerveza strongly enough to use beer service routing. */
+  private patronWantsBeer(patron: Patron): boolean {
+    const pref = patron.profile.preferredDrink;
+    if (pref === BEER_TAP_DRINK_ID) return true;
+    try {
+      return prefFor(patron, BEER_TAP_DRINK_ID) >= 0.78;
+    } catch {
+      return false;
+    }
+  }
+
+  private shouldRoutePatronToBeerTap(patron: Patron): boolean {
+    if (!this.beerTapUsable()) return false;
+    if (!this.patronWantsBeer(patron)) return false;
+    if (!inventoryCanSell(BEER_TAP_DRINK_ID) && this.barUsable()) {
+      // No cerveza stock — fall through to bar for alternatives.
+      return false;
+    }
+    return prefersBeerTap(patron.beerServicePref);
+  }
+
+  private listBeerTapQueueSlots(exceptPatronId?: string): Array<{ col: number; row: number }> {
+    const spots = this.beerTapSpots();
+    if (!spots) return [];
+    const centre = spots.interact ?? spots.staffSpot;
+    const cands: Array<{ col: number; row: number; d: number }> = [];
+    for (let dc = -3; dc <= 3; dc++) {
+      for (let dr = -3; dr <= 3; dr++) {
+        const col = centre.col + dc;
+        const row = centre.row + dr;
+        if (col === spots.staffSpot.col && row === spots.staffSpot.row) continue;
+        if (!this.isPatronSlotFree({ col, row }, exceptPatronId)) continue;
+        if (this.allStaff().some((st) => st.grid.col === col && st.grid.row === row)) continue;
+        if (this.staffTileClaims.has(this.tileKey({ col, row }))) continue;
+        const toCentre = Math.abs(dc) + Math.abs(dr);
+        cands.push({ col, row, d: toCentre + (row < centre.row ? 3 : 0) });
+      }
+    }
+    cands.sort((a, b) => a.d - b.d);
+    return cands.slice(0, AI_TUNABLES.barQueueMaxSlots).map((c) => ({ col: c.col, row: c.row }));
+  }
+
+  /** Walk to the beer tap queue and wait for cerveza service. */
+  private sendPatronToBeerTap(patron: Patron): void {
+    const slots = this.listBeerTapQueueSlots(patron.profile.id);
+    const spot = slots[0];
+    if (!spot || !this.claimPatronSlot(patron, spot)) {
+      // Tap packed — try the bar if usable, else wander.
+      if (this.barUsable()) {
+        this.sendPatronToBar(patron);
+      } else {
+        this.sendPatronWandering(patron);
+      }
+      return;
+    }
+    patron.goal = 'beer_tap';
+    const ok = patron.walkTo(spot, () => {
+      if (!patron.active || this.phase !== 'open') return;
+      patron.waiting = true;
+      patron.seated = false;
+      const tap = this.beerTapSpots()?.tap;
+      if (tap) patron.faceToward({ col: spot.col, row: spot.row - 1 });
+      const used = this.activeBeerTap();
+      if (used) this.perceiveUsedFurniture(patron, used.id, false);
+      patron.refreshStatusLabel();
+      patron.showBubble(this.drinkDisplayName(BEER_TAP_DRINK_ID));
+      this.tryAssignServeAi(patron);
+    });
+    if (!ok) {
+      this.releasePatronSlot(patron);
+      if (this.barUsable()) this.sendPatronToBar(patron);
+      else this.sendPatronWandering(patron);
+    }
+  }
+
+  private hasFunctionalTable(): boolean {
+    for (const f of this.scenario.furniture) {
+      const id = (f.catalogId || f.type || '').toLowerCase();
+      if (!TABLE_TYPES.has(id) && !TABLE_CATALOG_IDS.has(id) && !isTableCatalogId(id)) continue;
+      this.ensureFurnitureStats(f);
+      const st = this.statsOf(f);
+      if (conditionFromDurability(st.durability, st.maxDurability) === 'Inservible' || st.durability <= 0) {
+        continue;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  private isTableFurniture(def: FurnitureDef): boolean {
+    const id = (def.catalogId || def.type || '').toLowerCase();
+    return TABLE_TYPES.has(id) || TABLE_CATALOG_IDS.has(id) || isTableCatalogId(id);
+  }
+
 
   /** Free tiles where patrons wait for service: the order tile first, then the closest ones to it. */
   private listBarQueueSlots(exceptPatronId?: string): Array<{ col: number; row: number }> {
@@ -2424,6 +2635,31 @@ export class ClubScene extends Phaser.Scene {
     const chanceBeforeSat = tipChance;
     tipChance = applySatisfactionToTipChance(tipChance, satMods);
 
+    // Beer tap specialization: subtle sat + tip bump when cerveza served at the grifo.
+    let tapSatApplied = 0;
+    if (patron.servedAtBeerTap && drink.id === BEER_TAP_DRINK_ID) {
+      tipChance += BEER_TAP_BONUS.tipChanceBonus;
+      const beerPref =
+        patron.profile.preferredDrink === BEER_TAP_DRINK_ID ||
+        (() => {
+          try {
+            return prefFor(patron, BEER_TAP_DRINK_ID) >= 0.55;
+          } catch {
+            return false;
+          }
+        })();
+      const satDelta = beerPref ? BEER_TAP_BONUS.satDeltaPreferBeer : BEER_TAP_BONUS.satDeltaOther;
+      const applied = applyPerceivedExperience(
+        patron,
+        `tap_beer:${patron.profile.id}`,
+        satDelta,
+        'comfortSens',
+        'Cerveza de grifo'
+      );
+      tapSatApplied = applied ?? 0;
+      void tapSatApplied;
+    }
+
     const drinkPay = Math.max(1, Math.round(drink.price * payMult));
     let tipAmount = 0;
     let tipped = false;
@@ -2437,8 +2673,11 @@ export class ClubScene extends Phaser.Scene {
       if (tipAction) {
         amt = Math.max(1, Math.round(amt * tipAction.tipAmountMult));
       }
-      amt = Math.max(1, Math.round(amt * affinityAmountMult));
-      // Phase 7: sat/generosity amount scale + ±jitter (after existing mults).
+            amt = Math.max(1, Math.round(amt * affinityAmountMult));
+      if (patron.servedAtBeerTap && drink.id === BEER_TAP_DRINK_ID) {
+        amt = Math.max(1, Math.round(amt * BEER_TAP_BONUS.tipAmountMult));
+      }
+      // Phase 7: sat/generosity amount scale + tiny jitter (after existing mults).
       const amtScale = satisfactionAmountScale(satMods);
       satAmountMultApplied = Math.round(amtScale * 1000) / 1000;
       amt = Math.max(1, Math.round(amt * amtScale));
@@ -3439,6 +3678,7 @@ export class ClubScene extends Phaser.Scene {
     if (!id || units <= 0) return;
     const ok = this.restockDrink(id, units);
     if (!ok) {
+      if (isSnackId(id) && !this.hasFunctionalTable()) return;
       this.game.events.emit('restock-failed', { id, reason: 'money' });
     }
   };
@@ -3704,6 +3944,7 @@ export class ClubScene extends Phaser.Scene {
       nightEarned: this.nightEarned,
       servedCount: this.servedCount,
       buildMode: this.buildMode,
+      snacksUnlocked: this.hasFunctionalTable(),
     };
   }
 
@@ -3742,6 +3983,7 @@ export class ClubScene extends Phaser.Scene {
       if (sid === id) this.staffTileClaims.delete(k);
     }
     if (this.barSpotHolderId === id) this.barSpotHolderId = null;
+    if (this.tapSpotHolderId === id) this.tapSpotHolderId = null;
   }
 
   /** True if another staff occupies or has reserved this tile. */
@@ -3793,10 +4035,15 @@ export class ClubScene extends Phaser.Scene {
     return null;
   }
 
-  /** Waiting at the bar with nobody on their order yet. */
+  /** Waiting at the bar or beer tap with nobody on their order yet. */
   private waitingBarPatrons(): Patron[] {
     return this.patrons.filter(
-      (p) => p.active && p.waiting && !p.served && p.goal === 'bar' && !this.serveClaim.has(p.profile.id)
+      (p) =>
+        p.active &&
+        p.waiting &&
+        !p.served &&
+        (p.goal === 'bar' || p.goal === 'beer_tap') &&
+        !this.serveClaim.has(p.profile.id)
     );
   }
 
@@ -3804,6 +4051,8 @@ export class ClubScene extends Phaser.Scene {
   private serveClaim = new Map<string, string>();
   /** Only one staff member pours at the bar's staff tile at a time. */
   private barSpotHolderId: string | null = null;
+  /** Only one staff member pours at the beer tap at a time. */
+  private tapSpotHolderId: string | null = null;
 
   private claimBarSpot(staff: Bartender, spot: { col: number; row: number }): boolean {
     if (this.barSpotHolderId && this.barSpotHolderId !== staff.profile.id) return false;
@@ -3830,7 +4079,13 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private tryAssignServeAi(patron: Patron): boolean {
-    if (!patron.active || !patron.waiting || patron.served || patron.goal !== 'bar') return false;
+    if (
+      !patron.active ||
+      !patron.waiting ||
+      patron.served ||
+      (patron.goal !== 'bar' && patron.goal !== 'beer_tap')
+    )
+      return false;
     if (this.serveClaim.has(patron.profile.id)) return false;
     if (this.buildMode || this.phase !== 'open') return false;
     const staff = this.allStaff().find(
@@ -3844,37 +4099,70 @@ export class ClubScene extends Phaser.Scene {
     return this.beginAiServe(staff, patron);
   }
 
-  /** Staff walks to the bar, pours the patron's drink ('Sirviendo …'), the patron pays and moves on. */
+  /** Staff walks to the bar or beer tap, pours the patron's drink ('Sirviendo …'), the patron pays and moves on. */
   private beginAiServe(staff: Bartender, patron: Patron): boolean {
-    const spots = this.barSpots();
-    if (!spots) return false;
+    const atTap = patron.goal === 'beer_tap';
+    const barSpots = atTap ? null : this.barSpots();
+    const tapSpots = atTap ? this.beerTapSpots() : null;
+    if (atTap && !tapSpots) return false;
+    if (!atTap && !barSpots) return false;
 
-    // Prompt A Phase 4+6: stock + price/availability perception → buy / alt / skip.
-    const pick = this.pickServeDrink(patron);
-    if (!pick.ok) {
-      // Existing leave path (no new navigation). Keep 'Se acabó todo' for empty stock.
-      patron.wantedDrinkId = patron.profile.preferredDrink || null;
-      patron.servedDrinkId = null;
-      patron.wasOutOfStock = pick.reason === 'empty' || pick.reason === 'oos_skip';
-      // Prompt A Phase 10: count no-purchase leaves for nightly stats.
-      noteLeaveWithoutBuy(pick.reason);
-      if (pick.reason === 'empty') patron.showBubble('Se acabó todo');
-      else if (pick.reason === 'price') patron.showBubble('Muy caro');
-      else patron.showBubble('Sin mi bebida');
-      patron.waiting = false;
-      patron.served = false;
-      this.releasePatronSlot(patron);
-      this.releaseTile(patron.grid);
-      patron.refreshStatusLabel();
-      this.sendPatronHome(patron);
-      return false;
+    let drink: Drink;
+    let wantedId: string;
+    let substituted = false;
+
+    if (atTap) {
+      // Tap only serves cerveza from the existing beer inventory.
+      wantedId = BEER_TAP_DRINK_ID;
+      patron.wantedDrinkId = wantedId;
+      if (!inventoryCanSell(BEER_TAP_DRINK_ID)) {
+        patron.servedDrinkId = null;
+        patron.wasOutOfStock = true;
+        noteLeaveWithoutBuy('empty');
+        patron.showBubble('Se acabó la cerveza');
+        patron.waiting = false;
+        patron.served = false;
+        this.releasePatronSlot(patron);
+        this.releaseTile(patron.grid);
+        patron.refreshStatusLabel();
+        this.sendPatronHome(patron);
+        return false;
+      }
+      const resolved = this.resolveServeDrink(BEER_TAP_DRINK_ID);
+      if (!resolved) return false;
+      drink = resolved;
+      patron.servedDrinkId = drink.id;
+      patron.wasOutOfStock = false;
+      patron.servedAtBeerTap = true;
+    } else {
+      // Prompt A Phase 4+6: stock + price/availability perception → buy / alt / skip.
+      const pick = this.pickServeDrink(patron);
+      if (!pick.ok) {
+        patron.wantedDrinkId = patron.profile.preferredDrink || null;
+        patron.servedDrinkId = null;
+        patron.wasOutOfStock = pick.reason === 'empty' || pick.reason === 'oos_skip';
+        noteLeaveWithoutBuy(pick.reason);
+        if (pick.reason === 'empty') patron.showBubble('Se acabó todo');
+        else if (pick.reason === 'price') patron.showBubble('Muy caro');
+        else patron.showBubble('Sin mi bebida');
+        patron.waiting = false;
+        patron.served = false;
+        this.releasePatronSlot(patron);
+        this.releaseTile(patron.grid);
+        patron.refreshStatusLabel();
+        this.sendPatronHome(patron);
+        return false;
+      }
+      drink = pick.drink;
+      wantedId = pick.wantedId;
+      substituted = pick.substituted;
+      patron.wantedDrinkId = wantedId;
+      patron.servedDrinkId = drink.id;
+      patron.wasOutOfStock = substituted;
+      patron.servedAtBeerTap = false;
     }
-    const drink = pick.drink;
-    patron.wantedDrinkId = pick.wantedId;
-    patron.servedDrinkId = drink.id;
-    patron.wasOutOfStock = pick.substituted;
 
-    const spot = spots.staffSpot;
+    const spot = atTap ? tapSpots!.staffSpot : barSpots!.staffSpot;
     staff.aiJob = 'serve';
     staff.playerCommanded = false;
     staff.state = 'busy';
@@ -3899,7 +4187,11 @@ export class ClubScene extends Phaser.Scene {
       this.emitStaffRoster();
     };
     const patronGone = () =>
-      !patron.active || this.phase !== 'open' || !patron.waiting || patron.served || patron.goal !== 'bar';
+      !patron.active ||
+      this.phase !== 'open' ||
+      !patron.waiting ||
+      patron.served ||
+      (patron.goal !== 'bar' && patron.goal !== 'beer_tap');
 
     const abortEmptyStock = () => {
       patron.wasOutOfStock = true;
@@ -4007,14 +4299,24 @@ export class ClubScene extends Phaser.Scene {
       this.time.delayedCall(prepareMs, completeServe);
     };
 
+    const claimServeSpot = (): boolean => {
+      if (atTap) {
+        if (this.tapSpotHolderId && this.tapSpotHolderId !== staff.profile.id) return false;
+        this.tapSpotHolderId = staff.profile.id;
+        this.claimStaffTile(staff, spot);
+        return true;
+      }
+      return this.claimBarSpot(staff, spot);
+    };
+
     const goToBarAndServe = () => {
       if (!mine()) return;
       if (patronGone()) {
         release();
         return;
       }
-      if (!this.claimBarSpot(staff, spot)) {
-        // Someone else is pouring: wait beside the bar until the spot frees up
+      if (!claimServeSpot()) {
+        // Someone else is pouring: wait beside the service point until the spot frees up
         const wait = this.findStaffWaitNearBar(staff, spot);
         this.claimStaffTile(staff, wait);
         const poll = () => {
@@ -4023,7 +4325,7 @@ export class ClubScene extends Phaser.Scene {
             release();
             return;
           }
-          if (!this.claimBarSpot(staff, spot)) {
+          if (!claimServeSpot()) {
             this.time.delayedCall(280, poll);
             return;
           }
@@ -4560,7 +4862,12 @@ export class ClubScene extends Phaser.Scene {
     for (const patron of [...this.patrons]) {
       if (!patron.active) continue;
       // The bar broke / was removed while they queued: give up on the drink
-      if (patron.goal === 'bar' && patron.waiting && !patron.served && !this.activeBar()) {
+      if (
+        (patron.goal === 'bar' || patron.goal === 'beer_tap') &&
+        patron.waiting &&
+        !patron.served &&
+        (patron.goal === 'beer_tap' ? !this.activeBeerTap() : !this.activeBar())
+      ) {
         this.serveClaim.delete(patron.profile.id);
         patron.waiting = false;
         this.releasePatronSlot(patron);
@@ -4591,6 +4898,19 @@ export class ClubScene extends Phaser.Scene {
     this.shopCatalog = items;
     this.shopCatalogById.clear();
     for (const it of items) this.shopCatalogById.set(it.id, it);
+    // Placeholders for catalog entries without final art (safe if BootScene already made them).
+    try {
+      ensureShopPlaceholders(
+        this,
+        items.map((it) => ({
+          sprite: it.sprite,
+          name: it.name,
+          placeholderColor: it.placeholderColor,
+        }))
+      );
+    } catch {
+      /* ignore */
+    }
   }
 
   private upgradeShopFurnitureFromCatalog(def: FurnitureDef): void {

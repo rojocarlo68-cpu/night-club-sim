@@ -17,7 +17,7 @@ export interface PatronData {
   traits?: string[];
 }
 
-export type PatronGoal = 'wander' | 'sofa' | 'bar' | 'leave';
+export type PatronGoal = 'wander' | 'sofa' | 'bar' | 'beer_tap' | 'leave';
 
 /** Male client walk/idle sheets: 112×192 frames, feet near bottom. */
 export const PATRON_FRAME_W = 112;
@@ -83,6 +83,12 @@ export class Patron extends Character {
   servedDrinkId: string | null = null;
   /** Prompt A Phase 4: preferred (or all) drinks were out of stock. */
   wasOutOfStock = false;
+  /** Beer service preference hook: tap / bar / indifferent. */
+  beerServicePref: 'tap' | 'bar' | 'indifferent' = 'indifferent';
+  /** True when cerveza was served at the beer tap this visit. */
+  servedAtBeerTap = false;
+  /** True when this visit consumed botanas at a table. */
+  ateSnack = false;
   selected = false;
   label?: Phaser.GameObjects.Text;
   /** Persistent Spanish status (Esperando, Impaciente, Sentado, …). */

@@ -53,7 +53,17 @@ export const AI_TUNABLES = {
 } as const;
 
 /** Furniture types patrons can sit at (one claimed tile per seat). */
-export const SEATABLE_TYPES = new Set(['sofa']);
+export const SEATABLE_TYPES = new Set([
+  'sofa',
+  'sofa_vip',
+  'mesa_pequena',
+  'mesa_grande',
+  'mesa_vip',
+  'taburete',
+]);
+
+/** Table types that unlock botanas (must match snacks.TABLE_CATALOG_IDS). */
+export const TABLE_TYPES = new Set(['mesa_pequena', 'mesa_grande', 'mesa_vip']);
 
 /** Spanish floating / panel status keys → label */
 export const STATUS_ES: Record<string, string> = {

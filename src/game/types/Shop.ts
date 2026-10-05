@@ -1,12 +1,33 @@
 /** Catalog entry for Construir furniture/decor shop (data-driven). Every piece has ONE fixed
  *  orientation (no rotation, Ultima Online style): `sprite` is its only art. */
 
+export type ShopCategory =
+  | 'funcional'
+  | 'ambiente'
+  | 'entretenimiento'
+  | 'identidad'
+  /** Legacy tabs — mapped to funcional / ambiente in UI. */
+  | 'muebles'
+  | 'decoracion'
+  | string;
+
+export type ShopFunctionTag =
+  | 'seating'
+  | 'service_bar'
+  | 'service_beer'
+  | 'service_snack_future'
+  | 'service_aux_future'
+  | 'decor'
+  | 'entertainment_future'
+  | 'identity'
+  | string;
+
 export interface ShopFurnitureItem {
   id: string;
   name: string;
   price: number;
-  /** UI section: muebles | decoracion */
-  category: 'muebles' | 'decoracion' | string;
+  /** UI section: funcional | ambiente | entretenimiento | identidad (legacy muebles/decoracion OK). */
+  category: ShopCategory;
   /** Phaser texture key (default / shop thumb) */
   sprite: string;
   spriteFile?: string;
@@ -20,6 +41,16 @@ export interface ShopFurnitureItem {
    */
   baseVertex?: [number, number];
   blurb?: string;
+  /** Gameplay role tag (seating, service_beer, decor, …). */
+  function?: ShopFunctionTag;
+  /** Optional comfort hint for seating (feeds price/stats; VIP higher). */
+  comfortHint?: number;
+  /** Purely decorative — no automatic +% demand. */
+  decorative?: boolean;
+  /** Unlock requirement catalog ids (future). */
+  requires?: string[];
+  /** Hex color for procedural placeholder when sprite art is missing. */
+  placeholderColor?: number;
 }
 
 export interface ShopFurnitureFile {
