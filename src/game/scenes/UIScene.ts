@@ -1012,6 +1012,41 @@ export class UIScene extends Phaser.Scene {
     return Number.isInteger(r) ? `$${r}` : `$${r.toFixed(1)}`;
   }
 
+  /** Compact inventory button; greys out when disabled (price min/max). */
+  private makeInvBtn(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    label: string,
+    cb: () => void,
+    enabled = true
+  ): Phaser.GameObjects.Container {
+    const c = this.add.container(x, y);
+    const fill = enabled ? 0xb43282 : 0x3a2a44;
+    const stroke = enabled ? 0xff7ac8 : 0x5a4a64;
+    const bg = this.add.rectangle(0, 0, w, h, fill, 1).setOrigin(0);
+    bg.setStrokeStyle(1, stroke);
+    const t = this.add
+      .text(w / 2, h / 2, label, {
+        fontSize: h <= 22 ? '12px' : '13px',
+        color: enabled ? '#ffffff' : '#887898',
+        fontStyle: 'bold',
+      })
+      .setOrigin(0.5);
+    if (enabled) {
+      bg.setInteractive({ useHandCursor: true });
+      bg.on('pointerover', () => bg.setFillStyle(0xd44a9a));
+      bg.on('pointerout', () => bg.setFillStyle(0xb43282));
+      bg.on('pointerdown', (p: Phaser.Input.Pointer) => {
+        p.event.stopPropagation();
+        cb();
+      });
+    }
+    c.add([bg, t]);
+    return c;
+  }
+
   private rebuildInventoryPanel(): void {
     if (!this.inventoryPanel) return;
     this.clearInventoryRows();
@@ -1022,26 +1057,29 @@ export class UIScene extends Phaser.Scene {
     const lines = listInventory();
     const camW = this.cameras.main.width;
     const panelW = Math.min(360, Math.max(300, camW - 24));
-    if (this.inventoryBg) {
-      this.inventoryBg.setSize(panelW, 460);
-    }
     const half = panelW / 2 - 10;
     const narrow = camW < 420;
     const font = narrow ? '9px' : '10px';
     const headerFont = narrow ? '9px' : '10px';
+    // Restock on second row at narrow widths so [−] price [+] fits.
+    const twoRow = narrow;
+    const rowH = twoRow ? 48 : 40;
+    const panelH = Math.min(520, 80 + 28 + lines.length * rowH + 40);
+    if (this.inventoryBg) {
+      this.inventoryBg.setSize(panelW, panelH);
+    }
 
-    // Columns kept inside panel (±half). Margen no longer overflows the right edge.
-    // Tight columns so Producto…Margen + restock buttons fit inside ±half at 390px.
+    // Columns inside ±half. Price column holds [−]$N[+] (Phase 5).
     const cols = {
       name: -half,
-      stock: -half + 72,
-      sold: -half + 108,
-      cost: -half + 142,
-      price: -half + 182,
-      margin: -half + 222,
+      stock: -half + (narrow ? 64 : 70),
+      sold: -half + (narrow ? 96 : 104),
+      cost: -half + (narrow ? 126 : 138),
+      price: -half + (narrow ? 164 : 180),
+      margin: half - (narrow ? 36 : 42),
     };
 
-    const headerY = -180;
+    const headerY = -panelH / 2 + 42;
     const mkH = (x: number, label: string) => {
       const tt = this.add
         .text(x, headerY, label, {
@@ -1060,39 +1098,85 @@ export class UIScene extends Phaser.Scene {
     mkH(cols.price, 'Precio');
     mkH(cols.margin, 'Mar.');
 
-    let y = headerY + 20;
-    const rowH = 36;
+    let y = headerY + 18;
     for (const line of lines) {
-      const mk = (x: number, label: string, color = '#e8d0ff') => {
+      const mk = (x: number, label: string, color = '#e8d0ff', oy = 2) => {
         const tt = this.add
-          .text(x, y, label, { fontSize: font, color })
+          .text(x, y + oy, label, { fontSize: font, color })
           .setOrigin(0, 0);
         this.inventoryPanel.add(tt);
         this.inventoryRows.push(tt);
       };
       const stockColor = line.stock <= 0 ? '#ff6688' : '#e8d0ff';
+      const marginColor = line.margin < 0 ? '#ff6688' : '#3cff9a';
       mk(cols.name, line.name, '#ff9ad5');
       mk(cols.stock, String(line.stock), stockColor);
       mk(cols.sold, String(line.soldTonight));
       mk(cols.cost, this.fmtMoney(line.supplierCost));
-      mk(cols.price, this.fmtMoney(line.price), '#7ad7ff');
-      mk(cols.margin, this.fmtMoney(line.margin), '#3cff9a');
+      mk(cols.margin, this.fmtMoney(line.margin), marginColor);
 
-      // Restock +5 / +20 at supplier cost (Phase 4) — right edge of panel.
-      const btnX = half - 66;
-      const b5 = this.makeLocalButton(btnX, y - 4, 30, 22, '+5', () => {
+      // Phase 5: [−] $N [+] — emit cmd-set-drink-price
+      const step = Math.max(1, line.priceStep || 1);
+      const atMin = line.price <= line.minPrice;
+      const atMax = line.price >= line.maxPrice;
+      const btnH = 24;
+      const btnW = 24;
+      const priceStr = this.fmtMoney(line.price);
+      const priceTw = Math.max(28, priceStr.length * 7);
+      const clusterW = btnW + 4 + priceTw + 4 + btnW;
+      const priceX = cols.price;
+      const minus = this.makeInvBtn(
+        priceX,
+        y - 2,
+        btnW,
+        btnH,
+        '−',
+        () => {
+          this.game.events.emit('cmd-set-drink-price', {
+            id: line.id,
+            delta: -step,
+          });
+        },
+        !atMin
+      );
+      const priceLabel = this.add
+        .text(priceX + btnW + 4, y + 4, priceStr, {
+          fontSize: font,
+          color: '#7ad7ff',
+          fontStyle: 'bold',
+        })
+        .setOrigin(0, 0);
+      const plus = this.makeInvBtn(
+        priceX + btnW + 4 + priceTw + 4,
+        y - 2,
+        btnW,
+        btnH,
+        '+',
+        () => {
+          this.game.events.emit('cmd-set-drink-price', {
+            id: line.id,
+            delta: step,
+          });
+        },
+        !atMax
+      );
+      for (const b of [minus, plus]) {
+        this.inventoryPanel.add(b);
+        this.inventoryRows.push(b);
+      }
+      this.inventoryPanel.add(priceLabel);
+      this.inventoryRows.push(priceLabel);
+
+      // Restock +5 / +20 (Phase 4)
+      const restY = twoRow ? y + 22 : y - 2;
+      const restX = twoRow ? cols.price : Math.min(half - 68, priceX + clusterW + 8);
+      const b5 = this.makeInvBtn(restX, restY, 30, 22, '+5', () => {
         this.game.events.emit('cmd-restock-drink', { id: line.id, units: 5 });
       });
-      const b20 = this.makeLocalButton(btnX + 32, y - 4, 34, 22, '+20', () => {
+      const b20 = this.makeInvBtn(restX + 34, restY, 34, 22, '+20', () => {
         this.game.events.emit('cmd-restock-drink', { id: line.id, units: 20 });
       });
       for (const b of [b5, b20]) {
-        const kids = b.list as Phaser.GameObjects.GameObject[];
-        for (const k of kids) {
-          if (k instanceof Phaser.GameObjects.Text) {
-            (k as Phaser.GameObjects.Text).setFontSize(11);
-          }
-        }
         this.inventoryPanel.add(b);
         this.inventoryRows.push(b);
       }
@@ -1102,8 +1186,8 @@ export class UIScene extends Phaser.Scene {
     const hint = this.add
       .text(
         0,
-        205,
-        'Comprar al proveedor: +5 / +20 · Vendidas = esta noche',
+        panelH / 2 - 22,
+        '−/+ precio · +5/+20 proveedor · Vendidas = esta noche',
         { fontSize: '9px', color: '#8060a0' }
       )
       .setOrigin(0.5);

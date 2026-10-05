@@ -45,6 +45,7 @@ import {
   serializeInventory,
   getInventoryDebug as readInventoryDebug,
   getPrice as inventoryGetPrice,
+  setPrice as inventorySetPrice,
   canSell as inventoryCanSell,
   recordSale as inventoryRecordSale,
   addStock as inventoryAddStock,
@@ -503,6 +504,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-request-shop-catalog', this.emitShopCatalog, this);
     this.game.events.on('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
     this.game.events.on('cmd-restock-drink', this.onCmdRestockDrink, this);
+    this.game.events.on('cmd-set-drink-price', this.onCmdSetDrinkPrice, this);
     this.game.events.on('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
     this.game.events.on('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
     this.game.events.on('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
@@ -1698,6 +1700,21 @@ export class ClubScene extends Phaser.Scene {
     return inventoryGetStock(id);
   }
 
+  /** Prompt A Phase 5: set public sale price (clamped to catalogue min/max/step). */
+  setDrinkPrice(id: string, value: number): boolean {
+    const ok = inventorySetPrice(id, value);
+    if (ok) {
+      this.persistLayout();
+      this.game.events.emit('inventory-updated');
+    }
+    return ok;
+  }
+
+  /** Prompt A Phase 5 test/debug: current public sale price. */
+  getDrinkPrice(id: string): number {
+    return inventoryGetPrice(id);
+  }
+
   private chooseMainPatronGoal(patron: Patron): void {
     if (!patron.active || this.phase !== 'open') return;
     // With a working bar everyone goes to order first (then sits or wanders); without one they
@@ -2748,6 +2765,25 @@ export class ClubScene extends Phaser.Scene {
     if (!ok) {
       this.game.events.emit('restock-failed', { id, reason: 'money' });
     }
+  };
+
+  /** Prompt A Phase 5: UI price edit { id, price } or { id, delta }. */
+  private onCmdSetDrinkPrice = (payload: {
+    id?: string;
+    price?: number;
+    delta?: number;
+  }): void => {
+    const id = typeof payload?.id === 'string' ? payload.id : '';
+    if (!id) return;
+    let next: number;
+    if (typeof payload?.price === 'number' && Number.isFinite(payload.price)) {
+      next = payload.price;
+    } else if (typeof payload?.delta === 'number' && Number.isFinite(payload.delta)) {
+      next = inventoryGetPrice(id) + payload.delta;
+    } else {
+      return;
+    }
+    this.setDrinkPrice(id, next);
   };
 
   /** Prompt A Phase 3/4 test/debug: drink stock / prices / nightly sold. */
@@ -3834,6 +3870,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-request-shop-catalog', this.emitShopCatalog, this);
     this.game.events.off('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
     this.game.events.off('cmd-restock-drink', this.onCmdRestockDrink, this);
+    this.game.events.off('cmd-set-drink-price', this.onCmdSetDrinkPrice, this);
     this.game.events.off('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
     this.game.events.off('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
     this.game.events.off('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
