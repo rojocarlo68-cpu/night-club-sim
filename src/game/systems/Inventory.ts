@@ -41,6 +41,8 @@ export type InventorySave = {
 
 const state: Record<string, ProductState> = {};
 let ready = false;
+/** First Date.now() each product hit stock 0 this night (Prompt A Phase 10). */
+const stockoutFirstMs: Record<string, number> = {};
 
 function ensureAll(): void {
   if (ready) return;
@@ -108,6 +110,9 @@ export function recordSale(id: string, units = 1): boolean {
   if (s.stock < 0) s.stock = 0;
   s.soldTonight += n;
   s.revenueTonight += n * s.price;
+  if (s.stock === 0 && stockoutFirstMs[id] == null) {
+    stockoutFirstMs[id] = Date.now();
+  }
   return true;
 }
 
@@ -118,6 +123,7 @@ export function resetNightInventory(): void {
     state[id].soldTonight = 0;
     state[id].revenueTonight = 0;
   }
+  clearStockoutFirstMs();
 }
 
 /** Player price edit (Phase 5 UI). Safe to call; unused in Phase 3 UI. */
@@ -147,6 +153,9 @@ export function setStock(id: string, units: number): boolean {
   const s = state[id];
   if (!s || !getDrinkProduct(id)) return false;
   s.stock = Math.max(0, Math.floor(units));
+  if (s.stock === 0 && stockoutFirstMs[id] == null) {
+    stockoutFirstMs[id] = Date.now();
+  }
   return true;
 }
 
@@ -214,4 +223,13 @@ export function getInventoryDebug() {
     lines: listInventory(),
     save: serializeInventory(),
   };
+}
+
+/** Prompt A Phase 10: first stockout timestamps this night. */
+export function getStockoutFirstMs(): Record<string, number> {
+  return { ...stockoutFirstMs };
+}
+
+export function clearStockoutFirstMs(): void {
+  for (const k of Object.keys(stockoutFirstMs)) delete stockoutFirstMs[k];
 }

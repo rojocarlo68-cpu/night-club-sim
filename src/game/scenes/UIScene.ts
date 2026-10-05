@@ -32,6 +32,14 @@ interface HudState {
   utilities?: { total: number; lines: { label: string; amount: number }[] } | null;
   /** Phase 9: next night that triggers monthly utilities. */
   nextUtilitiesNight?: number;
+  /** Prompt A Phase 10: compact drink/stockout/served lines for summary. */
+  nightSales?: {
+    drinksSold: number;
+    drinksRevenue: number;
+    stockedOutNames: string[];
+    servedCount: number;
+    summaryLines: string[];
+  };
 }
 
 const STATE_ES: Record<string, string> = {
@@ -733,6 +741,10 @@ export class UIScene extends Phaser.Scene {
       `Clientes que se sentaron: ${s.servedCount ?? 0}`,
       `Dinero total: ${formatMoney(s.money)}`,
     ];
+    // Prompt A Phase 10: small drink sales / stockout / attended lines (no sat numbers).
+    if (s.nightSales?.summaryLines?.length) {
+      lines.push(...s.nightSales.summaryLines);
+    }
     if (s.payroll && s.payroll.total > 0) {
       lines.push(`Sueldos semanales: -$${s.payroll.total}`);
       for (const l of s.payroll.lines) {

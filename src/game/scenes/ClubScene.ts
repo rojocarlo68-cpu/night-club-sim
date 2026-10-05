@@ -28,6 +28,22 @@ import {
 } from '../systems/Tips';
 import { onNightEnd, resetNightCycleState } from '../systems/NightCycle';
 import {
+  resetNightAccumulators,
+  noteLeaveWithoutBuy,
+  snapshotNightStats,
+  serializeNightStatsHistory,
+  loadNightStatsHistory,
+  getNightStatsDebug as readNightStatsDebug,
+} from '../systems/NightStats';
+import {
+  installReputationHook,
+  serializeReputation,
+  loadReputation,
+  getReputationDebug as readReputationDebug,
+  getReturnChanceHint,
+} from '../systems/Reputation';
+import { NIGHT_SUMMARY_LINES } from '../config/nightStats';
+import {
   takeLastPayroll,
   serializePayrollHistory,
   loadPayrollHistory,
@@ -295,6 +311,10 @@ interface SavedLayout {
   drinkPrefs?: Record<string, Record<string, number>>;
   /** Prompt A Phase 9: stable patronName→actionId taste (−1..+1). Old saves omit → rolled fresh. */
   actionTastes?: Record<string, Record<string, number>>;
+  /** Prompt A Phase 10: rolling night sales/stats history (last ~30). */
+  nightStatsHistory?: unknown[];
+  /** Prompt A Phase 10: per-name recent visit sats (reputation placeholder). */
+  reputation?: Record<string, number[]>;
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -451,6 +471,7 @@ export class ClubScene extends Phaser.Scene {
     this.drinks = Array.isArray(this.scenario.drinks) ? this.scenario.drinks : [];
     // Prompt A Phase 3: inventory catalogue (serving still uses this.drinks / scenario prices).
     initInventory();
+    installReputationHook();
     this.buildMode = false;
     this.selectedFurniture = null;
 
@@ -805,6 +826,8 @@ export class ClubScene extends Phaser.Scene {
       inventory: serializeInventory(),
       drinkPrefs: serializeDrinkPrefs(),
       actionTastes: serializeActionTastes(),
+      nightStatsHistory: serializeNightStatsHistory(),
+      reputation: serializeReputation(),
       competition: serializeCompetition(),
       nightNumber: this.nightNumber,
       payrollHistory: serializePayrollHistory(),
@@ -1578,6 +1601,7 @@ export class ClubScene extends Phaser.Scene {
     this.servedCount = 0;
     resetNightTips();
     resetNightInventory();
+    resetNightAccumulators();
     this.competitionObserveAccum = 0;
     this.nightTimer = this.scenario.nightDurationSec;
     const [min, max] = this.scenario.patronSpawnCount;
@@ -2862,6 +2886,12 @@ export class ClubScene extends Phaser.Scene {
     // Phase 7: roll-up + weekly/monthly hooks, then bump nightNumber.
     // Tips night/jornada stay visible for the summary; resetNightTips runs on openNight.
     const endedNight = onNightEnd(this);
+    // Prompt A Phase 10: snapshot sales/tips/leaves/sat BEFORE openNight resets soldTonight.
+    const nightStats = snapshotNightStats({
+      nightNumber: endedNight,
+      servedCount: this.servedCount,
+      staff: this.listPayrollStaff(),
+    });
     this.persistLayout();
     const payroll = takeLastPayroll();
     const utilities = takeLastUtilities();
@@ -2881,6 +2911,18 @@ export class ClubScene extends Phaser.Scene {
           }
         : null,
       nextUtilitiesNight: nextMonthEndNight(endedNight),
+      // Phase 10: small drink/stockout/served lines (no hidden sat numbers).
+      nightSales: {
+        drinksSold: nightStats.drinksSoldTotal,
+        drinksRevenue: nightStats.drinksRevenueTotal,
+        stockedOutNames: nightStats.stockedOutNames,
+        servedCount: nightStats.servedCount,
+        summaryLines: [
+          NIGHT_SUMMARY_LINES.drinks(nightStats.drinksSoldTotal, nightStats.drinksRevenueTotal),
+          NIGHT_SUMMARY_LINES.stockout(nightStats.stockedOutNames),
+          NIGHT_SUMMARY_LINES.served(nightStats.servedCount),
+        ].filter((x): x is string => !!x),
+      },
     });
     this.emitStaffRoster();
   }
@@ -3007,6 +3049,21 @@ export class ClubScene extends Phaser.Scene {
   /** Prompt A Phase 7 test/debug: sat/generosity tip chance before→after + amounts. */
   getTipDebug() {
     return readTipDebug();
+  }
+
+  /** Prompt A Phase 10 test/debug: nightly sales history + live leave/sat counters. */
+  getNightStatsDebug() {
+    return readNightStatsDebug();
+  }
+
+  /** Prompt A Phase 10 test/debug: reputation visit sats + return-chance hints (unused by spawn). */
+  getReputationDebug() {
+    return readReputationDebug();
+  }
+
+  /** Prompt A Phase 10: expose placeholder hint (NOT used by spawning). */
+  debugReturnChanceHint(patronName: string): number {
+    return getReturnChanceHint(patronName);
   }
 
   /**
@@ -3214,6 +3271,8 @@ export class ClubScene extends Phaser.Scene {
       patron.wantedDrinkId = patron.profile.preferredDrink || null;
       patron.servedDrinkId = null;
       patron.wasOutOfStock = pick.reason === 'empty' || pick.reason === 'oos_skip';
+      // Prompt A Phase 10: count no-purchase leaves for nightly stats.
+      noteLeaveWithoutBuy(pick.reason);
       if (pick.reason === 'empty') patron.showBubble('Se acabó todo');
       else if (pick.reason === 'price') patron.showBubble('Muy caro');
       else patron.showBubble('Sin mi bebida');
@@ -3260,6 +3319,7 @@ export class ClubScene extends Phaser.Scene {
     const abortEmptyStock = () => {
       patron.wasOutOfStock = true;
       patron.servedDrinkId = null;
+      noteLeaveWithoutBuy('empty');
       patron.showBubble('Se acabó todo');
       patron.waiting = false;
       patron.served = false;
