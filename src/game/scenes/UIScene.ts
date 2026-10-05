@@ -546,6 +546,9 @@ export class UIScene extends Phaser.Scene {
         pers.length > 0
           ? '\n' + pers.map((x) => `${x.label}: ${x.level}`).join(' · ')
           : '';
+      const compLine = npc.competitivenessLabel
+        ? `\nCompetitiva: ${npc.competitivenessLabel}`
+        : '';
       this.panelStats.setText(
         `Estado: ${estado}\nHabilidad: ${npc.skill ?? '—'}\n` +
           `Propinas esta noche: $${tipsNight}\n` +
@@ -553,6 +556,7 @@ export class UIScene extends Phaser.Scene {
           `Propinas totales: $${tipsTotal}` +
           (npc.performance ? `\nRendimiento: ${npc.performance}` : '') +
           persLine +
+          compLine +
           seeking
       );
       this.energyLabel.setText('Energía');
@@ -632,6 +636,8 @@ export class UIScene extends Phaser.Scene {
         tipActionLabel: this.selectedNpc.tipActionLabel,
         seekingTip: this.selectedNpc.seekingTip,
         personality: this.selectedNpc.personality,
+        competitivenessLabel: this.selectedNpc.competitivenessLabel,
+        performance: this.selectedNpc.performance,
       });
     }
     this.refreshBuildButtons();

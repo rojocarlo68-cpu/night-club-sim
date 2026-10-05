@@ -15,6 +15,11 @@ import {
   energyBand,
   moodBand,
 } from '../config/staffThresholds';
+import {
+  BASIC_WEIGHT_FLOOR,
+  BASIC_WEIGHT_REDUCTION,
+  SPECIAL_WEIGHT_BONUS,
+} from '../config/competition';
 
 type CountsMap = Record<string, Record<string, number>>;
 
@@ -109,10 +114,16 @@ export function pickTipAction(
   staffId: string,
   rng: () => number = Math.random,
   energyMoodGate: EnergyMoodGate = (a) => a,
-  condition?: StaffCondition
+  condition?: StaffCondition,
+  /** Phase 6: 0..1 competitiveness — boosts specials, slightly lowers basic. */
+  competitiveness: number = 0
 ): TipAction | null {
   const p = getPersonality(staffId);
   const entries: { action: TipAction | null; weight: number }[] = [];
+  const comp = Math.max(0, Math.min(1, competitiveness || 0));
+  // Phase 6: specials get 1 + c*0.6; basic shrinks a little (never bypasses reqs/gates)
+  const specialMult = 1 + comp * SPECIAL_WEIGHT_BONUS;
+  const basicMult = Math.max(BASIC_WEIGHT_FLOOR, 1 - comp * BASIC_WEIGHT_REDUCTION);
 
   // Basic service / none — more likely when less social / less ambitious
   const noneWeight =
@@ -121,7 +132,10 @@ export function pickTipAction(
     (1 - p.ambition) * 0.25 +
     (1 - p.disinhibition) * 0.2;
   const basicBoost = condition ? basicServiceBoost(condition) : 1;
-  entries.push({ action: null, weight: Math.max(0.15, noneWeight) * basicBoost });
+  entries.push({
+    action: null,
+    weight: Math.max(0.15, noneWeight) * basicBoost * basicMult,
+  });
 
   for (const raw of TIP_ACTIONS) {
     const gated = energyMoodGate(raw, staffId);
@@ -144,6 +158,9 @@ export function pickTipAction(
 
     // Phase 4: energy / mood bands (effort-scaled; critical or unaffordable → 0)
     if (condition) w *= energyMoodWeight(gated, condition);
+
+    // Phase 6: competitiveness boosts specials only (near-zero stays near-zero)
+    w *= specialMult;
 
     if (w > 0.001) entries.push({ action: gated, weight: w });
   }

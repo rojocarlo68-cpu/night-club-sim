@@ -28,4 +28,6 @@ export interface NpcInfo {
   seekingTip?: boolean;
   /** Phase 4: compact performance from energy/mood bands. */
   performance?: 'alto' | 'medio' | 'bajo';
+  /** Phase 6: Spanish competitiveness label when above threshold (e.g. 'un poco'). */
+  competitivenessLabel?: string | null;
 }

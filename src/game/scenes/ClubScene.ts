@@ -48,6 +48,19 @@ import {
   loadAffinities,
 } from '../systems/Affinity';
 import {
+  getCompetitiveness,
+  observe as observeCompetition,
+  noteTip,
+  serializeCompetition,
+  loadCompetition,
+  getCompetitionDebug as readCompetitionDebug,
+} from '../systems/Competition';
+import {
+  OBSERVE_INTERVAL_MS,
+  PANEL_SHOW_THRESHOLD,
+  competitivenessLabel,
+} from '../config/competition';
+import {
   FurnitureInspectPayload,
   FurnitureRuntimeStats,
   STARTER_FURNITURE_PRICE,
@@ -160,6 +173,11 @@ interface SavedLayout {
   staffTips?: Record<string, { tipsNight?: number; tipsDay?: number; tipsTotal?: number }>;
   /** Phase 5: hidden patronName→staffId affinity map. Old saves omit → empty. */
   affinities?: Record<string, Record<string, 'baja' | 'normal' | 'alta'>>;
+  /** Phase 6: per-staff competitiveness + rolling tips. Old saves omit → zeros. */
+  competition?: Record<
+    string,
+    { competitiveness?: number; lastObservedGap?: number; rollingTips?: number }
+  >;
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -196,6 +214,8 @@ export class ClubScene extends Phaser.Scene {
   servedCount = 0;
   phase: NightPhase = 'prep';
   nightTimer = 0;
+  /** Phase 6: ms accumulator toward next peer-observation tick. */
+  private competitionObserveAccum = 0;
   buildMode = false;
   /** Currently selected NPC id (bartender profile id or patron runtime id). */
   private selectedNpcId: string | null = null;
@@ -457,6 +477,7 @@ export class ClubScene extends Phaser.Scene {
     const seekingTip = ['serving', 'serving_cerveza', 'serving_drink', 'busy'].includes(
       stateKey
     );
+    const comp = getCompetitiveness(b.profile.id);
     return {
       id: b.profile.id,
       name: b.displayName,
@@ -473,6 +494,8 @@ export class ClubScene extends Phaser.Scene {
       tipActionLabel,
       seekingTip,
       performance: performanceLabel(b.energy, b.mood),
+      competitivenessLabel:
+        comp > PANEL_SHOW_THRESHOLD ? competitivenessLabel(comp) : null,
     };
   }
 
@@ -539,6 +562,7 @@ export class ClubScene extends Phaser.Scene {
       }
       loadTips(saved?.staffTips);
       loadAffinities(saved?.affinities);
+      loadCompetition(saved?.competition);
       if (!Array.isArray(saved?.furniture)) return;
       // Ensure shop catalog available before restoring purchased pieces
       this.loadShopCatalog();
@@ -638,6 +662,7 @@ export class ClubScene extends Phaser.Scene {
       seeded: ['bar'],
       staffTips: serializeTips(),
       affinities: serializeAffinities(),
+      competition: serializeCompetition(),
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -1406,6 +1431,7 @@ export class ClubScene extends Phaser.Scene {
     this.nightEarned = 0;
     this.servedCount = 0;
     resetNightTips();
+    this.competitionObserveAccum = 0;
     this.nightTimer = this.scenario.nightDurationSec;
     const [min, max] = this.scenario.patronSpawnCount;
     this.spawnLeft = Phaser.Math.Between(min, max);
@@ -2413,6 +2439,11 @@ export class ClubScene extends Phaser.Scene {
     return readAffinityDebug();
   }
 
+  /** Phase 6 test/debug: competitiveness + rolling tips per staff. */
+  getCompetitionDebug() {
+    return readCompetitionDebug();
+  }
+
     getHudState() {
     return {
       money: this.money,
@@ -2613,10 +2644,16 @@ export class ClubScene extends Phaser.Scene {
       staff.applyServeDrain();
       // Phase 3/4: personality-weighted tip action, gated by existing energy/mood
       const moodAtServe = staff.profile.mood;
-      const tipAction = pickTipAction(staff.profile.id, Math.random, undefined, {
-        energy: staff.profile.energy,
-        mood: staff.profile.mood,
-      });
+      const tipAction = pickTipAction(
+        staff.profile.id,
+        Math.random,
+        undefined,
+        {
+          energy: staff.profile.energy,
+          mood: staff.profile.mood,
+        },
+        getCompetitiveness(staff.profile.id)
+      );
       if (tipAction) {
         staff.applyTipActionCost(tipAction.energyCost, tipAction.moodCost);
         staff.setTipAction(
@@ -2639,6 +2676,7 @@ export class ClubScene extends Phaser.Scene {
       this.servedCount++;
       if (payout.tipAmount > 0) {
         recordTip(staff.profile.id, payout.tipAmount);
+        noteTip(staff.profile.id, payout.tipAmount);
       }
       patron.showBubble(payout.tipped ? `¡Propina! +$${payout.earned}` : `+$${payout.earned}`);
       patron.served = true;
@@ -2917,6 +2955,14 @@ export class ClubScene extends Phaser.Scene {
     }
     if (this.phase !== 'open') return;
     this.nightTimer -= dtSec;
+
+    // Phase 6: periodic peer observation (gradual competitiveness)
+    this.competitionObserveAccum += dt;
+    if (this.competitionObserveAccum >= OBSERVE_INTERVAL_MS) {
+      this.competitionObserveAccum = 0;
+      const presentIds = this.allStaff().map((s) => s.profile.id);
+      observeCompetition(presentIds);
+    }
 
     for (const patron of [...this.patrons]) {
       if (!patron.active) continue;
