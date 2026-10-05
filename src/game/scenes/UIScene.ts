@@ -160,6 +160,7 @@ export class UIScene extends Phaser.Scene {
       })
       .setOrigin(0.5, 0)
       .setScrollFactor(0);
+    this.layoutTimerText(cam.width);
 
     this.openBtn = this.makeButton(cam.width - 150, 8, 130, 36, 'Abrir noche', () => {
       if (this.buildMode) return;
@@ -862,6 +863,15 @@ export class UIScene extends Phaser.Scene {
     this.summary.setPosition(cam.width / 2, cam.height / 2);
   }
 
+  /** Narrow screens: 'Noche N' goes under the money line (left) so it can't overlap it or the button. */
+  private layoutTimerText(w: number): void {
+    if (w < 640) {
+      this.timerText.setOrigin(0, 0).setPosition(16, 34).setFontSize(12);
+    } else {
+      this.timerText.setOrigin(0.5, 0).setPosition(w / 2, 14).setFontSize(16);
+    }
+  }
+
   private onResize = (gameSize: Phaser.Structs.Size): void => {
     const w = gameSize.width;
     const h = gameSize.height;
@@ -875,7 +885,7 @@ export class UIScene extends Phaser.Scene {
     if (this.furnPanel) {
       this.furnPanel.setPosition(w - 20, h - PANEL_BOTTOM_MARGIN - 280);
     }
-    this.timerText.setX(w / 2);
+    this.layoutTimerText(w);
     if (this.summary.visible && this.lastSummaryBody) {
       this.layoutSummary(this.lastSummaryBody);
     } else {
