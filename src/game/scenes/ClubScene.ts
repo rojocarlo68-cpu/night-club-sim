@@ -67,6 +67,14 @@ import {
   getPricingDebug as readPricingDebug,
   traitsOf,
 } from '../systems/PricePerception';
+import {
+  computeSatisfactionTipMods,
+  applySatisfactionToTipChance,
+  satisfactionAmountScale,
+  pushTipDebug,
+  getTipDebug as readTipDebug,
+} from '../systems/SatisfactionTips';
+import { BASE_SATISFACTION } from '../config/satisfaction';
 import { nextWeekEndNight, nextMonthEndNight } from '../config/calendar';
 import { getPersonality, personalitySummary } from '../config/personality';
 import { TipAction } from '../config/tipActions';
@@ -93,6 +101,7 @@ import {
   createExperience,
   finalizeVisit,
   getActiveExperiences,
+  getExperience,
   getVisitDebug,
   serializeCustomerTraits,
   loadCustomerTraits,
@@ -2060,7 +2069,8 @@ export class ClubScene extends Phaser.Scene {
 
   /** Pay + tip from drink price scaled by venue quality / patience / broken furniture.
    *  Optional tipAction (Phase 3) adds chance bonus + amount mult; does not alter serve flow.
-   *  Phase 5: hidden client↔staff affinity only modifies chance/amount/satisfaction here. */
+   *  Phase 5: hidden client↔staff affinity only modifies chance/amount/satisfaction here.
+   *  Phase 7: visit customerSatisfaction + generosity multiply chance/amount (capped 0.92). */
   private computeServePayout(
     patron: Patron,
     drink: Drink,
@@ -2101,9 +2111,18 @@ export class ClubScene extends Phaser.Scene {
       affinityAmountMult = mods.tipAmountMult;
       satisfactionBonus = mods.satisfactionBonus;
     }
+    // Prompt A Phase 7: multiply existing tip chance/amount by visit sat + generosity.
+    const exp = getExperience(patron);
+    const satNow = exp?.satisfaction ?? BASE_SATISFACTION;
+    const generosity = exp?.traits.generosity ?? 0.5;
+    const satMods = computeSatisfactionTipMods(satNow, generosity);
+    const chanceBeforeSat = tipChance;
+    tipChance = applySatisfactionToTipChance(tipChance, satMods);
+
     const drinkPay = Math.max(1, Math.round(drink.price * payMult));
     let tipAmount = 0;
     let tipped = false;
+    let satAmountMultApplied = satMods.amountMult;
     if (Math.random() < tipChance) {
       const tipBase = Math.max(1, Math.ceil(drink.price * 0.25));
       let amt = Math.max(
@@ -2114,6 +2133,10 @@ export class ClubScene extends Phaser.Scene {
         amt = Math.max(1, Math.round(amt * tipAction.tipAmountMult));
       }
       amt = Math.max(1, Math.round(amt * affinityAmountMult));
+      // Phase 7: sat/generosity amount scale + ±jitter (after existing mults).
+      const amtScale = satisfactionAmountScale(satMods);
+      satAmountMultApplied = Math.round(amtScale * 1000) / 1000;
+      amt = Math.max(1, Math.round(amt * amtScale));
       tipAmount = amt;
       tipped = true;
     }
@@ -2131,6 +2154,18 @@ export class ClubScene extends Phaser.Scene {
         amount: tipAmount,
       });
     }
+    pushTipDebug({
+      patronName: patron.profile.name,
+      staffId: staffId || '',
+      sat: satNow,
+      generosity,
+      chanceBefore: Math.round(chanceBeforeSat * 1000) / 1000,
+      chanceAfter: tipChance,
+      chanceMult: satMods.chanceMult,
+      amountMult: satAmountMultApplied,
+      tipAmount,
+      tipped,
+    });
     return { earned: drinkPay + tipAmount, tipped, tipAmount };
   }
 
@@ -2910,6 +2945,40 @@ export class ClubScene extends Phaser.Scene {
   /** Prompt A Phase 6 test/debug: recent price / OOS buy-alt-skip decisions. */
   getPricingDebug() {
     return readPricingDebug();
+  }
+
+  /** Prompt A Phase 7 test/debug: sat/generosity tip chance before→after + amounts. */
+  getTipDebug() {
+    return readTipDebug();
+  }
+
+  /**
+   * Test/debug: set cleanliness / comfort / durability as ratios of max (0..1)
+   * on every furniture piece, then refresh dirt overlays.
+   */
+  debugSetFurnitureWear(opts: {
+    cleanlinessRatio?: number;
+    comfortRatio?: number;
+    durabilityRatio?: number;
+  }): void {
+    const cr = opts.cleanlinessRatio;
+    const cor = opts.comfortRatio;
+    const dr = opts.durabilityRatio;
+    for (const f of this.scenario.furniture) {
+      this.ensureFurnitureStats(f);
+      const st = this.statsOf(f);
+      if (typeof cr === 'number' && Number.isFinite(cr)) {
+        st.cleanliness = Math.max(0, Math.min(st.maxCleanliness, st.maxCleanliness * cr));
+      }
+      if (typeof cor === 'number' && Number.isFinite(cor)) {
+        st.comfort = Math.max(0, Math.min(st.maxComfort, st.maxComfort * cor));
+      }
+      if (typeof dr === 'number' && Number.isFinite(dr)) {
+        st.durability = Math.max(0, Math.min(st.maxDurability, st.maxDurability * dr));
+      }
+      this.writeStatsToDef(f, st);
+      this.refreshDirtOverlay(f);
+    }
   }
 
   /** Phase 6 test/debug: competitiveness + rolling tips per staff. */

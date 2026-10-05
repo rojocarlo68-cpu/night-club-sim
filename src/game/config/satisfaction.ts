@@ -144,3 +144,48 @@ export const AVAIL_REACTION = {
 
 /** Debug ring size for getPricingDebug(). */
 export const PRICING_DEBUG_CAP = 40;
+
+/* ───────────── Prompt A Phase 7: satisfaction → tips ───────────── */
+
+/**
+ * Applied AFTER the existing tip pipeline (quality / impatient / broken /
+ * mood / tipAction / affinity). Multiplies chance + amount; never rewrites them.
+ * Pivot = BASE_SATISFACTION (70): at pivot the sat chance/amount mult ≈ 1.
+ */
+export const SATISFACTION_TIPS = {
+  /** Sat value treated as “neutral” (mult ≈ 1). */
+  pivot: BASE_SATISFACTION,
+  /** Tip-chance multiplier at sat = SAT_MIN / pivot / SAT_MAX (piecewise linear). */
+  chanceAtMin: 0.4,
+  chanceAtPivot: 1.0,
+  chanceAtMax: 1.28,
+  /** Tip-amount multiplier at sat = SAT_MIN / pivot / SAT_MAX. */
+  amountAtMin: 0.5,
+  amountAtPivot: 1.0,
+  amountAtMax: 1.4,
+  /**
+   * Below this sat, apply an extra crunch on chance/amount (gradual path already
+   * lowered them; this strongly reduces without hard-zeroing).
+   */
+  veryLowBelow: 25,
+  veryLowChanceExtra: 0.45,
+  veryLowAmountExtra: 0.5,
+  /** Floor after all sat mods so a tip is never impossible from sat alone. */
+  chanceFloor: 0.03,
+  /**
+   * Generosity (0..1): mostly amount, slight chance.
+   * amountMult *= lerp(genAmountMin, genAmountMax, generosity)
+   * chanceMult *= lerp(genChanceMin, genChanceMax, generosity)
+   */
+  genAmountMin: 0.78,
+  genAmountMax: 1.38,
+  genChanceMin: 0.92,
+  genChanceMax: 1.1,
+  /** Final tip-amount jitter ± this fraction (controlled randomness). */
+  amountJitterFrac: 0.15,
+  /** Same global cap as affinity — never 100%. */
+  tipChanceCap: 0.92,
+} as const;
+
+/** Debug ring for getTipDebug(). */
+export const TIP_DEBUG_CAP = 40;
