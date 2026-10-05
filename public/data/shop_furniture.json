@@ -21,6 +21,28 @@
         172
       ],
       "blurb": "Sofá medieval 2×1. Los clientes se sientan."
+    },
+    {
+      "id": "bar",
+      "name": "Barra de bebidas",
+      "price": 80,
+      "category": "muebles",
+      "sprite": "furn_bar_medieval",
+      "spriteFile": "assets/furniture/bar_medieval_sw.png",
+      "footprint": [
+        2,
+        1
+      ],
+      "displaySize": [
+        102,
+        90
+      ],
+      "yBias": 0,
+      "baseVertex": [
+        134,
+        170
+      ],
+      "blurb": "Barra de madera 2×1. El personal sirve bebidas desde el frente (lado inferior izquierdo) y los clientes piden y pagan ahí."
     }
   ]
 }

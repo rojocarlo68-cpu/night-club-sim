@@ -32,6 +32,22 @@
         1
       ],
       "price": 40
+    },
+    {
+      "id": "bar",
+      "type": "bar",
+      "catalogId": "bar",
+      "sprite": "furn_bar_medieval",
+      "facing": "sw",
+      "tile": [
+        7,
+        1
+      ],
+      "footprint": [
+        2,
+        1
+      ],
+      "price": 40
     }
   ],
   "spawnTile": [
@@ -41,5 +57,25 @@
   "exitTile": [
     6,
     10
+  ],
+  "drinks": [
+    {
+      "id": "cerveza",
+      "name": "Cerveza",
+      "price": 8,
+      "serveTimeMs": 2000
+    },
+    {
+      "id": "refresco",
+      "name": "Refresco",
+      "price": 5,
+      "serveTimeMs": 1200
+    },
+    {
+      "id": "shot_barato",
+      "name": "Shot barato",
+      "price": 6,
+      "serveTimeMs": 1000
+    }
   ]
 }

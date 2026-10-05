@@ -36,10 +36,13 @@ export const AI_TUNABLES = {
   postJobThinkMinMs: 500,
   postJobThinkMaxMs: 900,
 
-  // ── Sofa seating (placeholder economy while there is no bar) ──
-  /** Chance an arriving patron heads for a free sofa seat (otherwise they wander and leave). */
+  /** Max patrons queued around the bar waiting for service (the rest skip the drink and wander). */
+  barQueueMaxSlots: 5,
+
+  // ── Sofa seating (after the drink; also the fallback income when there is no bar) ──
+  /** Chance a patron heads for a free sofa seat (after the drink, or on arrival with no bar); otherwise they wander and leave. */
   seatChance: 0.75,
-  /** Pay ($, rounded) when a patron finishes sitting, before the venue-quality multiplier. */
+  /** Fallback only (no bar in the club): pay ($) when a patron finishes sitting, before the venue-quality multiplier. */
   sofaSitPayMin: 3,
   sofaSitPayMax: 6,
   /** Wander stops (tiles walked to) before leaving, and idle time at each stop (ms). */

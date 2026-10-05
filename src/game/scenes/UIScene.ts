@@ -36,6 +36,8 @@ const STATE_ES: Record<string, string> = {
   leaving: 'Saliendo',
   relaxing: 'Sentado',
   serving: 'Atendiendo',
+  serving_cerveza: 'Sirviendo cerveza',
+  serving_drink: 'Sirviendo bebida',
   cleaning: 'Limpiando',
   wandering: 'Deambulando',
 };

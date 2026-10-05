@@ -88,9 +88,10 @@ export class BootScene extends Phaser.Scene {
       else for (const t of floor?.types ?? []) this.load.image(t.texture, t.file);
     });
 
-    // Furniture: ONLY the medieval sofa (single fixed pose, no rotation). Bar / DJ / pinball and the
+    // Furniture: the medieval sofa and drink bar (single fixed pose, no rotation). DJ / pinball and the
     // neon placeholder pieces are gone (their art files were deleted from the repo).
     this.load.image('furn_sofa_medieval', 'assets/furniture/sofa_medieval_sw.png');
+    this.load.image('furn_bar_medieval', 'assets/furniture/bar_medieval_sw.png');
 
     this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_sheet.png', {
       frameWidth: 146,

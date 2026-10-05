@@ -17,7 +17,7 @@ export interface PatronData {
   traits?: string[];
 }
 
-export type PatronGoal = 'wander' | 'sofa' | 'leave';
+export type PatronGoal = 'wander' | 'sofa' | 'bar' | 'leave';
 
 /** Male client walk/idle sheets: 112×192 frames, feet near bottom. */
 export const PATRON_FRAME_W = 112;
@@ -51,7 +51,7 @@ export class Patron extends Character {
   claimedSlotKey: string | null = null;
   /** Furniture id when seated. */
   seatedFurnitureId: string | null = null;
-  /** Remaining patience (seconds, scaled). Only drains while `waiting` (nothing makes patrons wait now). */
+  /** Remaining patience (seconds, scaled). Only drains while `waiting` (queued at the bar for a drink). */
   patienceRemaining: number;
   /** Max patience this visit (scaled from profile). */
   patienceMax: number;
