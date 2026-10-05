@@ -153,6 +153,9 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 560,
       frameHeight: 960,
     });
+    // Client (hoodie guy) SITTING on a sofa seat (no drink), legs hanging toward SW = the sofa's facing. Single image at the
+    // idle sheet's px scale (shown at PATRON_DISPLAY_H/960); origin = buttocks on the cushion (Patron.ts CLIENT_SIT_ORIGIN_*).
+    this.load.image('client_hoodie_sit', 'assets/characters/client_hoodie_sit.png');
     this.load.spritesheet('nova_idle', 'assets/characters/nova_idle_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,

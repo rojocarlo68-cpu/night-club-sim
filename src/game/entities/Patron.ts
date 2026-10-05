@@ -36,13 +36,34 @@ export const PATRON_DISPLAY_H = Math.round(
   STAFF_DISPLAY_H * (LUNA_CONTENT_H / LUNA_FRAME_H_FOR_SCALE) * (PATRON_FRAME_H / PATRON_CONTENT_H)
 );
 
+/** Sitting pose (sofa): single image at the hi-res idle's px scale (960 px frame = PATRON_DISPLAY_H). */
+const CLIENT_SIT_TEX = 'client_hoodie_sit';
+const CLIENT_SIT_PX_PER_DISPLAY_H = 960;
+/** Buttocks-on-cushion anchor, from scripts/process_client_hoodie_sit.py. */
+const CLIENT_SIT_ORIGIN_X = 0.7321;
+const CLIENT_SIT_ORIGIN_Y = 0.568;
+/** Fraction of the way from the front tile to the sofa footprint tile (screen space). */
+const CLIENT_SIT_TOWARD_BACK = 0.62;
+/** Cushion height above the floor in screen px (~0.45 m at 84 px per 1.75 m). */
+const CLIENT_SIT_SEAT_H = 16;
+
 export class Patron extends Character {
   profile: PatronData;
   goal: PatronGoal = 'wander';
   waiting = false;
   served = false;
-  /** Sitting on a claimed sofa/chair seat. */
-  seated = false;
+  /** Sitting on a claimed sofa/chair seat (setter swaps in the sitting pose on the cushion). */
+  private _seated = false;
+  get seated(): boolean {
+    return this._seated;
+  }
+  set seated(v: boolean) {
+    if (this._seated === v) return;
+    this._seated = v;
+    this.applySitPose(v);
+  }
+  /** Sitting pose (client_hoodie_sit) shown on the sofa cushion while seated; the standing sprite is hidden. */
+  private sitImage?: Phaser.GameObjects.Image;
   /** Left angry after patience ran out (no pay / low tip). */
   angry = false;
   /** Waiting too long — tip penalty + Impaciente label. */
@@ -189,6 +210,37 @@ export class Patron extends Character {
     rect.setTo(-padX, -padY, fw + padX * 2, fh + padY * 2);
     this.lastHitFw = fw;
     this.lastHitFh = fh;
+  }
+
+  /**
+   * Seated: the patron stands on the sofa's FRONT tile (row + 1 = SW side), so the cushion is one tile
+   * up-right on screen (+tileW/2, -tileH/2). Put the buttocks ~70% of the way there (toward the seat front)
+   * and lift them by the seat height. Legs hang toward SW = the sofa's facing. Depth stays the front tile's
+   * character depth, which already draws above the sofa.
+   */
+  private applySitPose(on: boolean): void {
+    if (!this.scene || !this.scene.textures.exists(CLIENT_SIT_TEX)) return;
+    if (on) {
+      if (!this.sitImage) {
+        this.sitImage = this.scene.add
+          .image(0, 0, CLIENT_SIT_TEX)
+          .setOrigin(CLIENT_SIT_ORIGIN_X, CLIENT_SIT_ORIGIN_Y)
+          .setScale(PATRON_DISPLAY_H / CLIENT_SIT_PX_PER_DISPLAY_H);
+        this.sitImage.setInteractive({ useHandCursor: true });
+        // Forward taps so selection works exactly like on the standing sprite.
+        this.sitImage.on('pointerdown', (...a: unknown[]) => this.sprite.emit('pointerdown', ...a));
+        this.sitImage.on('pointerup', (...a: unknown[]) => this.sprite.emit('pointerup', ...a));
+        this.addAt(this.sitImage, Math.max(0, this.getIndex(this.sprite)));
+      }
+      const hw = this.iso.tileWidth / 2;
+      const hh = this.iso.tileHeight / 2;
+      this.sitImage.setPosition(hw * CLIENT_SIT_TOWARD_BACK, -hh * CLIENT_SIT_TOWARD_BACK - CLIENT_SIT_SEAT_H);
+      this.sitImage.setVisible(true);
+      this.sprite.setVisible(false);
+    } else {
+      this.sitImage?.setVisible(false);
+      this.sprite.setVisible(true);
+    }
   }
 
   setSelected(v: boolean): void {
