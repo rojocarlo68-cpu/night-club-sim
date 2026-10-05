@@ -44,6 +44,15 @@ import {
 } from '../systems/Shift';
 import { SCHEDULE_LABEL, SCHEDULE_LABEL_MOBILE } from '../config/shift';
 import {
+  CLOSED_OVERLAY_COLOR,
+  CLOSED_OVERLAY_ALPHA,
+  OPEN_OVERLAY_ALPHA,
+  LIGHTS_FADE_MS,
+  CLOSED_BG_COLOR,
+  OPEN_BG_COLOR,
+  LIGHTS_OVERLAY_DEPTH,
+} from '../config/lighting';
+import {
   resetNightAccumulators,
   noteLeaveWithoutBuy,
   snapshotNightStats,
@@ -386,6 +395,9 @@ export class ClubScene extends Phaser.Scene {
   private queueTiles: Set<string> = new Set();
   private drinks: Drink[] = [];
   private roomImage!: Phaser.GameObjects.Image;
+  /** Prompt B Phase B3: full-view dim overlay (closed club). */
+  private lightsOverlay!: Phaser.GameObjects.Rectangle;
+  private lightsTween?: Phaser.Tweens.Tween;
   /** Faint tile-diamond grid, visible only in Construir mode. */
   private buildGrid: Phaser.GameObjects.Graphics | null = null;
   private floorPixelSize = { w: 768, h: 384 };
@@ -548,6 +560,9 @@ export class ClubScene extends Phaser.Scene {
     this.ensureFreeStarterStaff();
     this.spawnHiredExtraStaff();
 
+    // Prompt B Phase B3: overlay created here; dim applied after camera BG is set.
+    this.createLightsOverlay();
+
     this.setupPointerPan();
     this.setupZoom();
     this.input.mouse?.disableContextMenu();
@@ -566,6 +581,8 @@ export class ClubScene extends Phaser.Scene {
       .setVisible(false);
 
     this.cameras.main.setBackgroundColor(BG_COLOR);
+    // Prompt B Phase B3: start closed (dim) — must run after the default BG set above.
+    this.applyClubLighting('closed', false);
 
     this.game.events.emit('club-ready', this.getHudState());
     this.game.events.on('cmd-open-night', this.openNight, this);
@@ -587,7 +604,12 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
     this.emitStaffRoster();
     this.emitShopCatalog();
+    this.scale.on('resize', this.onClubResize, this);
   }
+
+  private onClubResize = (): void => {
+    this.layoutLightsOverlay();
+  };
 
   private bartenderNpcInfo(): NpcInfo {
     return {
@@ -1020,6 +1042,78 @@ export class ClubScene extends Phaser.Scene {
       }
     }
     return null;
+  }
+
+
+  /** Prompt B Phase B3: camera-fixed dim rectangle over the club view. */
+  private createLightsOverlay(): void {
+    const cam = this.cameras.main;
+    const w = Math.max(cam.width, 64) + 40;
+    const h = Math.max(cam.height, 64) + 40;
+    this.lightsOverlay = this.add
+      .rectangle(cam.centerX, cam.centerY, w, h, CLOSED_OVERLAY_COLOR, 1)
+      .setScrollFactor(0)
+      .setDepth(LIGHTS_OVERLAY_DEPTH)
+      .setOrigin(0.5)
+      .setAlpha(CLOSED_OVERLAY_ALPHA);
+    // Never steal taps from the floor / NPCs.
+    this.lightsOverlay.disableInteractive();
+  }
+
+  private layoutLightsOverlay(): void {
+    if (!this.lightsOverlay) return;
+    const cam = this.cameras.main;
+    this.lightsOverlay.setPosition(cam.centerX, cam.centerY);
+    this.lightsOverlay.setSize(Math.max(cam.width, 64) + 40, Math.max(cam.height, 64) + 40);
+  }
+
+  /**
+   * Dim when closed/summary; bright when open.
+   * Staff stay visible on the floor in both states (contradiction vs "enter on open" — see B3 report).
+   */
+  private applyClubLighting(mode: 'closed' | 'open', animate: boolean): void {
+    if (!this.lightsOverlay) return;
+    const targetAlpha = mode === 'open' ? OPEN_OVERLAY_ALPHA : CLOSED_OVERLAY_ALPHA;
+    const bg = mode === 'open' ? OPEN_BG_COLOR : CLOSED_BG_COLOR;
+    this.cameras.main.setBackgroundColor(bg);
+
+    if (this.lightsTween) {
+      this.lightsTween.stop();
+      this.lightsTween = undefined;
+    }
+
+    if (!animate || LIGHTS_FADE_MS <= 0) {
+      this.lightsOverlay.setAlpha(targetAlpha);
+      this.lightsOverlay.setVisible(targetAlpha > 0.001);
+      return;
+    }
+
+    this.lightsOverlay.setVisible(true);
+    this.lightsTween = this.tweens.add({
+      targets: this.lightsOverlay,
+      alpha: targetAlpha,
+      duration: LIGHTS_FADE_MS,
+      ease: 'Sine.easeInOut',
+      onComplete: () => {
+        this.lightsTween = undefined;
+        if (targetAlpha <= 0.001) this.lightsOverlay.setVisible(false);
+      },
+    });
+
+    // Soft "wake" pulse on staff when lights come on (no AI rewrite).
+    if (mode === 'open') {
+      for (const s of this.allStaff()) {
+        if (!s?.active) continue;
+        const prev = s.alpha;
+        s.setAlpha(Math.min(prev, 0.65));
+        this.tweens.add({
+          targets: s,
+          alpha: 1,
+          duration: Math.min(LIGHTS_FADE_MS, 500),
+          ease: 'Sine.easeOut',
+        });
+      }
+    }
   }
 
   private drawRoom(cols: number, rows: number): void {
@@ -1627,6 +1721,8 @@ export class ClubScene extends Phaser.Scene {
     syncShiftDay(this.nightNumber);
     if (!beginShiftOpen()) return;
     this.phase = legacyPhaseFromShift();
+    // Prompt B Phase B3: lights fade on (staff already present — prep feel via brightening).
+    this.applyClubLighting('open', true);
     this.nightEarned = 0;
     this.servedCount = 0;
     resetNightTips();
@@ -2893,6 +2989,8 @@ export class ClubScene extends Phaser.Scene {
     beginShiftSummary();
     syncShiftDay(this.nightNumber);
     this.phase = legacyPhaseFromShift();
+    // Prompt B Phase B3: lights down for summary / closed look.
+    this.applyClubLighting('closed', true);
     this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     if (this.selectedNpcId && this.selectedNpcId !== this.bartender?.profile.id) {
@@ -4216,6 +4314,7 @@ export class ClubScene extends Phaser.Scene {
 
 
   shutdown(): void {
+    this.scale.off('resize', this.onClubResize, this);
     this.game.events.off('cmd-open-night', this.openNight, this);
     this.game.events.off('cmd-close-night', this.closeNight, this);
     this.game.events.off('cmd-rest', this.orderRest, this);
