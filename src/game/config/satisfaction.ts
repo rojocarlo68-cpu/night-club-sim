@@ -33,3 +33,59 @@ export const VISIT_HISTORY_CAP = 40;
 
 /** Debug ring for getExperienceDebug last visits. */
 export const VISIT_DEBUG_CAP = 20;
+
+/* ───────────── Prompt A Phase 2: comfort / cleanliness perception ───────────── */
+
+/**
+ * Comfort bands read from the EXISTING furniture stats (comfort / maxComfort ratio).
+ * Checked top→bottom; first band whose minRatio ≤ ratio wins. Applied once per seat used.
+ */
+export const COMFORT_BANDS = [
+  { band: 'comfortable', minRatio: 0.75, delta: 4 },
+  { band: 'ok', minRatio: 0.5, delta: 0 },
+  { band: 'uncomfortable', minRatio: 0.3, delta: -4 },
+  { band: 'very_uncomfortable', minRatio: 0, delta: -8 },
+] as const;
+
+/**
+ * Existing durability condition labels (conditionFromDurability) that force a worse comfort band.
+ * Worst of (comfort band, durability band) is used.
+ */
+export const DURABILITY_COMFORT_BAND: Record<string, string> = {
+  'Daños visibles': 'uncomfortable',
+  'Se rompió': 'very_uncomfortable',
+  Inservible: 'very_uncomfortable',
+};
+
+/**
+ * Dirt bands from EXISTING cleanliness / maxCleanliness ratio.
+ * `dirty` starts at DIRT_VISUAL_THRESHOLD (60) so it matches the visible stain overlay.
+ * `clean` bonus only applies to the item the patron actually uses (never from proximity).
+ */
+export const DIRT_BANDS = {
+  /** ratio < this → very dirty */
+  veryDirtyBelow: 0.3,
+  /** ratio < this → dirty (keep = DIRT_VISUAL_THRESHOLD / 100: only visible stains count) */
+  dirtyBelow: 0.6,
+  /** ratio ≥ this on the used item → small clean bonus */
+  cleanAtOrAbove: 0.75,
+  delta: { clean: 2, dirty: -4, very_dirty: -8 },
+} as const;
+
+/** Patron perceives dirty items within this Chebyshev tile distance of the footprint. */
+export const PERCEPTION_RADIUS_TILES = 2;
+/** How often each patron scans its surroundings (ms). Not every frame. */
+export const PERCEPTION_INTERVAL_MS = 1000;
+
+/**
+ * Trait scaling for perceived deltas.
+ * Negatives: delta * lerp(negMin, negMax, sensitivity) * (1 - tolerance * toleranceDamp).
+ * Positives: delta * lerp(posMin, posMax, sensitivity) (milder).
+ */
+export const PERCEPTION_SCALE = {
+  negMin: 0.3,
+  negMax: 1.6,
+  toleranceDamp: 0.25,
+  posMin: 0.7,
+  posMax: 1.2,
+} as const;

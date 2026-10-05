@@ -14,6 +14,7 @@ import {
   VISIT_HISTORY_CAP,
   VISIT_DEBUG_CAP,
 } from '../config/satisfaction';
+import { scalePerceivedDelta } from './ExperiencePerception';
 
 export interface CustomerTraits {
   cleanSens: number;
@@ -28,6 +29,8 @@ export interface ExperienceEvent {
   key: string;
   delta: number;
   atMs: number;
+  /** Optional human-readable detail for debug (Phase 2+: band, furniture). */
+  detail?: string;
 }
 
 export interface PatronExperience {
@@ -162,6 +165,35 @@ export function applyExperience(
   delta = Math.round(delta * 10) / 10;
   exp.satisfaction = clampSat(exp.satisfaction + delta);
   exp.events.push({ key, delta, atMs: Date.now() });
+  return delta;
+}
+
+export function hasPerceived(
+  patron: { profile: { name?: string; id?: string } },
+  key: string
+): boolean {
+  const exp = getExperience(patron);
+  return !!exp && exp.perceived.has(key);
+}
+
+/**
+ * Prompt A Phase 2: one-shot perceived delta with perception scaling
+ * (sensitive clients hurt more, tolerance damps negatives, positives milder).
+ * Zero-delta perceptions are still recorded (so they are not re-evaluated).
+ */
+export function applyPerceivedExperience(
+  patron: { profile: { name?: string; id?: string } },
+  key: string,
+  baseDelta: number,
+  sensTrait: SatisfactionTraitName,
+  detail?: string
+): number | null {
+  const exp = getExperience(patron);
+  if (!exp || !key || exp.perceived.has(key)) return null;
+  exp.perceived.add(key);
+  const delta = scalePerceivedDelta(baseDelta, exp.traits[sensTrait], exp.traits);
+  exp.satisfaction = clampSat(exp.satisfaction + delta);
+  exp.events.push({ key, delta, atMs: Date.now(), detail });
   return delta;
 }
 

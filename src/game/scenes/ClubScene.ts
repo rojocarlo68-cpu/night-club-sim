@@ -67,7 +67,18 @@ import {
   getVisitDebug,
   serializeCustomerTraits,
   loadCustomerTraits,
+  applyPerceivedExperience,
 } from '../systems/CustomerExperience';
+import {
+  comfortBandFor,
+  dirtBandFor,
+  isVisiblyDirty,
+  withinPerception,
+  dirtEpisodeKey,
+  markItemCleaned,
+  getDirtEpisodesDebug,
+} from '../systems/ExperiencePerception';
+import { PERCEPTION_INTERVAL_MS } from '../config/satisfaction';
 import {
   getCompetitiveness,
   observe as observeCompetition,
@@ -1599,6 +1610,8 @@ export class ClubScene extends Phaser.Scene {
       patron.showBubble('😌');
       // Nearby dirt / broken furniture hurts mood while seated
       if (this.qualityNearPatron(patron) < 0.4) patron.showBubble('¡Qué sucio!');
+      // Prompt A Phase 2: perceive the seat actually used (comfort + cleanliness), once.
+      this.perceiveUsedFurniture(patron, seat.furnitureId, true);
       const sitMs = Phaser.Math.Between(AI_TUNABLES.sitDurationMinMs, AI_TUNABLES.sitDurationMaxMs);
       this.time.delayedCall(sitMs, () => {
         if (!patron.active || this.phase !== 'open' || !patron.seated) return;
@@ -1773,6 +1786,9 @@ export class ClubScene extends Phaser.Scene {
       patron.seated = false;
       const bar = this.barSpots()?.bar;
       if (bar) patron.faceToward({ col: spot.col, row: spot.row - 1 });
+      // Prompt A Phase 2: the bar is used (cleanliness only; patrons stand there).
+      const usedBar = this.activeBar();
+      if (usedBar) this.perceiveUsedFurniture(patron, usedBar.id, false);
       patron.refreshStatusLabel();
       patron.showBubble(this.drinkDisplayName(patron.profile.preferredDrink));
       this.tryAssignServeAi(patron);
@@ -1973,6 +1989,48 @@ export class ClubScene extends Phaser.Scene {
     let q = 0.55 * (cleanSum / n) + 0.45 * (comfortSum / n);
     q -= (broken / n) * 0.35;
     return Math.max(0, Math.min(1, q));
+  }
+
+  /** Prompt A Phase 2: accumulator for proximity perception (ms). */
+  private perceptionAccum = 0;
+
+  /**
+   * Prompt A Phase 2: a patron uses a furniture piece. READS existing stats only.
+   * comfort:<id> once per visit (seats); dirt:<id>:<episode> or clean:<id> once.
+   */
+  private perceiveUsedFurniture(patron: Patron, furnitureId: string, seat: boolean): void {
+    const def = this.scenario.furniture.find((f) => f.id === furnitureId);
+    if (!def) return;
+    const st = this.statsOf(def);
+    const name = this.furnitureDisplayName(def);
+    if (seat) {
+      const cond = conditionFromDurability(st.durability, st.maxDurability);
+      const c = comfortBandFor(st, cond);
+      applyPerceivedExperience(patron, `comfort:${def.id}`, c.delta, 'comfortSens', `${name}: ${c.band} (${cond})`);
+    }
+    const d = dirtBandFor(st, true);
+    if (d.band === 'dirty' || d.band === 'very_dirty') {
+      applyPerceivedExperience(patron, dirtEpisodeKey(def.id, true), d.delta, 'cleanSens', `${name}: ${d.band} (usado)`);
+    } else {
+      dirtEpisodeKey(def.id, false); // lazy episode bookkeeping
+      if (d.band === 'clean') {
+        applyPerceivedExperience(patron, `clean:${def.id}`, d.delta, 'cleanSens', `${name}: clean (usado)`);
+      }
+    }
+  }
+
+  /** Prompt A Phase 2: only items within PERCEPTION_RADIUS_TILES of this patron (no global scan of state). */
+  private perceiveNearbyDirt(patron: Patron): void {
+    const { col, row } = patron.grid;
+    for (const def of this.scenario.furniture) {
+      if (!withinPerception(col, row, def.tile, def.footprint)) continue;
+      const st = this.statsOf(def);
+      const dirty = isVisiblyDirty(st);
+      const key = dirtEpisodeKey(def.id, dirty);
+      if (!dirty) continue;
+      const d = dirtBandFor(st, false);
+      applyPerceivedExperience(patron, key, d.delta, 'cleanSens', `${this.furnitureDisplayName(def)}: ${d.band} (visto)`);
+    }
   }
 
   private qualityNearPatron(patron: Patron): number {
@@ -2563,7 +2621,7 @@ export class ClubScene extends Phaser.Scene {
       traits: { ...e.traits },
       events: e.events.map((ev) => ({ ...ev })),
     }));
-    return { active, visits: getVisitDebug() };
+    return { active, visits: getVisitDebug(), dirtEpisodes: getDirtEpisodesDebug() };
   }
 
   /** Phase 6 test/debug: competitiveness + rolling tips per staff. */
@@ -2913,6 +2971,8 @@ export class ClubScene extends Phaser.Scene {
           const st = this.statsOf(def);
           applyCleanRestore(st);
           this.writeStatsToDef(def, st);
+          // Prompt A Phase 2: close dirt episode so new clients aren't penalised for old dirt.
+          markItemCleaned(def.id);
           this.refreshDirtOverlay(def);
           staff.profile.energy = Math.max(0, staff.profile.energy - Phaser.Math.Between(5, 10));
           staff.profile.mood = Math.min(100, staff.profile.mood + 2);
@@ -3090,6 +3150,13 @@ export class ClubScene extends Phaser.Scene {
       this.competitionObserveAccum = 0;
       const presentIds = this.allStaff().map((s) => s.profile.id);
       observeCompetition(presentIds);
+    }
+
+    // Prompt A Phase 2: low-rate proximity perception of visibly dirty furniture.
+    this.perceptionAccum += dt;
+    if (this.perceptionAccum >= PERCEPTION_INTERVAL_MS) {
+      this.perceptionAccum = 0;
+      for (const p of this.patrons) if (p.active) this.perceiveNearbyDirt(p);
     }
 
     for (const patron of [...this.patrons]) {
