@@ -249,8 +249,11 @@ interface Scenario {
   id: string;
   title: string;
   startingMoney: number;
+  /** @deprecated B7 — legacy 75s auto-close length; unused by organic arrivals. */
   nightDurationSec: number;
+  /** @deprecated B4+ — unused (organic Arrivals). Kept for JSON compat. */
   patronSpawnCount: [number, number];
+  /** @deprecated B4+ — unused (organic Arrivals). Kept for JSON compat. */
   spawnIntervalMs: number;
   map: { cols: number; rows: number; tileWidth: number; tileHeight: number };
   /** Non-walkable / non-placeable tiles (empty now that the stage is gone). */
@@ -1743,7 +1746,7 @@ export class ClubScene extends Phaser.Scene {
     this.spawnLeft = 0;
     const snap = getShiftSnapshot();
     const staffCount = this.allStaff().length;
-    beginArrivalsNight(snap.gameHour, snap.gameMinute, staffCount);
+    beginArrivalsNight(snap.gameHour, snap.gameMinute, staffCount, this.nightNumber);
     this.game.events.emit('night-started', this.getHudState());
   };
 

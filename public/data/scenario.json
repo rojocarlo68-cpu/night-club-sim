@@ -77,5 +77,6 @@
       "price": 6,
       "serveTimeMs": 1000
     }
-  ]
+  ],
+  "_deprecated_spawnNote": "patronSpawnCount and spawnIntervalMs unused since Prompt B4 (organic Arrivals). nightDurationSec removed as auto-close in B7."
 }

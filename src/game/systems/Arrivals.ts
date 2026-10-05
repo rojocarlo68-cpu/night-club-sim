@@ -1,6 +1,8 @@
 /**
- * Prompt B Phase B4 — single organic arrival scheduler (replaces fixed 400ms/2200ms quota).
+ * Prompt B Phase B4–B6 — single organic arrival scheduler.
  * Decides WHEN patrons may spawn; ClubScene.spawnPatron still creates the entity.
+ *
+ * Soft cap = ceiling (potential), NOT a fill target.
  */
 
 import {
@@ -15,11 +17,16 @@ import {
   GROUP_STAGGER_GAME_MINUTES,
   QUIET_STRETCH_CHANCE,
   QUIET_INTERVAL_MULT,
+  QUIET_MIN_GAME_MINUTES,
   STOP_SPAWN_WHEN_NIGHT_TIMER_BELOW_SEC,
   HOUR_DEMAND_MULT,
   INTERVAL_JITTER_GAME_MINUTES,
+  LATE_OPEN_PENALTY_PER_GAME_HOUR,
+  MIN_SOFT_CAP,
+  earlyNightDemandScale,
 } from '../config/demand';
 import { formatGameClock, getShiftState, type ShiftState } from './Shift';
+import { RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE } from '../config/shift';
 
 export interface ArrivalLogEntry {
   hhmm: string;
@@ -32,32 +39,38 @@ export interface ArrivalLogEntry {
 export interface ArrivalsTickContext {
   gameHour: number;
   gameMinute: number;
+  /** @deprecated B7 — pass Infinity when nightTimer is removed. */
   nightTimerSec: number;
   shiftState?: ShiftState;
-  /** Present staff count — hook for future demand scaling (unused in B4). */
+  /** Present staff count — hook for future demand scaling. */
   staffCount?: number;
 }
 
 let rngState = (Date.now() % 1000000000) + 1;
 let spawnedTonight = 0;
 let softCap = EARLY_NIGHT_SOFT_CAP;
+let demandScale = 1;
+let lateOpenPenalty = 0;
 let nextDueAbsMin: number | null = null;
-/** Remaining companions to spawn after a group lead. */
 let pendingGroupExtra = 0;
 let arrivalsActive = false;
 let openAbsMin = 18 * 60;
+let nightIndex = 1;
 const arrivalLog: ArrivalLogEntry[] = [];
-/** Absolute minutes when each patron spawned (for interval checks). */
 const spawnAbsTimes: number[] = [];
 
 function lcg(): number {
-  // Numerical Recipes LCG
   rngState = (Math.imul(rngState, 1664525) + 1013904223) >>> 0;
   return rngState / 0x100000000;
 }
 
 export function setArrivalsSeed(seed: number): void {
-  rngState = (Math.floor(seed) >>> 0) || 1;
+  // Mix seed so nearby integers diverge on the first rolls (B5 RNG fix).
+  const s = Math.floor(seed) >>> 0;
+  rngState = (Math.imul(s ^ 0x9e3779b9, 0x85ebca6b) >>> 0) || 1;
+  // Warm a few steps so the first consumer isn't correlated across seeds.
+  lcg();
+  lcg();
 }
 
 function randUnit(): number {
@@ -71,14 +84,14 @@ function randInt(min: number, max: number): number {
 }
 
 function absMin(hour: number, minute: number): number {
-  return ((Math.floor(hour) % 24) + 24) % 24 * 60 + Math.max(0, Math.min(59, Math.floor(minute)));
+  return (
+    (((Math.floor(hour) % 24) + 24) % 24) * 60 + Math.max(0, Math.min(59, Math.floor(minute)))
+  );
 }
 
-/** Continuity across midnight relative to openAbsMin. */
 function nowAbsContinuous(hour: number, minute: number): number {
   let now = absMin(hour, minute);
   if (now < openAbsMin - 12 * 60) {
-    // crossed midnight after an evening open
     now += 24 * 60;
   }
   return now;
@@ -90,13 +103,21 @@ function hourMult(hour: number): number {
   return typeof m === 'number' && m > 0 ? m : 1;
 }
 
+function rollFirstArrivalDelay(): number {
+  // Two-sample mix so the full 2–12 range is hit across seeds (B5).
+  const u = (randUnit() * 0.61 + randUnit() * 0.39) % 1;
+  const a = FIRST_ARRIVAL_MIN_GAME_MINUTES;
+  const b = FIRST_ARRIVAL_MAX_GAME_MINUTES;
+  return a + Math.floor(u * (b - a + 1));
+}
+
 function rollIntervalGameMinutes(atHour: number): number {
   let span = randInt(MIN_INTERVAL_GAME_MINUTES, MAX_INTERVAL_GAME_MINUTES);
-  const mult = hourMult(atHour) * Math.max(0.25, BASE_DEMAND);
-  // Higher demand → shorter gaps
+  const mult = hourMult(atHour) * Math.max(0.25, BASE_DEMAND) * Math.max(0.25, demandScale);
+  // Higher demand → shorter gaps; early-night low scale → longer gaps
   span = Math.round(span / mult);
   if (randUnit() < QUIET_STRETCH_CHANCE) {
-    span = Math.round(span * QUIET_INTERVAL_MULT);
+    span = Math.max(QUIET_MIN_GAME_MINUTES, Math.round(span * QUIET_INTERVAL_MULT));
   }
   if (INTERVAL_JITTER_GAME_MINUTES > 0) {
     span += randInt(-INTERVAL_JITTER_GAME_MINUTES, INTERVAL_JITTER_GAME_MINUTES);
@@ -109,25 +130,49 @@ function scheduleNextAfter(fromAbs: number, atHour: number): void {
   nextDueAbsMin = fromAbs + gap;
 }
 
+function computeSoftCap(nightNumber: number, openHour: number, openMinute: number): {
+  cap: number;
+  scale: number;
+  latePenalty: number;
+} {
+  const scale = earlyNightDemandScale(nightNumber);
+  let cap = Math.round(EARLY_NIGHT_SOFT_CAP * scale);
+  // Late-open hook: only when clock is past recommended open at Abrir.
+  const openAbs = absMin(openHour, openMinute);
+  const recommendedAbs = absMin(RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE);
+  let latePenalty = 0;
+  if (openAbs > recommendedAbs) {
+    const hoursLate = (openAbs - recommendedAbs) / 60;
+    latePenalty = Math.floor(hoursLate) * LATE_OPEN_PENALTY_PER_GAME_HOUR;
+    cap -= latePenalty;
+  }
+  cap = Math.max(MIN_SOFT_CAP, cap);
+  return { cap, scale, latePenalty };
+}
+
 /**
  * Start a night of arrivals. Call once from openNight after shift is OPEN.
- * @param staffCount Luna+Nova (+hired) — reserved for B5+ demand scaling.
  */
 export function beginArrivalsNight(
   openHour: number,
   openMinute: number,
-  staffCount: number
+  staffCount: number,
+  nightNumber = 1
 ): void {
-  // B5+/B11: scale softCap / intervals using staffCount + club development.
+  // B11: scale further using staffCount + club development / reputation.
   void staffCount;
+  nightIndex = Math.max(1, Math.floor(nightNumber) || 1);
+  const computed = computeSoftCap(nightIndex, openHour, openMinute);
+  demandScale = computed.scale;
+  lateOpenPenalty = computed.latePenalty;
+  softCap = computed.cap;
   spawnedTonight = 0;
-  softCap = EARLY_NIGHT_SOFT_CAP;
   pendingGroupExtra = 0;
   arrivalsActive = true;
   arrivalLog.length = 0;
   spawnAbsTimes.length = 0;
   openAbsMin = absMin(openHour, openMinute);
-  const delay = randInt(FIRST_ARRIVAL_MIN_GAME_MINUTES, FIRST_ARRIVAL_MAX_GAME_MINUTES);
+  const delay = rollFirstArrivalDelay();
   nextDueAbsMin = openAbsMin + delay;
 }
 
@@ -142,19 +187,25 @@ function canAcceptMore(nightTimerSec: number, shiftState: ShiftState): boolean {
   if (shiftState === 'closing' || shiftState === 'summary' || shiftState === 'closed') {
     return false;
   }
-  if (nightTimerSec < STOP_SPAWN_WHEN_NIGHT_TIMER_BELOW_SEC) return false;
+  // B7 will stop passing a finite nightTimer; treat non-finite / huge as "no timer limit".
+  if (
+    Number.isFinite(nightTimerSec) &&
+    nightTimerSec < STOP_SPAWN_WHEN_NIGHT_TIMER_BELOW_SEC
+  ) {
+    return false;
+  }
   if (spawnedTonight >= softCap) return false;
   return true;
 }
 
-/**
- * Process due arrivals at the current game clock.
- * @returns how many patrons ClubScene should spawn right now (usually 0 or 1).
- */
 export function tickArrivals(ctx: ArrivalsTickContext): number {
   const shiftState = ctx.shiftState ?? getShiftState();
   if (!canAcceptMore(ctx.nightTimerSec, shiftState)) {
-    if (spawnedTonight >= softCap || ctx.nightTimerSec < STOP_SPAWN_WHEN_NIGHT_TIMER_BELOW_SEC) {
+    if (
+      spawnedTonight >= softCap ||
+      (Number.isFinite(ctx.nightTimerSec) &&
+        ctx.nightTimerSec < STOP_SPAWN_WHEN_NIGHT_TIMER_BELOW_SEC)
+    ) {
       arrivalsActive = false;
     }
     return 0;
@@ -164,7 +215,6 @@ export function tickArrivals(ctx: ArrivalsTickContext): number {
   const now = nowAbsContinuous(ctx.gameHour, ctx.gameMinute);
   if (now < nextDueAbsMin) return 0;
 
-  // One spawn event per tick call (group extras get their own due times).
   spawnedTonight += 1;
   spawnAbsTimes.push(now);
   const hhmm = formatGameClock(ctx.gameHour, ctx.gameMinute);
@@ -189,7 +239,6 @@ export function tickArrivals(ctx: ArrivalsTickContext): number {
     return 1;
   }
 
-  // Lead of solo or group
   const roomForGroup =
     MAX_GROUP_SIZE > 1 && spawnedTonight + (MAX_GROUP_SIZE - 1) <= softCap;
   const isGroup = roomForGroup && randUnit() < GROUP_CHANCE;
@@ -220,10 +269,16 @@ export function getArrivalsDebug() {
   for (let i = 1; i < spawnAbsTimes.length; i++) {
     intervals.push(spawnAbsTimes[i] - spawnAbsTimes[i - 1]);
   }
+  const quietSpans = intervals.filter((x) => x >= QUIET_MIN_GAME_MINUTES);
   return {
     spawnedTonight,
     softCap,
+    /** Ceiling constant — not a fill target. */
     earlyNightSoftCap: EARLY_NIGHT_SOFT_CAP,
+    softCapIsCeilingNotTarget: true,
+    demandScale,
+    lateOpenPenalty,
+    nightIndex,
     baseDemand: BASE_DEMAND,
     arrivalsActive,
     nextDueAbsMin,
@@ -233,12 +288,21 @@ export function getArrivalsDebug() {
       number,
       number,
     ],
+    firstArrivalDelayScheduled:
+      nextDueAbsMin != null && spawnAbsTimes.length === 0
+        ? nextDueAbsMin - openAbsMin
+        : spawnAbsTimes.length > 0
+          ? spawnAbsTimes[0] - openAbsMin
+          : null,
     intervalRange: [MIN_INTERVAL_GAME_MINUTES, MAX_INTERVAL_GAME_MINUTES] as [number, number],
     groupChance: GROUP_CHANCE,
     maxGroupSize: MAX_GROUP_SIZE,
+    quietStretchChance: QUIET_STRETCH_CHANCE,
+    quietMinGameMinutes: QUIET_MIN_GAME_MINUTES,
     arrivalLog: arrivalLog.map((e) => ({ ...e })),
     spawnAbsTimes: [...spawnAbsTimes],
     intervalsGameMinutes: intervals,
+    quietSpansGameMinutes: quietSpans,
     stopBelowNightTimerSec: STOP_SPAWN_WHEN_NIGHT_TIMER_BELOW_SEC,
   };
 }
