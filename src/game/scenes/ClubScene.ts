@@ -61,6 +61,14 @@ import {
   loadAffinities,
 } from '../systems/Affinity';
 import {
+  createExperience,
+  finalizeVisit,
+  getActiveExperiences,
+  getVisitDebug,
+  serializeCustomerTraits,
+  loadCustomerTraits,
+} from '../systems/CustomerExperience';
+import {
   getCompetitiveness,
   observe as observeCompetition,
   noteTip,
@@ -205,6 +213,18 @@ interface SavedLayout {
     total: number;
     lines: { label: string; amount: number }[];
   }[];
+  /** Prompt A Phase 1: stable patronName→satisfaction traits. Old saves omit → rolled fresh. */
+  customerTraits?: Record<
+    string,
+    {
+      cleanSens?: number;
+      comfortSens?: number;
+      priceSens?: number;
+      availSens?: number;
+      generosity?: number;
+      tolerance?: number;
+    }
+  >;
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -593,6 +613,7 @@ export class ClubScene extends Phaser.Scene {
       }
       loadTips(saved?.staffTips);
       loadAffinities(saved?.affinities);
+      loadCustomerTraits(saved?.customerTraits);
       loadCompetition(saved?.competition);
       loadPayrollHistory(saved?.payrollHistory);
       loadUtilitiesHistory(saved?.utilitiesHistory);
@@ -701,6 +722,7 @@ export class ClubScene extends Phaser.Scene {
       seeded: ['bar'],
       staffTips: serializeTips(),
       affinities: serializeAffinities(),
+      customerTraits: serializeCustomerTraits(),
       competition: serializeCompetition(),
       nightNumber: this.nightNumber,
       payrollHistory: serializePayrollHistory(),
@@ -1482,7 +1504,10 @@ export class ClubScene extends Phaser.Scene {
   };
 
   private resetForNewNight(): void {
-    this.patrons.forEach((p) => p.destroy());
+    this.patrons.forEach((p) => {
+      finalizeVisit(p);
+      p.destroy();
+    });
     this.patrons = [];
     // Keep Luna/Nova where they are on the floor (free staff).
     this.syncBartenderBarDepth();
@@ -1527,6 +1552,8 @@ export class ClubScene extends Phaser.Scene {
     patron.reapplyDisplaySize();
     this.wirePatronClick(patron);
     this.patrons.push(patron);
+    // Prompt A Phase 1: invisible satisfaction (does not alter nightMood/patience).
+    createExperience(patron);
     this.chooseMainPatronGoal(patron);
   }
 
@@ -1986,6 +2013,8 @@ export class ClubScene extends Phaser.Scene {
       row: this.scenario.exitTile[1],
     };
     const gone = () => {
+      // Prompt A Phase 1: snapshot visit satisfaction (no behaviour change yet).
+      finalizeVisit(patron);
       if (this.selectedNpcId === patron.profile.id) {
         this.deselectNpc();
         this.game.events.emit('npc-deselected');
@@ -2448,6 +2477,7 @@ export class ClubScene extends Phaser.Scene {
       this.game.events.emit('npc-deselected');
     }
     this.patrons.forEach((p) => {
+      finalizeVisit(p);
       this.releaseTile(p.grid);
       p.destroy();
     });
@@ -2523,6 +2553,17 @@ export class ClubScene extends Phaser.Scene {
   /** Phase 5 test/debug: recent served affinity outcomes (ring ~50). */
   getAffinityDebug() {
     return readAffinityDebug();
+  }
+
+  /** Prompt A Phase 1 test/debug: active patron satisfaction + last ~20 visits. */
+  getExperienceDebug() {
+    const active = getActiveExperiences().map((e) => ({
+      name: e.name,
+      satisfaction: e.satisfaction,
+      traits: { ...e.traits },
+      events: e.events.map((ev) => ({ ...ev })),
+    }));
+    return { active, visits: getVisitDebug() };
   }
 
   /** Phase 6 test/debug: competitiveness + rolling tips per staff. */
