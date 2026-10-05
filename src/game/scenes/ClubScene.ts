@@ -32,8 +32,13 @@ import {
   serializePayrollHistory,
   loadPayrollHistory,
 } from '../systems/Payroll';
+import {
+  takeLastUtilities,
+  serializeUtilitiesHistory,
+  loadUtilitiesHistory,
+} from '../systems/Utilities';
 import { ALLOW_NEGATIVE_BALANCE, weeklySalaryFor } from '../config/salaries';
-import { nextWeekEndNight } from '../config/calendar';
+import { nextWeekEndNight, nextMonthEndNight } from '../config/calendar';
 import { getPersonality, personalitySummary } from '../config/personality';
 import { TipAction } from '../config/tipActions';
 import {
@@ -193,6 +198,12 @@ interface SavedLayout {
     night: number;
     total: number;
     lines: { id: string; name: string; amount: number }[];
+  }[];
+  /** Phase 9: short monthly utilities history. Old saves omit → []. */
+  utilitiesHistory?: {
+    night: number;
+    total: number;
+    lines: { label: string; amount: number }[];
   }[];
 }
 
@@ -584,6 +595,7 @@ export class ClubScene extends Phaser.Scene {
       loadAffinities(saved?.affinities);
       loadCompetition(saved?.competition);
       loadPayrollHistory(saved?.payrollHistory);
+      loadUtilitiesHistory(saved?.utilitiesHistory);
       resetNightCycleState();
       if (typeof saved?.nightNumber === 'number' && Number.isFinite(saved.nightNumber)) {
         this.nightNumber = Math.max(1, Math.floor(saved.nightNumber));
@@ -692,6 +704,7 @@ export class ClubScene extends Phaser.Scene {
       competition: serializeCompetition(),
       nightNumber: this.nightNumber,
       payrollHistory: serializePayrollHistory(),
+      utilitiesHistory: serializeUtilitiesHistory(),
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -2455,6 +2468,7 @@ export class ClubScene extends Phaser.Scene {
     const endedNight = onNightEnd(this);
     this.persistLayout();
     const payroll = takeLastPayroll();
+    const utilities = takeLastUtilities();
     this.game.events.emit('night-summary', {
       ...this.getHudState(),
       nightNumber: endedNight,
@@ -2464,6 +2478,13 @@ export class ClubScene extends Phaser.Scene {
         ? { total: payroll.total, lines: payroll.lines.map((l) => ({ name: l.name, amount: l.amount })) }
         : null,
       nextPayrollNight: nextWeekEndNight(endedNight),
+      utilities: utilities
+        ? {
+            total: utilities.total,
+            lines: utilities.lines.map((l) => ({ label: l.label, amount: l.amount })),
+          }
+        : null,
+      nextUtilitiesNight: nextMonthEndNight(endedNight),
     });
     this.emitStaffRoster();
   }

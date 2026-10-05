@@ -27,6 +27,10 @@ interface HudState {
   payroll?: { total: number; lines: { name: string; amount: number }[] } | null;
   /** Phase 8: next night that triggers weekly salaries. */
   nextPayrollNight?: number;
+  /** Phase 9: utilities paid on this night end (if any). */
+  utilities?: { total: number; lines: { label: string; amount: number }[] } | null;
+  /** Phase 9: next night that triggers monthly utilities. */
+  nextUtilitiesNight?: number;
 }
 
 const STATE_ES: Record<string, string> = {
@@ -48,6 +52,14 @@ const STATE_ES: Record<string, string> = {
   wandering: 'Deambulando',
 };
 
+
+/** Display money as $N or -$N (never $-N). */
+function formatMoney(n: number): string {
+  const v = Math.floor(Number.isFinite(n) ? n : 0);
+  if (v < 0) return `-$${Math.abs(v)}`;
+  return `$${v}`;
+}
+
 const PANEL_W = 260;
 const PANEL_H = 400;
 /** Gap above bottom edge (clears Construir/Staff row ~48px). */
@@ -65,6 +77,12 @@ export class UIScene extends Phaser.Scene {
   private panelVisible = false;
   private panelDismissBtn!: Phaser.GameObjects.Container;
   private summary!: Phaser.GameObjects.Container;
+  private summaryBg!: Phaser.GameObjects.Rectangle;
+  private summaryTitle!: Phaser.GameObjects.Text;
+  private summaryBody!: Phaser.GameObjects.Text;
+  private summaryAgain!: Phaser.GameObjects.Container;
+  private summaryClose!: Phaser.GameObjects.Container;
+  private lastSummaryBody = '';
   private energyBar!: Phaser.GameObjects.Rectangle;
   private moodBar!: Phaser.GameObjects.Rectangle;
   private energyLabel!: Phaser.GameObjects.Text;
@@ -288,37 +306,43 @@ export class UIScene extends Phaser.Scene {
       });
     }
 
-    // Summary overlay
+    // Summary overlay (auto-sized in layoutSummary)
     this.summary = this.add.container(cam.width / 2, cam.height / 2).setScrollFactor(0).setVisible(false);
-    const sumBg = this.add.rectangle(0, 0, 400, 320, 0x140a22, 0.95);
-    sumBg.setStrokeStyle(2, 0x2ad6ff);
-    sumBg.setInteractive();
-    const sumTitle = this.add
-      .text(0, -100, 'Fin de la noche', {
+    this.summaryBg = this.add.rectangle(0, 0, 400, 320, 0x140a22, 0.95);
+    this.summaryBg.setStrokeStyle(2, 0x2ad6ff);
+    this.summaryBg.setInteractive();
+    this.summaryTitle = this.add
+      .text(0, 0, 'Fin de la noche', {
         fontSize: '24px',
         color: '#2ad6ff',
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
       .setName('title');
-    const sumBody = this.add
-      .text(0, -10, '', {
+    this.summaryBody = this.add
+      .text(0, 0, '', {
         fontSize: '15px',
         color: '#f0e0ff',
         align: 'center',
-        lineSpacing: 8,
+        lineSpacing: 6,
       })
-      .setOrigin(0.5)
+      .setOrigin(0.5, 0)
       .setName('body');
-    const again = this.makeLocalButton(-100, 110, 200, 40, 'Abrir noche', () => {
+    this.summaryAgain = this.makeLocalButton(-100, 0, 200, 40, 'Abrir noche', () => {
       if (this.buildMode) return;
       this.summary.setVisible(false);
       this.game.events.emit('cmd-open-night');
     });
-    const sumClose = this.makeLocalButton(152, -118, 36, 32, '✕', () => {
+    this.summaryClose = this.makeLocalButton(0, 0, 36, 32, '✕', () => {
       this.summary.setVisible(false);
     });
-    this.summary.add([sumBg, sumTitle, sumBody, again, sumClose]);
+    this.summary.add([
+      this.summaryBg,
+      this.summaryTitle,
+      this.summaryBody,
+      this.summaryAgain,
+      this.summaryClose,
+    ]);
 
     this.createStaffPanel();
     this.createShopPanel();
@@ -628,7 +652,7 @@ export class UIScene extends Phaser.Scene {
 
   private onStats = (s: HudState): void => {
     this.phase = s.phase;
-    this.moneyText.setText(`Dinero: $${s.money}`);
+    this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
     const label = this.nightLabel(s);
     if (s.phase === 'open') {
       this.timerText.setText(`${label} · ${s.nightTimer}s`);
@@ -678,31 +702,37 @@ export class UIScene extends Phaser.Scene {
     this.closeBtn.setVisible(false);
     const label = this.nightLabel(s);
     this.timerText.setText(`${label} · cerrada`);
-    this.moneyText.setText(`Dinero: $${s.money}`);
-    const body = this.summary.getByName('body') as Phaser.GameObjects.Text;
-    let payrollBlock = '';
+    this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
+
+    const lines: string[] = [
+      label,
+      `Ganado esta noche: ${formatMoney(s.nightEarned ?? 0)}`,
+      `Clientes que se sentaron: ${s.servedCount ?? 0}`,
+      `Dinero total: ${formatMoney(s.money)}`,
+    ];
     if (s.payroll && s.payroll.total > 0) {
-      const per =
-        s.payroll.lines.length > 0
-          ? '\n' + s.payroll.lines.map((l) => `  ${l.name}: $${l.amount}`).join('\n')
-          : '';
-      payrollBlock = `\nSueldos semanales: -$${s.payroll.total}` + per;
+      lines.push(`Sueldos semanales: -$${s.payroll.total}`);
+      for (const l of s.payroll.lines) {
+        lines.push(`  ${l.name}: $${l.amount}`);
+      }
     }
-    const nextPay =
-      typeof s.nextPayrollNight === 'number' && s.nextPayrollNight > 0
-        ? `\nPróximo pago de sueldos: noche ${s.nextPayrollNight}`
-        : '';
-    const debtWarn =
-      s.money < 0 ? '\n⚠ Dinero negativo: el club está en números rojos' : '';
-    body.setText(
-      `${label}\n` +
-        `Ganado esta noche: $${s.nightEarned ?? 0}\n` +
-        `Clientes que se sentaron: ${s.servedCount ?? 0}\n` +
-        `Dinero total: $${s.money}` +
-        payrollBlock +
-        nextPay +
-        debtWarn
-    );
+    if (typeof s.nextPayrollNight === 'number' && s.nextPayrollNight > 0) {
+      lines.push(`Próximo pago de sueldos: noche ${s.nextPayrollNight}`);
+    }
+    if (s.utilities && s.utilities.total > 0) {
+      lines.push(`Servicios del mes: -$${s.utilities.total}`);
+      for (const l of s.utilities.lines) {
+        lines.push(`  ${l.label}: $${l.amount}`);
+      }
+    }
+    if (typeof s.nextUtilitiesNight === 'number' && s.nextUtilitiesNight > 0) {
+      lines.push(`Próximo pago de servicios: noche ${s.nextUtilitiesNight}`);
+    }
+    if (s.money < 0) {
+      lines.push('⚠ Dinero negativo: el club está en números rojos');
+    }
+
+    this.layoutSummary(lines.join('\n'));
     this.summary.setVisible(true);
     // Patrons are cleared — if a patron was selected, close panel
     if (this.selectedNpc?.role === 'patron') {
@@ -721,6 +751,117 @@ export class UIScene extends Phaser.Scene {
     this.refreshBuildButtons();
   };
 
+  /**
+   * Auto-size the night-summary panel so payroll + utilities lines never
+   * overlap the title or spill past the box / viewport.
+   */
+  private layoutSummary(bodyText: string): void {
+    this.lastSummaryBody = bodyText;
+    const cam = this.cameras.main;
+    const maxW = Math.min(520, Math.max(280, cam.width - 32));
+    const maxH = Math.max(220, cam.height - 48);
+    const padX = 28;
+    const padTop = 22;
+    const padBot = 18;
+    const titleGap = 14;
+    const btnH = 40;
+    const btnGap = 16;
+    const closeSize = 36;
+
+    let fontSize = 15;
+    let lineSpacing = 6;
+    let useColumns = false;
+
+    const measure = (fs: number, ls: number, wrapW: number, twoCol: boolean) => {
+      this.summaryBody.setStyle({
+        fontSize: `${fs}px`,
+        color: '#f0e0ff',
+        align: twoCol ? 'left' : 'center',
+        lineSpacing: ls,
+        wordWrap: { width: wrapW, useAdvancedWrap: true },
+      });
+      this.summaryBody.setOrigin(twoCol ? 0 : 0.5, 0);
+      this.summaryBody.setText(bodyText);
+      return {
+        bw: Math.ceil(this.summaryBody.width),
+        bh: Math.ceil(this.summaryBody.height),
+      };
+    };
+
+    // Title size may shrink on very short viewports
+    let titleFs = 24;
+    this.summaryTitle.setFontSize(titleFs);
+    let titleH = Math.ceil(this.summaryTitle.height);
+
+    let panelW = Math.min(400, maxW);
+    let wrapW = panelW - padX * 2;
+    let m = measure(fontSize, lineSpacing, wrapW, false);
+    let contentH = padTop + titleH + titleGap + m.bh + btnGap + btnH + padBot;
+
+    // Grow width if wrapped lines are still too tall or text is wider
+    if (contentH > maxH || m.bw + padX * 2 > panelW) {
+      panelW = maxW;
+      wrapW = panelW - padX * 2;
+      m = measure(fontSize, lineSpacing, wrapW, false);
+      contentH = padTop + titleH + titleGap + m.bh + btnGap + btnH + padBot;
+    }
+
+    // Shrink font / spacing if still too tall
+    while (contentH > maxH && fontSize > 11) {
+      fontSize -= 1;
+      lineSpacing = Math.max(3, lineSpacing - 1);
+      if (titleFs > 18) {
+        titleFs -= 1;
+        this.summaryTitle.setFontSize(titleFs);
+        titleH = Math.ceil(this.summaryTitle.height);
+      }
+      m = measure(fontSize, lineSpacing, wrapW, false);
+      contentH = padTop + titleH + titleGap + m.bh + btnGap + btnH + padBot;
+    }
+
+    // Last resort on tiny screens: left-aligned two-ish column feel via wider wrap already;
+    // if still overflowing, clip body height conceptually by smaller spacing already applied.
+    if (contentH > maxH) {
+      useColumns = true;
+      wrapW = panelW - padX * 2;
+      m = measure(Math.max(11, fontSize - 1), 3, wrapW, true);
+      contentH = padTop + titleH + titleGap + m.bh + btnGap + btnH + padBot;
+    }
+
+    const panelH = Math.min(maxH, Math.max(280, contentH));
+    // If still too tall, leave a bit of scroll room by clamping body visually inside
+    const availableBody = panelH - padTop - titleH - titleGap - btnGap - btnH - padBot;
+    if (m.bh > availableBody) {
+      // Prefer smaller font one more step rather than overflow
+      fontSize = Math.max(10, fontSize - 1);
+      m = measure(fontSize, 3, wrapW, useColumns);
+    }
+
+    this.summaryBg.setSize(panelW, panelH);
+    // Phaser Rectangle origin is center by default
+    this.summaryBg.setPosition(0, 0);
+
+    const topY = -panelH / 2;
+    const titleY = topY + padTop + titleH / 2;
+    this.summaryTitle.setPosition(0, titleY);
+
+    const bodyY = titleY + titleH / 2 + titleGap;
+    if (useColumns) {
+      this.summaryBody.setPosition(-wrapW / 2, bodyY);
+    } else {
+      this.summaryBody.setPosition(0, bodyY);
+    }
+
+    const btnY = panelH / 2 - padBot - btnH / 2;
+    this.summaryAgain.setPosition(-100, btnY);
+
+    const closeX = panelW / 2 - closeSize / 2 - 10;
+    const closeY = topY + closeSize / 2 + 8;
+    this.summaryClose.setPosition(closeX, closeY);
+
+    this.summary.setPosition(cam.width / 2, cam.height / 2);
+  }
+
   private onResize = (gameSize: Phaser.Structs.Size): void => {
     const w = gameSize.width;
     const h = gameSize.height;
@@ -735,7 +876,11 @@ export class UIScene extends Phaser.Scene {
       this.furnPanel.setPosition(w - 20, h - PANEL_BOTTOM_MARGIN - 280);
     }
     this.timerText.setX(w / 2);
-    this.summary.setPosition(w / 2, h / 2);
+    if (this.summary.visible && this.lastSummaryBody) {
+      this.layoutSummary(this.lastSummaryBody);
+    } else {
+      this.summary.setPosition(w / 2, h / 2);
+    }
     this.staffPanel.setPosition(w / 2, h / 2);
     if (this.shopPanel) this.shopPanel.setPosition(w / 2, h / 2);
     this.layoutDeleteConfirm(w, h);
@@ -1205,7 +1350,7 @@ export class UIScene extends Phaser.Scene {
     }
 
     const moneyHint = this.add
-      .text(0, -148, `Dinero: $${catalog.money}`, {
+      .text(0, -148, `Dinero: ${formatMoney(catalog.money)}`, {
         fontSize: '13px',
         color: '#ffe066',
       })

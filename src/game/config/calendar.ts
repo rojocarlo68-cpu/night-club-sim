@@ -26,3 +26,10 @@ export function nextWeekEndNight(n: number): number {
   return rem === 0 ? cur + NIGHTS_PER_WEEK : cur + (NIGHTS_PER_WEEK - rem);
 }
 
+/** Next night number that triggers monthly dues after `n` (or the following if `n` is already a month end). */
+export function nextMonthEndNight(n: number): number {
+  const cur = Math.max(0, Math.floor(n) || 0);
+  const rem = cur % NIGHTS_PER_MONTH;
+  return rem === 0 ? cur + NIGHTS_PER_MONTH : cur + (NIGHTS_PER_MONTH - rem);
+}
+
