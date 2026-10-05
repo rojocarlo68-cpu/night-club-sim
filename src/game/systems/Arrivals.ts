@@ -24,6 +24,8 @@ import {
   LATE_OPEN_PENALTY_PER_GAME_HOUR,
   MIN_SOFT_CAP,
   earlyNightDemandScale,
+  getDemandModifiersProduct,
+  demandModifiers,
 } from '../config/demand';
 import { formatGameClock, getShiftState, type ShiftState } from './Shift';
 import { RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE } from '../config/shift';
@@ -113,7 +115,11 @@ function rollFirstArrivalDelay(): number {
 
 function rollIntervalGameMinutes(atHour: number): number {
   let span = randInt(MIN_INTERVAL_GAME_MINUTES, MAX_INTERVAL_GAME_MINUTES);
-  const mult = hourMult(atHour) * Math.max(0.25, BASE_DEMAND) * Math.max(0.25, demandScale);
+  const mult =
+    hourMult(atHour) *
+    Math.max(0.25, BASE_DEMAND) *
+    Math.max(0.25, demandScale) *
+    getDemandModifiersProduct();
   // Higher demand → shorter gaps; early-night low scale → longer gaps
   span = Math.round(span / mult);
   if (randUnit() < QUIET_STRETCH_CHANCE) {
@@ -159,7 +165,7 @@ export function beginArrivalsNight(
   staffCount: number,
   nightNumber = 1
 ): void {
-  // B11: scale further using staffCount + club development / reputation.
+  // B11: staffCount reserved for absence/capacity; demandModifiers stub applied in intervals.
   void staffCount;
   nightIndex = Math.max(1, Math.floor(nightNumber) || 1);
   const computed = computeSoftCap(nightIndex, openHour, openMinute);
@@ -280,6 +286,8 @@ export function getArrivalsDebug() {
     lateOpenPenalty,
     nightIndex,
     baseDemand: BASE_DEMAND,
+    demandModifiers: { ...demandModifiers },
+    demandModifiersProduct: getDemandModifiersProduct(),
     arrivalsActive,
     nextDueAbsMin,
     pendingGroupExtra,

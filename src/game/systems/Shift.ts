@@ -3,7 +3,7 @@
  *
  * B2 clock policy (documented):
  * - While CLOSED: clock frozen at day-start PRE_OPEN (17:00).
- * - On Abrir (beginShiftOpen): snap clock to recommended open 18:00, then tick.
+ * - On Abrir (beginShiftOpen): snap to 18:00 when USE_SNAP_TO_RECOMMENDED_OPEN (B11 flag).
  * - While OPEN or CLOSING: advance by REAL_SECONDS_PER_GAME_MINUTE.
  * - Does NOT auto-close at 02:00. B7: night ends via CLOSING → SUMMARY (manual Cerrar).
  *
@@ -26,6 +26,7 @@ import {
   SCHEDULE_LABEL,
   SCHEDULE_LABEL_MOBILE,
   SCHEDULE_RANGE_SHORT,
+  USE_SNAP_TO_RECOMMENDED_OPEN,
 } from '../config/shift';
 
 export type ShiftState = 'closed' | 'open' | 'closing' | 'summary';
@@ -176,13 +177,47 @@ export function beginShiftOpen(): boolean {
   const ok =
     shiftState === 'summary' || shiftState === 'closed' ? transition('open') : false;
   if (!ok) return false;
-  // B2 policy: early/default open always starts the clock at recommended open.
-  setGameTime(RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE);
+  // B2/B11: snap to recommended open unless USE_SNAP_TO_RECOMMENDED_OPEN is false
+  // (then keep current frozen CLOSED clock — typically 17:00).
+  if (USE_SNAP_TO_RECOMMENDED_OPEN) {
+    setGameTime(RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE);
+  }
   openTimeHour = gameHour;
   openTimeMinute = gameMinute;
   closeTimeHour = null;
   closeTimeMinute = null;
   return true;
+}
+
+/**
+ * B11 debug: open shift at a specific clock (from closed/summary).
+ * Ignores USE_SNAP_TO_RECOMMENDED_OPEN and sets openTime to hour:minute.
+ */
+export function openShiftAt(hour: number, minute: number): boolean {
+  if (shiftState === 'open') {
+    setGameTime(hour, minute);
+    openTimeHour = gameHour;
+    openTimeMinute = gameMinute;
+    return true;
+  }
+  if (shiftState === 'closing') {
+    console.warn('[Shift] cannot openShiftAt while closing');
+    return false;
+  }
+  const ok =
+    shiftState === 'summary' || shiftState === 'closed' ? transition('open') : false;
+  if (!ok) return false;
+  setGameTime(hour, minute);
+  openTimeHour = gameHour;
+  openTimeMinute = gameMinute;
+  closeTimeHour = null;
+  closeTimeMinute = null;
+  return true;
+}
+
+/** B11 test helper: set frozen / live game clock without opening. */
+export function debugSetGameTime(hour: number, minute: number): void {
+  setGameTime(hour, minute);
 }
 
 /** B7: CLOSING (or OPEN fallback) → SUMMARY. Clock freezes. */
@@ -321,6 +356,7 @@ export function getShiftDebug() {
     realSecondsPerGameMinute: REAL_SECONDS_PER_GAME_MINUTE,
     clockSpeedGameMinutesPerRealSecond: CLOCK_SPEED_GAME_MINUTES_PER_REAL_SECOND,
     clockTicking: isShiftClockTicking(),
+    useSnapToRecommendedOpen: USE_SNAP_TO_RECOMMENDED_OPEN,
     openTime:
       openTimeHour != null && openTimeMinute != null
         ? formatGameClock(openTimeHour, openTimeMinute)

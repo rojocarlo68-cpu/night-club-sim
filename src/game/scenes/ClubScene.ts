@@ -35,7 +35,8 @@ import {
   beginShiftClosing,
   beginShiftSummary,
   beginShiftClosed,
-
+  openShiftAt as shiftOpenAt,
+  debugSetGameTime as shiftDebugSetGameTime,
   syncShiftDay,
   legacyPhaseFromShift,
   getShiftDebug as readShiftDebug,
@@ -75,6 +76,17 @@ import {
   formatDurationHm,
   resetStaffHours,
 } from '../systems/StaffHours';
+import {
+  getAvailableStaff,
+  getStaffAvailabilityDebug as readStaffAvailabilityDebug,
+  resetStaffAvailability,
+} from '../systems/StaffAvailability';
+import {
+  beginLateOpenNight,
+  applyLateOpenExperience,
+  getLateOpenDebug as readLateOpenDebug,
+  resetLateOpenNight,
+} from '../systems/LateOpen';
 import {
   CLOSED_OVERLAY_COLOR,
   CLOSED_OVERLAY_ALPHA,
@@ -1776,14 +1788,15 @@ export class ClubScene extends Phaser.Scene {
     // Prompt B Phase B4: organic arrivals (replaces fixed 3–5 @ 400ms/2200ms).
     this.spawnLeft = 0;
     const snap = getShiftSnapshot();
-    const staffCount = this.allStaff().length;
-    beginArrivalsNight(snap.gameHour, snap.gameMinute, staffCount, this.nightNumber);
-    // Prompt B Phase B8: record who is working and shift start clock.
-    recordStaffShiftStart(
-      this.allStaff().map((s) => ({ id: s.profile.id, name: s.displayName })),
-      snap.gameHour,
-      snap.gameMinute
+    // B11: available staff only (absence map defaults true; rare event TODO).
+    const working = getAvailableStaff(
+      this.allStaff().map((s) => ({ id: s.profile.id, name: s.displayName }))
     );
+    const staffCount = working.length;
+    beginArrivalsNight(snap.gameHour, snap.gameMinute, staffCount, this.nightNumber);
+    beginLateOpenNight(snap.gameHour, snap.gameMinute);
+    // Prompt B Phase B8: record who is working and shift start clock.
+    recordStaffShiftStart(working, snap.gameHour, snap.gameMinute);
     this.game.events.emit('night-started', this.getHudState());
   };
 
@@ -1835,6 +1848,8 @@ export class ClubScene extends Phaser.Scene {
     this.patrons.push(patron);
     // Prompt A Phase 1: invisible satisfaction (does not alter nightMood/patience).
     createExperience(patron);
+    // B11: optional late-open sat stub (first N patrons only if open was late).
+    applyLateOpenExperience(patron);
     // Prompt A Phase 4: roll/persist drink prefs (stable per profile.name).
     getDrinkPrefs(patron);
     // Prompt A Phase 9: roll/persist action tastes (stable per profile.name).
@@ -3041,23 +3056,24 @@ export class ClubScene extends Phaser.Scene {
 
     // Apply day-roll immediately so headless / paused clocks still advance.
     // Fade is cosmetic; do not gate state on camerafadeoutcomplete.
-    const applyClosedDay = () => {
-      // nightNumber already next day from finishNight / onNightEnd.
-      beginShiftClosed(this.nightNumber);
-      syncShiftDay(this.nightNumber);
-      this.phase = legacyPhaseFromShift(); // prep
-      this.resetForNewNight();
-      this.applyClubLighting('closed', false);
-      this.game.events.emit('stats-updated', this.getHudState());
-      this.game.events.emit('day-started', {
-        ...this.getHudState(),
-        toast: this.rollDayStartToast(),
-      });
-    };
-    applyClosedDay();
+    // nightNumber already next day from finishNight / onNightEnd.
+    beginShiftClosed(this.nightNumber);
+    syncShiftDay(this.nightNumber);
+    this.phase = legacyPhaseFromShift(); // prep
+    this.resetForNewNight();
+    this.applyClubLighting('closed', false);
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.game.events.emit('day-started', {
+      ...this.getHudState(),
+      toast: this.rollDayStartToast(),
+    });
+    // Clear guard now — fade must not block a later Dormir if camera events stall.
+    this.sleepInProgress = false;
 
+    let fadedIn = false;
     const endFade = () => {
-      this.sleepInProgress = false;
+      if (fadedIn) return;
+      fadedIn = true;
       try {
         cam.fadeIn(fade, 0, 0, 0);
       } catch {
@@ -3401,7 +3417,9 @@ export class ClubScene extends Phaser.Scene {
         gameMinute: snap.gameMinute,
         nightTimerSec: Number.POSITIVE_INFINITY,
         shiftState: getShiftState(),
-        staffCount: this.allStaff().length,
+        staffCount: getAvailableStaff(
+          this.allStaff().map((s) => ({ id: s.profile.id, name: s.displayName }))
+        ).length,
       });
       if (n <= 0) return;
       for (let k = 0; k < n; k++) this.spawnPatron();
@@ -3421,6 +3439,57 @@ export class ClubScene extends Phaser.Scene {
   /** Prompt B Phase B4 test/debug: arrival log / soft cap. */
   getArrivalsDebug() {
     return readArrivalsDebug();
+  }
+
+  /** Prompt B Phase B11 test/debug: staff availability / absence stub. */
+  getStaffAvailabilityDebug() {
+    return readStaffAvailabilityDebug();
+  }
+
+  /** Prompt B Phase B11 test/debug: late-open sat stub. */
+  getLateOpenDebug() {
+    return readLateOpenDebug();
+  }
+
+  /** B11 test: set game clock (frozen while CLOSED). */
+  debugSetGameTime(hour: number, minute: number): void {
+    shiftDebugSetGameTime(hour, minute);
+    this.game.events.emit('stats-updated', this.getHudState());
+  }
+
+  /**
+   * B11 debug: open at hour:minute from closed (ignores snap-to-18:00).
+   * Prefer openNight() for normal Abrir.
+   */
+  openShiftAt(hour: number, minute: number): boolean {
+    if (this.buildMode) return false;
+    if (this.phase !== 'prep') return false;
+    this.hideDeleteConfirmUi();
+    this.clearFurnitureSelection();
+    this.rebuildPathfinder();
+    syncShiftDay(this.nightNumber);
+    if (!shiftOpenAt(hour, minute)) return false;
+    this.phase = legacyPhaseFromShift();
+    this.applyClubLighting('open', true);
+    this.nightEarned = 0;
+    this.servedCount = 0;
+    resetNightTips();
+    resetNightInventory();
+    resetNightAccumulators();
+    this.competitionObserveAccum = 0;
+    this.nightTimer = Number.POSITIVE_INFINITY;
+    this.closingStartedAt = 0;
+    this.closingNudged = false;
+    this.spawnLeft = 0;
+    const snap = getShiftSnapshot();
+    const working = getAvailableStaff(
+      this.allStaff().map((s) => ({ id: s.profile.id, name: s.displayName }))
+    );
+    beginArrivalsNight(snap.gameHour, snap.gameMinute, working.length, this.nightNumber);
+    beginLateOpenNight(snap.gameHour, snap.gameMinute);
+    recordStaffShiftStart(working, snap.gameHour, snap.gameMinute);
+    this.game.events.emit('night-started', this.getHudState());
+    return true;
   }
 
   /** Prompt B Phase B4 test: set arrivals RNG seed. */

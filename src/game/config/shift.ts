@@ -44,3 +44,11 @@ export const CLOSING_NUDGE_AFTER_MS = 20000;
  * (destroys leftovers). Generous so normal visits can finish.
  */
 export const CLOSING_FORCE_SUMMARY_MS = 120000;
+
+
+/**
+ * B11: when true (default), Abrir snaps clock to recommended open (18:00).
+ * When false, open at the current frozen CLOSED time (still 17:00 unless
+ * debugSetGameTime moved the frozen clock — useful for late-open tests).
+ */
+export const USE_SNAP_TO_RECOMMENDED_OPEN = true;

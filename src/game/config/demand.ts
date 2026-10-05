@@ -91,3 +91,24 @@ export function earlyNightDemandScale(nightNumber: number): number {
   const t = (n - 1) / Math.max(1, EARLY_NIGHT_SCALE_UNTIL - 1);
   return EARLY_NIGHT_SCALE_MIN + t * (EARLY_NIGHT_SCALE_MAX - EARLY_NIGHT_SCALE_MIN);
 }
+
+
+/**
+ * B11 stub: future multipliers for amenities / reputation / marketing.
+ * Arrivals multiplies BASE_DEMAND by product of these (currently all 1.0).
+ */
+export const demandModifiers = {
+  amenities: 1.0,
+  reputation: 1.0,
+} as const;
+
+export function getDemandModifiersProduct(): number {
+  return Math.max(0.01, demandModifiers.amenities * demandModifiers.reputation);
+}
+
+/** B11 late-open sat stub: grace after recommended open before penalty. */
+export const LATE_OPEN_GRACE_GAME_MINUTES = 30;
+/** First N patrons of a late-open night may get a one-shot sat penalty. */
+export const LATE_OPEN_SAT_FIRST_N_PATRONS = 3;
+/** Small one-shot satisfaction penalty (Prompt A sat scale). */
+export const LATE_OPEN_SAT_PENALTY = -4;
