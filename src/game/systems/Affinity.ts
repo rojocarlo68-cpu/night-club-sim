@@ -11,7 +11,9 @@ import {
   AFFINITY_JITTER,
   AFFINITY_TIP_CHANCE_CAP,
   AFFINITY_LEVEL_ORDER,
+  AFFINITY_SATISFACTION,
 } from '../config/affinity';
+import { applyExperience } from './CustomerExperience';
 
 type StaffMap = Record<string, AffinityLevel>;
 /** patronKey (stable name) → staffId → level */
@@ -23,6 +25,10 @@ export interface AffinityDebugEntry {
   level: AffinityLevel;
   tipped: boolean;
   amount: number;
+  /** Phase 8: sat delta from aff:<staffId> this serve (0 if already applied / normal). */
+  satDelta?: number;
+  /** Phase 8: visit satisfaction after the affinity sat event. */
+  satAfter?: number;
 }
 
 const DEBUG_CAP = 50;
@@ -124,6 +130,47 @@ export function pushAffinityDebug(entry: AffinityDebugEntry): void {
 
 export function getAffinityDebug(): AffinityDebugEntry[] {
   return debugRing.map((e) => ({ ...e }));
+}
+
+
+/**
+ * Prompt A Phase 8: one-shot customerSatisfaction from being served by this staff.
+ * Key `aff:<staffId>` — never re-applied this visit. Staff AI must not call this.
+ * Returns applied delta (0 if already perceived or no experience).
+ */
+export function applyAffinityToSatisfaction(
+  patron: { profile: { name?: string; id?: string } },
+  staffId: string,
+  level: AffinityLevel
+): number {
+  if (!staffId) return 0;
+  const base = AFFINITY_SATISFACTION[level] ?? 0;
+  // applyExperience: once per key; tolerance dampens negatives; no trait scale.
+  return applyExperience(patron, `aff:${staffId}`, base);
+}
+
+/** Test/debug: force affinity level for patronName × staffId (persisted via serialize). */
+export function setAffinity(
+  patronName: string,
+  staffId: string,
+  level: AffinityLevel
+): boolean {
+  const name = (patronName || '').trim();
+  if (!name || !staffId) return false;
+  if (level !== 'alta' && level !== 'normal' && level !== 'baja') return false;
+  if (!cache[name]) cache[name] = {};
+  cache[name][staffId] = level;
+  return true;
+}
+
+/** Test/debug: read cached level without rolling. */
+export function peekAffinity(
+  patronName: string,
+  staffId: string
+): AffinityLevel | null {
+  const name = (patronName || '').trim();
+  if (!name || !staffId) return null;
+  return cache[name]?.[staffId] ?? null;
 }
 
 /** Persistable snapshot (patronName → staffId → level). */

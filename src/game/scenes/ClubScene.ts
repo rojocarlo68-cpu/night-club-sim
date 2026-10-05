@@ -91,11 +91,14 @@ import {
 import {
   getAffinity,
   applyAffinityToTipChance,
+  applyAffinityToSatisfaction,
   applySatisfactionBonus,
   pushAffinityDebug,
   getAffinityDebug as readAffinityDebug,
   serializeAffinities,
   loadAffinities,
+  setAffinity,
+  peekAffinity,
 } from '../systems/Affinity';
 import {
   createExperience,
@@ -2104,12 +2107,15 @@ export class ClubScene extends Phaser.Scene {
     let affinityAmountMult = 1;
     let satisfactionBonus = 0;
     let affinityLevel: 'baja' | 'normal' | 'alta' = 'normal';
+    let affinitySatDelta = 0;
     if (staffId) {
       affinityLevel = getAffinity(patron, staffId);
+      // Prompt A Phase 8: one-shot hidden sat from this emergent serve (before Phase 7 tip mods).
+      affinitySatDelta = applyAffinityToSatisfaction(patron, staffId, affinityLevel);
       const mods = applyAffinityToTipChance(tipChance, affinityLevel);
       tipChance = mods.tipChance;
       affinityAmountMult = mods.tipAmountMult;
-      satisfactionBonus = mods.satisfactionBonus;
+      satisfactionBonus = mods.satisfactionBonus; // existing patience/nightMood — unchanged
     }
     // Prompt A Phase 7: multiply existing tip chance/amount by visit sat + generosity.
     const exp = getExperience(patron);
@@ -2152,6 +2158,8 @@ export class ClubScene extends Phaser.Scene {
         level: affinityLevel,
         tipped,
         amount: tipAmount,
+        satDelta: affinitySatDelta,
+        satAfter: getExperience(patron)?.satisfaction ?? satNow,
       });
     }
     pushTipDebug({
@@ -2894,6 +2902,22 @@ export class ClubScene extends Phaser.Scene {
   /** Phase 5 test/debug: recent served affinity outcomes (ring ~50). */
   getAffinityDebug() {
     return readAffinityDebug();
+  }
+
+  /** Phase 8 test/debug: force patronName × staffId affinity (alta|normal|baja). */
+  debugSetAffinity(
+    patronName: string,
+    staffId: string,
+    level: 'alta' | 'normal' | 'baja'
+  ): boolean {
+    const ok = setAffinity(patronName, staffId, level);
+    if (ok) this.persistLayout();
+    return ok;
+  }
+
+  /** Phase 8 test/debug: peek cached affinity without rolling. */
+  debugPeekAffinity(patronName: string, staffId: string) {
+    return peekAffinity(patronName, staffId);
   }
 
   /** Prompt A Phase 4: UI restock request { id, units }. */

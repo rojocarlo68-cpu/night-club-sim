@@ -54,3 +54,18 @@ export const AFFINITY_TIP_CHANCE_CAP = 0.92;
 
 /** Order used when rolling a weighted level. */
 export const AFFINITY_LEVEL_ORDER: AffinityLevel[] = ['alta', 'normal', 'baja'];
+
+/**
+ * Prompt A Phase 8: hidden customerSatisfaction delta when a staff member
+ * actually serves this patron (emergent encounter only). Applied once per
+ * visit per staff via CustomerExperience key `aff:<staffId>`.
+ * Does NOT replace AFFINITY_EFFECTS tip/patience bonuses — additive.
+ */
+export const AFFINITY_SATISFACTION: Record<AffinityLevel, number> = {
+  /** Liked staff serving the patron. */
+  alta: 10,
+  /** No sat change from affinity alone. */
+  normal: 0,
+  /** Mild dislike — slight negative, never catastrophic. */
+  baja: -4,
+};
