@@ -5,7 +5,7 @@
  * - While CLOSED: clock frozen at day-start PRE_OPEN (17:00).
  * - On Abrir (beginShiftOpen): snap clock to recommended open 18:00, then tick.
  * - While OPEN or CLOSING: advance by REAL_SECONDS_PER_GAME_MINUTE.
- * - Does NOT auto-close at 02:00 (legacy 75s nightTimer still ends the night until B7).
+ * - Does NOT auto-close at 02:00. B7: night ends via CLOSING → SUMMARY (manual Cerrar).
  *
  * Maps to existing NightPhase:
  *   closed  ↔ prep
@@ -60,6 +60,11 @@ let gameMinute = PRE_OPEN_MINUTE;
 let shiftState: ShiftState = 'closed';
 /** Fractional real-seconds accumulator toward the next game minute. */
 let clockAccumSec = 0;
+/** B7/B8: recorded open / close wall-clock for the current (or last) shift. */
+let openTimeHour: number | null = null;
+let openTimeMinute: number | null = null;
+let closeTimeHour: number | null = null;
+let closeTimeMinute: number | null = null;
 
 function clampHour(h: number): number {
   if (!Number.isFinite(h)) return PRE_OPEN_HOUR;
@@ -90,6 +95,10 @@ export function resetShiftState(): void {
   gameMinute = PRE_OPEN_MINUTE;
   shiftState = 'closed';
   clockAccumSec = 0;
+  openTimeHour = null;
+  openTimeMinute = null;
+  closeTimeHour = null;
+  closeTimeMinute = null;
 }
 
 /** Bootstrap or after load: set day/time/state without transition checks. */
@@ -169,10 +178,14 @@ export function beginShiftOpen(): boolean {
   if (!ok) return false;
   // B2 policy: early/default open always starts the clock at recommended open.
   setGameTime(RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE);
+  openTimeHour = gameHour;
+  openTimeMinute = gameMinute;
+  closeTimeHour = null;
+  closeTimeMinute = null;
   return true;
 }
 
-/** Manual/auto close path until B7: open|closing → summary. Clock freezes. */
+/** B7: CLOSING (or OPEN fallback) → SUMMARY. Clock freezes. */
 export function beginShiftSummary(): boolean {
   if (shiftState === 'summary') return true;
   if (shiftState === 'closed') {
@@ -187,10 +200,19 @@ export function beginShiftSummary(): boolean {
   return transition('summary');
 }
 
-/** Reserved for B7 soft-close (stop new arrivals, keep patrons). Clock keeps ticking. */
+/** B7 soft-close: stop new arrivals, keep patrons, clock keeps ticking past 02:00. */
 export function beginShiftClosing(): boolean {
   if (shiftState === 'closing') return true;
-  return transition('closing');
+  if (shiftState !== 'open') {
+    console.warn(`[Shift] cannot close from ${shiftState}`);
+    return false;
+  }
+  const ok = transition('closing');
+  if (ok) {
+    closeTimeHour = gameHour;
+    closeTimeMinute = gameMinute;
+  }
+  return ok;
 }
 
 /** Reserved for B10 Sleep → next day closed @ pre-open. */
@@ -299,5 +321,34 @@ export function getShiftDebug() {
     realSecondsPerGameMinute: REAL_SECONDS_PER_GAME_MINUTE,
     clockSpeedGameMinutesPerRealSecond: CLOCK_SPEED_GAME_MINUTES_PER_REAL_SECOND,
     clockTicking: isShiftClockTicking(),
+    openTime:
+      openTimeHour != null && openTimeMinute != null
+        ? formatGameClock(openTimeHour, openTimeMinute)
+        : null,
+    closeTime:
+      closeTimeHour != null && closeTimeMinute != null
+        ? formatGameClock(closeTimeHour, closeTimeMinute)
+        : null,
+    openTimeHour,
+    openTimeMinute,
+    closeTimeHour,
+    closeTimeMinute,
+  };
+}
+
+export function getShiftOpenCloseTimes() {
+  return {
+    openTimeHour,
+    openTimeMinute,
+    closeTimeHour,
+    closeTimeMinute,
+    openTime:
+      openTimeHour != null && openTimeMinute != null
+        ? formatGameClock(openTimeHour, openTimeMinute)
+        : null,
+    closeTime:
+      closeTimeHour != null && closeTimeMinute != null
+        ? formatGameClock(closeTimeHour, closeTimeMinute)
+        : null,
   };
 }

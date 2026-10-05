@@ -27,6 +27,7 @@ interface HudState {
   currentDay?: number;
   scheduleLabel?: string;
   scheduleLabelMobile?: string;
+  isClosing?: boolean;
   bartender: HudBartender | null;
   selectedNpc?: NpcInfo | null;
   nightEarned?: number;
@@ -391,6 +392,7 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('club-ready', this.onStats, this);
     this.game.events.on('stats-updated', this.onStats, this);
     this.game.events.on('night-started', this.onNightStarted, this);
+    this.game.events.on('night-closing', this.onNightClosing, this);
     this.game.events.on('night-summary', this.onSummary, this);
     this.game.events.on('select-npc', this.onSelectNpc, this);
     // Back-compat: older emit still works
@@ -740,6 +742,13 @@ export class UIScene extends Phaser.Scene {
     this.onStats(s);
   };
 
+  /** Prompt B Phase B7: soft close in progress — hide Cerrar, keep clock. */
+  private onNightClosing = (s: HudState): void => {
+    this.closeBtn.setVisible(false);
+    this.openBtn.setVisible(false);
+    this.onStats(s);
+  };
+
   private onSummary = (s: HudState): void => {
     this.openBtn.setVisible(true);
     this.closeBtn.setVisible(false);
@@ -941,7 +950,11 @@ export class UIScene extends Phaser.Scene {
         : `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
     const night = this.nightLabel(s);
     const mobile = this.scale.width < 640;
-    if (s.phase === 'open') {
+    const closing = !!s.isClosing || s.shiftState === 'closing';
+    if (closing) {
+      this.timerText.setText(clock);
+      this.timerText.setColor('#ffc878');
+    } else if (s.phase === 'open') {
       this.timerText.setText(clock);
       this.timerText.setColor('#f0e6ff');
     } else if (s.phase === 'prep') {
@@ -954,7 +967,9 @@ export class UIScene extends Phaser.Scene {
     const full = s.scheduleLabel || 'Horario sugerido: Lun–Dom · 18:00 — 02:00';
     const short = s.scheduleLabelMobile || 'Horario: 18:00 — 02:00';
     let schedule = mobile ? short : full;
-    if (s.phase === 'summary') {
+    if (closing) {
+      schedule = mobile ? `${short} · cerrando…` : `${full} · Cerrando…`;
+    } else if (s.phase === 'summary') {
       schedule = mobile ? `${short} · cerrada` : `${full} · ${night} cerrada`;
     }
     this.scheduleText.setText(schedule);

@@ -1,9 +1,10 @@
 /**
  * Prompt B — central tunables for the shift / game-time clock.
- * B2: clock advances while OPEN/CLOSING; HUD shows HH:MM (not the 75s countdown).
+ * B2+: clock advances while OPEN/CLOSING; HUD shows HH:MM.
+ * B7: night ends on manual Cerrar (CLOSING → SUMMARY), NOT a 75s timer / NOT at 02:00.
  */
 
-/** Recommended club hours (informational; not a hard lock — B7 will not auto-close at 02:00). */
+/** Recommended club hours (informational; not a hard lock). */
 export const RECOMMENDED_OPEN_HOUR = 18;
 export const RECOMMENDED_OPEN_MINUTE = 0;
 export const RECOMMENDED_CLOSE_HOUR = 2;
@@ -16,10 +17,6 @@ export const PRE_OPEN_MINUTE = 0;
 /**
  * Real seconds that must elapse for one game-minute to advance while OPEN/CLOSING.
  * B2 choice: 1 → one game minute per real second (easy to verify in smoke tests).
- * Tune later so a full recommended shift (~8h) fits the intended real-time length.
- *
- * NOTE: the legacy 75s nightTimer still auto-closes the night (B7 will remove that).
- * With this speed, ~75 real seconds ≈ 18:00 → 19:15 of game time before that auto-close.
  */
 export const REAL_SECONDS_PER_GAME_MINUTE = 1;
 
@@ -35,3 +32,15 @@ export const SCHEDULE_LABEL_MOBILE = 'Horario: 18:00 — 02:00';
 
 /** Compact recommended range (debug / short lines). */
 export const SCHEDULE_RANGE_SHORT = '18:00 — 02:00';
+
+/**
+ * B7 CLOSING: after this many real ms, nudge remaining patrons to leave via sendPatronHome.
+ * They finish walking out; not an instant despawn.
+ */
+export const CLOSING_NUDGE_AFTER_MS = 20000;
+
+/**
+ * B7 CLOSING safety: if patrons still on the floor after this, force SUMMARY
+ * (destroys leftovers). Generous so normal visits can finish.
+ */
+export const CLOSING_FORCE_SUMMARY_MS = 120000;

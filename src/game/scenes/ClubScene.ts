@@ -32,6 +32,7 @@ import {
   loadShift,
   serializeShift,
   beginShiftOpen,
+  beginShiftClosing,
   beginShiftSummary,
   syncShiftDay,
   legacyPhaseFromShift,
@@ -44,7 +45,13 @@ import {
   getShiftState,
   type ShiftPersist,
 } from '../systems/Shift';
-import { SCHEDULE_LABEL, SCHEDULE_LABEL_MOBILE, REAL_SECONDS_PER_GAME_MINUTE } from '../config/shift';
+import {
+  SCHEDULE_LABEL,
+  SCHEDULE_LABEL_MOBILE,
+  REAL_SECONDS_PER_GAME_MINUTE,
+  CLOSING_NUDGE_AFTER_MS,
+  CLOSING_FORCE_SUMMARY_MS,
+} from '../config/shift';
 import {
   beginArrivalsNight,
   stopArrivals,
@@ -389,7 +396,11 @@ export class ClubScene extends Phaser.Scene {
   nightEarned = 0;
   servedCount = 0;
   phase: NightPhase = 'prep';
+  /** @deprecated B7 — no longer auto-closes; kept 0 for HUD compat. */
   nightTimer = 0;
+  /** B7: real-time ms when CLOSING began (0 if not closing). */
+  private closingStartedAt = 0;
+  private closingNudged = false;
   /** Phase 7: absolute night index (1-based). Increments when a night ends. */
   nightNumber = 1;
   /** Phase 6: ms accumulator toward next peer-observation tick. */
@@ -1741,7 +1752,10 @@ export class ClubScene extends Phaser.Scene {
     resetNightInventory();
     resetNightAccumulators();
     this.competitionObserveAccum = 0;
-    this.nightTimer = this.scenario.nightDurationSec;
+    // Prompt B Phase B7: no 75s auto-close — nightTimer unused (Infinity for Arrivals).
+    this.nightTimer = Number.POSITIVE_INFINITY;
+    this.closingStartedAt = 0;
+    this.closingNudged = false;
     // Prompt B Phase B4: organic arrivals (replaces fixed 3–5 @ 400ms/2200ms).
     this.spawnLeft = 0;
     const snap = getShiftSnapshot();
@@ -2990,17 +3004,55 @@ export class ClubScene extends Phaser.Scene {
 
 
   closeNight = (): void => {
-    if (this.phase !== 'open') return;
-    this.finishNight();
+    const st = getShiftState();
+    if (st === 'closing') return;
+    if (this.phase !== 'open' || st !== 'open') return;
+    // Prompt B Phase B7: enter CLOSING — stop arrivals, do NOT kick patrons instantly.
+    if (!beginShiftClosing()) return;
+    this.phase = legacyPhaseFromShift(); // still 'open' for AI / patron loops
+    stopArrivals();
+    this.closingStartedAt = this.time.now;
+    this.closingNudged = false;
+    this.game.events.emit('night-closing', this.getHudState());
+    this.game.events.emit('stats-updated', this.getHudState());
+    const active = this.patrons.filter((p) => p.active);
+    if (active.length === 0) {
+      this.finishNight();
+    }
   };
 
+  /** B7: while CLOSING, wait for patrons to leave; nudge then force-summary. */
+  private tickClosing(): void {
+    if (getShiftState() !== 'closing') return;
+    const active = this.patrons.filter((p) => p.active);
+    if (active.length === 0) {
+      this.finishNight();
+      return;
+    }
+    const elapsed = this.time.now - this.closingStartedAt;
+    if (!this.closingNudged && elapsed >= CLOSING_NUDGE_AFTER_MS) {
+      this.closingNudged = true;
+      for (const p of active) {
+        if (p.goal === 'leave') continue;
+        this.serveClaim.delete(p.profile.id);
+        this.sendPatronHome(p);
+      }
+    }
+    if (elapsed >= CLOSING_FORCE_SUMMARY_MS) {
+      this.finishNight();
+    }
+  }
+
   private finishNight(): void {
-    if (this.phase !== 'open') return;
-    // Prompt B Phase B1: OPEN → SUMMARY (CLOSING dwell comes in B7).
+    const st = getShiftState();
+    if (this.phase !== 'open' && st !== 'closing') return;
+    // Prompt B Phase B7: CLOSING (or open fallback) → SUMMARY.
     beginShiftSummary();
     syncShiftDay(this.nightNumber);
     this.phase = legacyPhaseFromShift();
     stopArrivals();
+    this.closingStartedAt = 0;
+    this.closingNudged = false;
     // Prompt B Phase B3: lights down for summary / closed look.
     this.applyClubLighting('closed', true);
     this.hideDeleteConfirmUi();
@@ -3092,9 +3144,19 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
-    /** Phase 7 test/debug: end the open night via the normal close path. */
+    /** Phase 7/B7 test: start soft close (CLOSING). Use debugForceSummary for instant end. */
   debugEndNight(): void {
     this.closeNight();
+  }
+
+  /** B7 test: skip CLOSING dwell and go straight to SUMMARY (destroys patrons). */
+  debugForceSummary(): void {
+    if (getShiftState() === 'closed' || getShiftState() === 'summary') return;
+    if (getShiftState() === 'open') {
+      beginShiftClosing();
+      stopArrivals();
+    }
+    this.finishNight();
   }
 
   /** Phase 3 test/debug: per-staff tip-action performance counts. */
@@ -3209,7 +3271,7 @@ export class ClubScene extends Phaser.Scene {
       const n = tickArrivals({
         gameHour: snap.gameHour,
         gameMinute: snap.gameMinute,
-        nightTimerSec: this.nightTimer,
+        nightTimerSec: Number.POSITIVE_INFINITY,
         shiftState: getShiftState(),
         staffCount: this.allStaff().length,
       });
@@ -3234,27 +3296,33 @@ export class ClubScene extends Phaser.Scene {
   }
 
   /**
-   * Prompt B Phase B4 test: advance game minutes + process arrivals + tick nightTimer.
-   * Does not skip the legacy 75s auto-close.
+   * Prompt B Phase B4/B7 test: advance game minutes + process arrivals.
+   * Does not auto-close (B7: only Cerrar / CLOSING → SUMMARY).
    */
   debugAdvanceGameMinutes(n: number): number {
     if (this.phase !== 'open') return 0;
+    if (getShiftState() === 'closing') {
+      // Still advance clock while closing, but no new arrivals.
+      const steps = Math.max(0, Math.floor(n) || 0);
+      let advanced = 0;
+      for (let i = 0; i < steps; i++) {
+        if (getShiftState() !== 'closing') break;
+        const got = shiftAdvanceGameMinutes(1);
+        if (got <= 0) break;
+        advanced += got;
+      }
+      this.game.events.emit('stats-updated', this.getHudState());
+      return advanced;
+    }
     const steps = Math.max(0, Math.floor(n) || 0);
     let advanced = 0;
-    const pace = REAL_SECONDS_PER_GAME_MINUTE;
     for (let i = 0; i < steps; i++) {
-      if (this.phase !== 'open') break;
-      this.nightTimer -= pace;
+      if (this.phase !== 'open' || getShiftState() !== 'open') break;
       const got = shiftAdvanceGameMinutes(1);
       if (got <= 0) break;
       advanced += got;
       this.processArrivalsForAdvancedMinutes(got);
       this.game.events.emit('stats-updated', this.getHudState());
-      if (this.nightTimer <= 0) {
-        this.nightTimer = 0;
-        this.finishNight();
-        break;
-      }
     }
     return advanced;
   }
@@ -3308,7 +3376,8 @@ export class ClubScene extends Phaser.Scene {
     return {
       money: this.money,
       phase: this.phase,
-      nightTimer: Math.ceil(this.nightTimer),
+      nightTimer: 0, // B7: no countdown
+      isClosing: getShiftState() === 'closing',
       nightNumber: this.nightNumber,
       shiftState: shift.shiftState,
       currentDay: shift.currentDay,
@@ -3876,15 +3945,20 @@ export class ClubScene extends Phaser.Scene {
     if (!this.buildMode && (this.phase === 'open' || this.phase === 'prep')) {
       this.tickFurnitureDecay(dtSec);
     }
-    if (this.phase !== 'open') return;
-    this.nightTimer -= dtSec;
+    const shiftNow = getShiftState();
+    if (this.phase !== 'open' && shiftNow !== 'closing') return;
+    // Prompt B Phase B7: no nightTimer auto-close. Clock may pass 02:00.
 
-    // Prompt B Phase B2: advance game clock (OPEN/CLOSING). No auto-close at 02:00.
+    // Prompt B Phase B2: advance game clock (OPEN/CLOSING).
     const minutesAdvanced = tickShiftClock(dtSec);
 
-    // Prompt B Phase B4: organic arrivals on each advanced game minute.
-    if (minutesAdvanced > 0) {
+    // Prompt B Phase B4: organic arrivals only while OPEN (not CLOSING).
+    if (shiftNow === 'open' && minutesAdvanced > 0) {
       this.processArrivalsForAdvancedMinutes(minutesAdvanced);
+    }
+
+    if (shiftNow === 'closing') {
+      this.tickClosing();
     }
 
     // Phase 6: periodic peer observation (gradual competitiveness)
@@ -3926,17 +4000,9 @@ export class ClubScene extends Phaser.Scene {
       }
     }
 
-    // B2: refresh HUD when the game minute flips (primary time source).
-    // Legacy half-second nightTimer pulse kept as fallback so other HUD fields still update.
-    if (
-      minutesAdvanced > 0 ||
-      Math.floor(this.nightTimer * 2) !== Math.floor((this.nightTimer + dtSec) * 2)
-    ) {
+    // B2/B7: refresh HUD when the game minute flips (no nightTimer pulse).
+    if (minutesAdvanced > 0) {
       this.game.events.emit('stats-updated', this.getHudState());
-    }
-    if (this.nightTimer <= 0) {
-      this.nightTimer = 0;
-      this.finishNight();
     }
   }
 
