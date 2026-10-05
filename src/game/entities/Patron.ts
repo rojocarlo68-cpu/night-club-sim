@@ -77,6 +77,12 @@ export class Patron extends Character {
   /** Max patience this visit (scaled from profile). */
   patienceMax: number;
   preferredDrinkName: string;
+  /** Prompt A Phase 4: drink they most wanted this visit. */
+  wantedDrinkId: string | null = null;
+  /** Prompt A Phase 4: drink actually served (null if left empty-handed). */
+  servedDrinkId: string | null = null;
+  /** Prompt A Phase 4: preferred (or all) drinks were out of stock. */
+  wasOutOfStock = false;
   selected = false;
   label?: Phaser.GameObjects.Text;
   /** Persistent Spanish status (Esperando, Impaciente, Sentado, …). */

@@ -44,7 +44,19 @@ import {
   resetNightInventory,
   serializeInventory,
   getInventoryDebug as readInventoryDebug,
+  getPrice as inventoryGetPrice,
+  canSell as inventoryCanSell,
+  recordSale as inventoryRecordSale,
+  addStock as inventoryAddStock,
+  setStock as inventorySetStock,
+  getStock as inventoryGetStock,
 } from '../systems/Inventory';
+import { getDrinkProduct, DRINKS_CATALOG, DRINK_PREF } from '../config/drinks';
+import {
+  getDrinkPrefs,
+  serializeDrinkPrefs,
+  loadDrinkPrefs,
+} from '../systems/DrinkPreferences';
 import { nextWeekEndNight, nextMonthEndNight } from '../config/calendar';
 import { getPersonality, personalitySummary } from '../config/personality';
 import { TipAction } from '../config/tipActions';
@@ -248,6 +260,8 @@ interface SavedLayout {
     stock?: Record<string, number>;
     prices?: Record<string, number>;
   };
+  /** Prompt A Phase 4: stable patronName→drink preferences. Old saves omit → rolled fresh. */
+  drinkPrefs?: Record<string, Record<string, number>>;
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -488,6 +502,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-deselect-bartender', this.deselectNpc, this);
     this.game.events.on('cmd-request-shop-catalog', this.emitShopCatalog, this);
     this.game.events.on('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
+    this.game.events.on('cmd-restock-drink', this.onCmdRestockDrink, this);
     this.game.events.on('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
     this.game.events.on('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
     this.game.events.on('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
@@ -640,6 +655,7 @@ export class ClubScene extends Phaser.Scene {
       loadAffinities(saved?.affinities);
       loadCustomerTraits(saved?.customerTraits);
       loadInventory(saved?.inventory);
+      loadDrinkPrefs(saved?.drinkPrefs);
       loadCompetition(saved?.competition);
       loadPayrollHistory(saved?.payrollHistory);
       loadUtilitiesHistory(saved?.utilitiesHistory);
@@ -750,6 +766,7 @@ export class ClubScene extends Phaser.Scene {
       affinities: serializeAffinities(),
       customerTraits: serializeCustomerTraits(),
       inventory: serializeInventory(),
+      drinkPrefs: serializeDrinkPrefs(),
       competition: serializeCompetition(),
       nightNumber: this.nightNumber,
       payrollHistory: serializePayrollHistory(),
@@ -1582,11 +1599,103 @@ export class ClubScene extends Phaser.Scene {
     this.patrons.push(patron);
     // Prompt A Phase 1: invisible satisfaction (does not alter nightMood/patience).
     createExperience(patron);
+    // Prompt A Phase 4: roll/persist drink prefs (stable per profile.name).
+    getDrinkPrefs(patron);
     this.chooseMainPatronGoal(patron);
   }
 
   private drinkDisplayName(id: string): string {
-    return this.drinks.find((d) => d.id === id)?.name ?? id;
+    const fromScenario = this.drinks.find((d) => d.id === id)?.name;
+    if (fromScenario) return fromScenario;
+    return getDrinkProduct(id)?.name ?? id;
+  }
+
+  /** Resolve a Drink for serving: scenario entry or synthesised catalogue product. Price from inventory. */
+  private resolveServeDrink(id: string): Drink | null {
+    const price = inventoryGetPrice(id);
+    const existing = this.drinks.find((d) => d.id === id);
+    if (existing) {
+      return { id: existing.id, name: existing.name, price, serveTimeMs: existing.serveTimeMs };
+    }
+    const prod = getDrinkProduct(id);
+    if (!prod) return null;
+    // New catalogue spirits: serve timing like shot_barato when missing from scenario.
+    const fallbackMs =
+      this.drinks.find((d) => d.id === 'shot_barato')?.serveTimeMs ?? prod.serveTimeMs;
+    return {
+      id: prod.id,
+      name: prod.name,
+      price,
+      serveTimeMs: prod.serveTimeMs || fallbackMs,
+    };
+  }
+
+  /**
+   * Prompt A Phase 4: preferred if in stock; else weighted among top in-stock prefs.
+   * Returns null when nothing is in stock.
+   */
+  private pickServeDrink(patron: Patron): { drink: Drink; wantedId: string; substituted: boolean } | null {
+    const prefs = getDrinkPrefs(patron);
+    const wantedId = patron.profile.preferredDrink || Object.keys(prefs)[0] || DRINKS_CATALOG[0].id;
+    if (inventoryCanSell(wantedId)) {
+      const drink = this.resolveServeDrink(wantedId);
+      if (drink) return { drink, wantedId, substituted: false };
+    }
+    const inStock: Array<{ id: string; pref: number }> = [];
+    for (const d of DRINKS_CATALOG) {
+      if (!inventoryCanSell(d.id)) continue;
+      inStock.push({ id: d.id, pref: prefs[d.id] ?? 0 });
+    }
+    if (!inStock.length) return null;
+    inStock.sort((a, b) => b.pref - a.pref);
+    const top = inStock[0].pref;
+    const band = inStock.filter((x) => x.pref >= top - DRINK_PREF.topBand);
+    const total = band.reduce((s, x) => s + Math.max(0.01, x.pref), 0);
+    let r = Math.random() * total;
+    let chosen = band[0].id;
+    for (const x of band) {
+      r -= Math.max(0.01, x.pref);
+      if (r <= 0) {
+        chosen = x.id;
+        break;
+      }
+    }
+    const drink = this.resolveServeDrink(chosen);
+    if (!drink) return null;
+    return { drink, wantedId, substituted: chosen !== wantedId };
+  }
+
+  /**
+   * Prompt A Phase 4: buy units at supplierCost. Returns false if not enough money.
+   * Deducts via deductClubMoney; stock never goes negative.
+   */
+  restockDrink(id: string, units: number): boolean {
+    const prod = getDrinkProduct(id);
+    const n = Math.max(0, Math.floor(units));
+    if (!prod || n <= 0) return false;
+    const cost = Math.max(1, Math.round(prod.supplierCost * n));
+    if (this.money < cost) return false;
+    this.deductClubMoney(cost);
+    inventoryAddStock(id, n);
+    this.persistLayout();
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.game.events.emit('inventory-updated');
+    return true;
+  }
+
+  /** Prompt A Phase 4 test/debug: set absolute stock for a drink. */
+  setDrinkStock(id: string, units: number): boolean {
+    const ok = inventorySetStock(id, units);
+    if (ok) {
+      this.persistLayout();
+      this.game.events.emit('inventory-updated');
+    }
+    return ok;
+  }
+
+  /** Prompt A Phase 4 test/debug: current stock for a drink. */
+  getDrinkStock(id: string): number {
+    return inventoryGetStock(id);
   }
 
   private chooseMainPatronGoal(patron: Patron): void {
@@ -2630,7 +2739,18 @@ export class ClubScene extends Phaser.Scene {
     return readAffinityDebug();
   }
 
-  /** Prompt A Phase 3 test/debug: drink stock / prices / nightly sold. */
+  /** Prompt A Phase 4: UI restock request { id, units }. */
+  private onCmdRestockDrink = (payload: { id?: string; units?: number }): void => {
+    const id = typeof payload?.id === 'string' ? payload.id : '';
+    const units = typeof payload?.units === 'number' ? payload.units : 0;
+    if (!id || units <= 0) return;
+    const ok = this.restockDrink(id, units);
+    if (!ok) {
+      this.game.events.emit('restock-failed', { id, reason: 'money' });
+    }
+  };
+
+  /** Prompt A Phase 3/4 test/debug: drink stock / prices / nightly sold. */
   getInventoryDebug() {
     return readInventoryDebug();
   }
@@ -2813,9 +2933,29 @@ export class ClubScene extends Phaser.Scene {
   /** Staff walks to the bar, pours the patron's drink ('Sirviendo …'), the patron pays and moves on. */
   private beginAiServe(staff: Bartender, patron: Patron): boolean {
     const spots = this.barSpots();
-    const drink =
-      this.drinks.find((d) => d.id === patron.profile.preferredDrink) || this.drinks[0];
-    if (!spots || !drink) return false;
+    if (!spots) return false;
+
+    // Prompt A Phase 4: sell from stock (preferred → best in-stock alternative).
+    const pick = this.pickServeDrink(patron);
+    if (!pick) {
+      // Intentional behaviour change: nothing in stock → leave, no money.
+      patron.wantedDrinkId = patron.profile.preferredDrink || null;
+      patron.servedDrinkId = null;
+      patron.wasOutOfStock = true;
+      patron.showBubble('Se acabó todo');
+      patron.waiting = false;
+      patron.served = false;
+      this.releasePatronSlot(patron);
+      this.releaseTile(patron.grid);
+      patron.refreshStatusLabel();
+      this.sendPatronHome(patron);
+      return false;
+    }
+    const drink = pick.drink;
+    patron.wantedDrinkId = pick.wantedId;
+    patron.servedDrinkId = drink.id;
+    patron.wasOutOfStock = pick.substituted;
+
     const spot = spots.staffSpot;
     staff.aiJob = 'serve';
     staff.playerCommanded = false;
@@ -2843,12 +2983,33 @@ export class ClubScene extends Phaser.Scene {
     const patronGone = () =>
       !patron.active || this.phase !== 'open' || !patron.waiting || patron.served || patron.goal !== 'bar';
 
+    const abortEmptyStock = () => {
+      patron.wasOutOfStock = true;
+      patron.servedDrinkId = null;
+      patron.showBubble('Se acabó todo');
+      patron.waiting = false;
+      patron.served = false;
+      this.releasePatronSlot(patron);
+      this.releaseTile(patron.grid);
+      patron.refreshStatusLabel();
+      release();
+      this.sendPatronHome(patron);
+    };
+
     const completeServe = () => {
       if (!mine()) return;
       if (patronGone()) {
         release();
         return;
       }
+      // Stock may have raced to 0 while walking to the bar.
+      if (!inventoryCanSell(drink.id) || !inventoryRecordSale(drink.id)) {
+        abortEmptyStock();
+        return;
+      }
+      // Charge inventory public price (not the static scenario drink.price).
+      drink.price = inventoryGetPrice(drink.id);
+      patron.servedDrinkId = drink.id;
       staff.applyServeDrain();
       // Phase 3/4: personality-weighted tip action, gated by existing energy/mood
       const moodAtServe = staff.profile.mood;
@@ -2895,6 +3056,7 @@ export class ClubScene extends Phaser.Scene {
       release();
       this.persistLayout();
       this.game.events.emit('stats-updated', this.getHudState());
+      this.game.events.emit('inventory-updated');
       this.time.delayedCall(700, () => this.afterBarService(patron));
     };
 
@@ -3671,6 +3833,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-deselect-bartender', this.deselectNpc, this);
     this.game.events.off('cmd-request-shop-catalog', this.emitShopCatalog, this);
     this.game.events.off('cmd-buy-shop-furniture', this.onCmdBuyShopFurniture, this);
+    this.game.events.off('cmd-restock-drink', this.onCmdRestockDrink, this);
     this.game.events.off('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
     this.game.events.off('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
     this.game.events.off('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);

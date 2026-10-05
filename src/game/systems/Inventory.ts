@@ -130,7 +130,7 @@ export function setPrice(id: string, price: number): boolean {
   return true;
 }
 
-/** Restock helper for Phase 4+ (not wired to UI yet). */
+/** Restock helper (Phase 4 UI + ClubScene.restockDrink). */
 export function addStock(id: string, units: number): boolean {
   ensureAll();
   const s = state[id];
@@ -138,6 +138,15 @@ export function addStock(id: string, units: number): boolean {
   const n = Math.max(0, Math.floor(units));
   if (n <= 0) return false;
   s.stock += n;
+  return true;
+}
+
+/** Debug/test: set absolute stock (never negative). */
+export function setStock(id: string, units: number): boolean {
+  ensureAll();
+  const s = state[id];
+  if (!s || !getDrinkProduct(id)) return false;
+  s.stock = Math.max(0, Math.floor(units));
   return true;
 }
 

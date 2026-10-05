@@ -103,6 +103,8 @@ export class UIScene extends Phaser.Scene {
   private inventoryPanel!: Phaser.GameObjects.Container;
   private inventoryPanelVisible = false;
   private inventoryRows: Phaser.GameObjects.GameObject[] = [];
+  private inventoryFlash: Phaser.GameObjects.Text | null = null;
+  private inventoryBg: Phaser.GameObjects.Rectangle | null = null;
   private staffRoster: StaffRosterPayload | null = null;
   private staffRows: Phaser.GameObjects.GameObject[] = [];
 
@@ -373,6 +375,8 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('staff-hire-failed', this.onHireFailed, this);
     this.game.events.on('shop-catalog', this.onShopCatalog, this);
     this.game.events.on('shop-buy-failed', this.onShopBuyFailed, this);
+    this.game.events.on('inventory-updated', this.onInventoryUpdated, this);
+    this.game.events.on('restock-failed', this.onRestockFailed, this);
     this.game.events.on('select-furniture', this.onSelectFurniture, this);
     this.game.events.on('furniture-deselected', this.onFurnitureDeselected, this);
     this.game.events.on('ui-delete-confirm', this.onDeleteConfirm, this);
@@ -466,7 +470,7 @@ export class UIScene extends Phaser.Scene {
     if (this.inventoryPanelVisible) {
       const cx = w / 2;
       const cy = h / 2;
-      if (Math.abs(p.x - cx) < 220 && Math.abs(p.y - cy) < 230) return true;
+      if (Math.abs(p.x - cx) < 200 && Math.abs(p.y - cy) < 250) return true;
     }
     if (this.shopPanelVisible) {
       const cx = w / 2;
@@ -916,6 +920,40 @@ export class UIScene extends Phaser.Scene {
     this.layoutDeleteConfirm(w, h);
   };
 
+  private onInventoryUpdated = (): void => {
+    if (this.inventoryPanelVisible) this.rebuildInventoryPanel();
+  };
+
+  private onRestockFailed = (info: { id?: string; reason?: string }): void => {
+    if (!this.inventoryPanelVisible) return;
+    this.flashInventoryMsg(info?.reason === 'money' ? 'Sin dinero' : 'No se pudo comprar');
+  };
+
+  private flashInventoryMsg(msg: string): void {
+    if (!this.inventoryPanel) return;
+    if (this.inventoryFlash) {
+      this.inventoryFlash.destroy();
+      this.inventoryFlash = null;
+    }
+    const flash = this.add
+      .text(0, 188, msg, {
+        fontSize: '14px',
+        color: '#ff6688',
+        fontStyle: 'bold',
+        backgroundColor: '#2a1020',
+        padding: { x: 8, y: 4 },
+      })
+      .setOrigin(0.5);
+    this.inventoryPanel.add(flash);
+    this.inventoryFlash = flash;
+    this.time.delayedCall(1400, () => {
+      if (this.inventoryFlash === flash) {
+        flash.destroy();
+        this.inventoryFlash = null;
+      }
+    });
+  }
+
   private createInventoryPanel(): void {
     const cam = this.cameras.main;
     this.inventoryPanel = this.add
@@ -923,18 +961,23 @@ export class UIScene extends Phaser.Scene {
       .setScrollFactor(0)
       .setVisible(false)
       .setDepth(9600);
-    const bg = this.add.rectangle(0, 0, 400, 420, 0x140a22, 0.96);
+    // Opaque enough to read over the club floor; width fits 390px screens.
+    const panelW = Math.min(360, Math.max(300, cam.width - 24));
+    const bg = this.add.rectangle(0, 0, panelW, 460, 0x12081c, 1);
     bg.setStrokeStyle(2, 0x2ad6ff);
     bg.setInteractive();
+    this.inventoryBg = bg;
     const title = this.add
-      .text(0, -190, 'Inventario', {
-        fontSize: '20px',
+      .text(0, -210, 'Inventario', {
+        fontSize: '18px',
         color: '#2ad6ff',
         fontStyle: 'bold',
       })
       .setOrigin(0.5)
       .setName('invTitle');
-    const close = this.makeLocalButton(160, -198, 36, 32, '✕', () => this.hideInventoryPanel());
+    const close = this.makeLocalButton(panelW / 2 - 28, -218, 32, 28, '✕', () =>
+      this.hideInventoryPanel()
+    );
     this.inventoryPanel.add([bg, title, close]);
   }
 
@@ -972,44 +1015,60 @@ export class UIScene extends Phaser.Scene {
   private rebuildInventoryPanel(): void {
     if (!this.inventoryPanel) return;
     this.clearInventoryRows();
+    if (this.inventoryFlash) {
+      this.inventoryFlash.destroy();
+      this.inventoryFlash = null;
+    }
     const lines = listInventory();
-    const narrow = this.cameras.main.width < 420;
-    const font = narrow ? '10px' : '11px';
-    const headerFont = narrow ? '10px' : '11px';
+    const camW = this.cameras.main.width;
+    const panelW = Math.min(360, Math.max(300, camW - 24));
+    if (this.inventoryBg) {
+      this.inventoryBg.setSize(panelW, 460);
+    }
+    const half = panelW / 2 - 10;
+    const narrow = camW < 420;
+    const font = narrow ? '9px' : '10px';
+    const headerFont = narrow ? '9px' : '10px';
 
-    // Column x positions (panel centered, width 400 → content ±190)
-    const cols = narrow
-      ? { name: -188, stock: -70, sold: -20, cost: 30, price: 85, margin: 145 }
-      : { name: -188, stock: -60, sold: 0, cost: 55, price: 115, margin: 170 };
+    // Columns kept inside panel (±half). Margen no longer overflows the right edge.
+    // Tight columns so Producto…Margen + restock buttons fit inside ±half at 390px.
+    const cols = {
+      name: -half,
+      stock: -half + 72,
+      sold: -half + 108,
+      cost: -half + 142,
+      price: -half + 182,
+      margin: -half + 222,
+    };
 
-    const headerY = -160;
+    const headerY = -180;
     const mkH = (x: number, label: string) => {
-      const t = this.add
+      const tt = this.add
         .text(x, headerY, label, {
           fontSize: headerFont,
           color: '#a080c0',
           fontStyle: 'bold',
         })
         .setOrigin(0, 0);
-      this.inventoryPanel.add(t);
-      this.inventoryRows.push(t);
+      this.inventoryPanel.add(tt);
+      this.inventoryRows.push(tt);
     };
     mkH(cols.name, 'Producto');
     mkH(cols.stock, 'Exis.');
     mkH(cols.sold, 'Vend.');
     mkH(cols.cost, 'Costo');
     mkH(cols.price, 'Precio');
-    mkH(cols.margin, 'Margen');
+    mkH(cols.margin, 'Mar.');
 
-    let y = headerY + 22;
-    const rowH = 28;
+    let y = headerY + 20;
+    const rowH = 36;
     for (const line of lines) {
       const mk = (x: number, label: string, color = '#e8d0ff') => {
-        const t = this.add
+        const tt = this.add
           .text(x, y, label, { fontSize: font, color })
           .setOrigin(0, 0);
-        this.inventoryPanel.add(t);
-        this.inventoryRows.push(t);
+        this.inventoryPanel.add(tt);
+        this.inventoryRows.push(tt);
       };
       const stockColor = line.stock <= 0 ? '#ff6688' : '#e8d0ff';
       mk(cols.name, line.name, '#ff9ad5');
@@ -1018,15 +1077,34 @@ export class UIScene extends Phaser.Scene {
       mk(cols.cost, this.fmtMoney(line.supplierCost));
       mk(cols.price, this.fmtMoney(line.price), '#7ad7ff');
       mk(cols.margin, this.fmtMoney(line.margin), '#3cff9a');
+
+      // Restock +5 / +20 at supplier cost (Phase 4) — right edge of panel.
+      const btnX = half - 66;
+      const b5 = this.makeLocalButton(btnX, y - 4, 30, 22, '+5', () => {
+        this.game.events.emit('cmd-restock-drink', { id: line.id, units: 5 });
+      });
+      const b20 = this.makeLocalButton(btnX + 32, y - 4, 34, 22, '+20', () => {
+        this.game.events.emit('cmd-restock-drink', { id: line.id, units: 20 });
+      });
+      for (const b of [b5, b20]) {
+        const kids = b.list as Phaser.GameObjects.GameObject[];
+        for (const k of kids) {
+          if (k instanceof Phaser.GameObjects.Text) {
+            (k as Phaser.GameObjects.Text).setFontSize(11);
+          }
+        }
+        this.inventoryPanel.add(b);
+        this.inventoryRows.push(b);
+      }
       y += rowH;
     }
 
     const hint = this.add
       .text(
         0,
-        175,
-        'Existencias y precios del club · Vendidas = esta noche',
-        { fontSize: '10px', color: '#8060a0' }
+        205,
+        'Comprar al proveedor: +5 / +20 · Vendidas = esta noche',
+        { fontSize: '9px', color: '#8060a0' }
       )
       .setOrigin(0.5);
     this.inventoryPanel.add(hint);

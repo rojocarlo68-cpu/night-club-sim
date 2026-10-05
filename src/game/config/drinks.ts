@@ -122,3 +122,16 @@ export function getDrinkProduct(id: string): DrinkProduct | undefined {
 export function listDrinkProducts(): DrinkProduct[] {
   return DRINKS_CATALOG.map((d) => ({ ...d }));
 }
+
+/** Per-patron drink preference rolls (Prompt A Phase 4). */
+export const DRINK_PREF = {
+  /** Forced preference for profile.preferredDrink. */
+  preferredForce: 0.9,
+  /** Extra jitter on top of preferredForce (0..jitter → up to ~1.0). */
+  preferredJitter: 0.1,
+  /** Range for all other catalogue drinks. */
+  otherMin: 0.12,
+  otherMax: 0.72,
+  /** When picking among in-stock alternatives, keep options within this of the max pref. */
+  topBand: 0.12,
+} as const;
