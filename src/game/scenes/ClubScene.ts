@@ -38,6 +38,13 @@ import {
   loadUtilitiesHistory,
 } from '../systems/Utilities';
 import { ALLOW_NEGATIVE_BALANCE, weeklySalaryFor } from '../config/salaries';
+import {
+  initInventory,
+  loadInventory,
+  resetNightInventory,
+  serializeInventory,
+  getInventoryDebug as readInventoryDebug,
+} from '../systems/Inventory';
 import { nextWeekEndNight, nextMonthEndNight } from '../config/calendar';
 import { getPersonality, personalitySummary } from '../config/personality';
 import { TipAction } from '../config/tipActions';
@@ -236,6 +243,11 @@ interface SavedLayout {
       tolerance?: number;
     }
   >;
+  /** Prompt A Phase 3: drink stock + public prices. Old saves omit → catalogue defaults. */
+  inventory?: {
+    stock?: Record<string, number>;
+    prices?: Record<string, number>;
+  };
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -388,6 +400,8 @@ export class ClubScene extends Phaser.Scene {
     this.phase = 'prep';
     this.patrons = [];
     this.drinks = Array.isArray(this.scenario.drinks) ? this.scenario.drinks : [];
+    // Prompt A Phase 3: inventory catalogue (serving still uses this.drinks / scenario prices).
+    initInventory();
     this.buildMode = false;
     this.selectedFurniture = null;
 
@@ -625,6 +639,7 @@ export class ClubScene extends Phaser.Scene {
       loadTips(saved?.staffTips);
       loadAffinities(saved?.affinities);
       loadCustomerTraits(saved?.customerTraits);
+      loadInventory(saved?.inventory);
       loadCompetition(saved?.competition);
       loadPayrollHistory(saved?.payrollHistory);
       loadUtilitiesHistory(saved?.utilitiesHistory);
@@ -734,6 +749,7 @@ export class ClubScene extends Phaser.Scene {
       staffTips: serializeTips(),
       affinities: serializeAffinities(),
       customerTraits: serializeCustomerTraits(),
+      inventory: serializeInventory(),
       competition: serializeCompetition(),
       nightNumber: this.nightNumber,
       payrollHistory: serializePayrollHistory(),
@@ -1506,6 +1522,7 @@ export class ClubScene extends Phaser.Scene {
     this.nightEarned = 0;
     this.servedCount = 0;
     resetNightTips();
+    resetNightInventory();
     this.competitionObserveAccum = 0;
     this.nightTimer = this.scenario.nightDurationSec;
     const [min, max] = this.scenario.patronSpawnCount;
@@ -2611,6 +2628,11 @@ export class ClubScene extends Phaser.Scene {
   /** Phase 5 test/debug: recent served affinity outcomes (ring ~50). */
   getAffinityDebug() {
     return readAffinityDebug();
+  }
+
+  /** Prompt A Phase 3 test/debug: drink stock / prices / nightly sold. */
+  getInventoryDebug() {
+    return readInventoryDebug();
   }
 
   /** Prompt A Phase 1 test/debug: active patron satisfaction + last ~20 visits. */
