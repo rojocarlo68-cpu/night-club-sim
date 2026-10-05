@@ -157,6 +157,12 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 146,
       frameHeight: 784,
     });
+    // Nova walk SE (semi-right, as drawn — same facing as her idle): 10 frames of 156×784, same 476px body / soles y=610.
+    // SW = the same frames mirrored with flipX (Bartender.ts); NE / NW keep the idle frames as before.
+    this.load.spritesheet('nova_walk', 'assets/characters/nova_walk_se_sheet.png', {
+      frameWidth: 156,
+      frameHeight: 784,
+    });
     this.load.spritesheet('nova_serve_beer', 'assets/characters/nova_serve_beer_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
@@ -268,6 +274,19 @@ export class BootScene extends Phaser.Scene {
         frameRate: 1,
         repeat: -1,
       });
+    }
+    // Nova walk: SE + SW anims share the SE frames (10 frames, 9 fps); Bartender flips SW with flipX.
+    if (this.textures.exists('nova_walk')) {
+      for (const f of ['se', 'sw']) {
+        const k = `nova-walk-${f}`;
+        if (this.anims.exists(k)) continue;
+        this.anims.create({
+          key: k,
+          frames: this.anims.generateFrameNumbers('nova_walk', { start: 0, end: 9 }),
+          frameRate: 9,
+          repeat: -1,
+        });
+      }
     }
     // 8 frames over 2.0s — match Luna cerveza pour
     if (!this.anims.exists('nova-serve-beer') && this.textures.exists('nova_serve_beer')) {

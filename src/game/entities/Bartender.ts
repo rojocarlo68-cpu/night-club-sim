@@ -96,6 +96,13 @@ export class Bartender extends Character {
           y: 6,
           // Directional idle: SE/NE = frame 0, SW/NW = pre-mirrored frame 1 (nova-idle-{se,sw,ne,nw}).
           idleAnimPrefix: 'nova-idle',
+          // Walk SE/SW (SW = SE frames + flipX, set per anim below); NE/NW have no walk anim -> idle frames as before.
+          walkAnimPrefix: 'nova-walk',
+          scaleDisplayWByFrame: true, // walk frames are 156 wide vs 146 idle: same px→screen scale
+        });
+        // Idle/serve use pre-mirrored frames (no flipIdleFacings), so only the SW walk is mirrored.
+        this.sprite.on('animationstart', (anim: Phaser.Animations.Animation) => {
+          this.sprite.setFlipX(anim.key === 'nova-walk-sw');
         });
       } else {
         this.sprite.setOrigin(0.5, 0.92);
