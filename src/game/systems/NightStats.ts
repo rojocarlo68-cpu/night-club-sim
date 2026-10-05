@@ -51,6 +51,12 @@ export interface NightStatsEntry {
   avgSatisfaction: number | null;
   visitCount: number;
   atMs: number;
+  /** Prompt B Phase B9 — shift clock summary (player-visible). */
+  openHhmm?: string | null;
+  closeHhmm?: string | null;
+  durationGameMinutes?: number | null;
+  durationLabel?: string | null;
+  staffWorked?: { id: string; name: string; durationGameMinutes: number; durationLabel: string }[];
 }
 
 /** In-night accumulators (reset on open / after snapshot). */
@@ -85,6 +91,11 @@ export function snapshotNightStats(opts: {
   nightNumber: number;
   servedCount: number;
   staff: { id: string; name: string }[];
+  openHhmm?: string | null;
+  closeHhmm?: string | null;
+  durationGameMinutes?: number | null;
+  durationLabel?: string | null;
+  staffWorked?: NightStatsEntry['staffWorked'];
 }): NightStatsEntry {
   const inv = listInventory();
   const stockouts = getStockoutFirstMs();
@@ -135,6 +146,11 @@ export function snapshotNightStats(opts: {
     avgSatisfaction,
     visitCount: satCount,
     atMs: Date.now(),
+    openHhmm: opts.openHhmm ?? null,
+    closeHhmm: opts.closeHhmm ?? null,
+    durationGameMinutes: opts.durationGameMinutes ?? null,
+    durationLabel: opts.durationLabel ?? null,
+    staffWorked: opts.staffWorked ? opts.staffWorked.map((s) => ({ ...s })) : [],
   };
   history.push(entry);
   while (history.length > NIGHT_STATS_HISTORY_CAP) history.shift();

@@ -38,6 +38,7 @@ import {
   legacyPhaseFromShift,
   getShiftDebug as readShiftDebug,
   getShiftSnapshot,
+  getShiftOpenCloseTimes,
   resetShiftState,
   tickShiftClock,
   formatGameClock,
@@ -3106,10 +3107,38 @@ export class ClubScene extends Phaser.Scene {
     const endedNight = onNightEnd(this);
     syncShiftDay(this.nightNumber); // post night-end bump
     // Prompt A Phase 10: snapshot sales/tips/leaves/sat BEFORE openNight resets soldTonight.
+    const oc = getShiftOpenCloseTimes();
+    const hours = getLastStaffHours();
+    const durationMin =
+      hours.length > 0
+        ? Math.max(...hours.map((h) => h.durationWorkedGameMinutes))
+        : oc.openTimeHour != null &&
+            oc.openTimeMinute != null &&
+            oc.closeTimeHour != null &&
+            oc.closeTimeMinute != null
+          ? (() => {
+              let a = oc.openTimeHour! * 60 + oc.openTimeMinute!;
+              let b = oc.closeTimeHour! * 60 + oc.closeTimeMinute!;
+              if (b < a) b += 24 * 60;
+              return b - a;
+            })()
+          : 0;
+    const durationLabel = formatDurationHm(durationMin);
+    const staffWorked = hours.map((h) => ({
+      id: h.staffId,
+      name: h.name,
+      durationGameMinutes: h.durationWorkedGameMinutes,
+      durationLabel: formatDurationHm(h.durationWorkedGameMinutes),
+    }));
     const nightStats = snapshotNightStats({
       nightNumber: endedNight,
       servedCount: this.servedCount,
       staff: this.listPayrollStaff(),
+      openHhmm: oc.openTime,
+      closeHhmm: oc.closeTime,
+      durationGameMinutes: durationMin,
+      durationLabel,
+      staffWorked,
     });
     this.persistLayout();
     const payroll = takeLastPayroll();
@@ -3140,6 +3169,21 @@ export class ClubScene extends Phaser.Scene {
           NIGHT_SUMMARY_LINES.drinks(nightStats.drinksSoldTotal, nightStats.drinksRevenueTotal),
           NIGHT_SUMMARY_LINES.stockout(nightStats.stockedOutNames),
           NIGHT_SUMMARY_LINES.served(nightStats.servedCount),
+        ].filter((x): x is string => !!x),
+      },
+      // Prompt B Phase B9
+      shiftSummary: {
+        openHhmm: nightStats.openHhmm ?? null,
+        closeHhmm: nightStats.closeHhmm ?? null,
+        durationLabel: nightStats.durationLabel ?? null,
+        staffNames: staffWorked.map((s) => s.name),
+        staffHours: staffWorked.map((s) => ({ name: s.name, durationLabel: s.durationLabel })),
+        summaryLines: [
+          nightStats.openHhmm ? NIGHT_SUMMARY_LINES.openAt(nightStats.openHhmm) : null,
+          nightStats.closeHhmm ? NIGHT_SUMMARY_LINES.closeAt(nightStats.closeHhmm) : null,
+          nightStats.durationLabel ? NIGHT_SUMMARY_LINES.duration(nightStats.durationLabel) : null,
+          NIGHT_SUMMARY_LINES.staffWorked(staffWorked.map((s) => s.name)),
+          ...staffWorked.map((s) => NIGHT_SUMMARY_LINES.staffHoursLine(s.name, s.durationLabel)),
         ].filter((x): x is string => !!x),
       },
     });

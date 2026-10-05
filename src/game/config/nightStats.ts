@@ -16,4 +16,11 @@ export const NIGHT_SUMMARY_LINES = {
     names.length ? `Agotado: ${names.join(', ')}` : null,
   /** Atendidos: N */
   served: (n: number) => `Atendidos: ${n}`,
+  /** Prompt B Phase B9 */
+  openAt: (hhmm: string) => `Apertura: ${hhmm}`,
+  closeAt: (hhmm: string) => `Cierre: ${hhmm}`,
+  duration: (label: string) => `Duración: ${label}`,
+  staffWorked: (names: string[]) =>
+    names.length ? `Empleadas: ${names.join(', ')}` : null,
+  staffHoursLine: (name: string, dur: string) => `  ${name}: ${dur}`,
 } as const;

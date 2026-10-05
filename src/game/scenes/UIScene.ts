@@ -49,6 +49,15 @@ interface HudState {
     servedCount: number;
     summaryLines: string[];
   };
+  /** Prompt B Phase B9: open/close/duration/staff lines. */
+  shiftSummary?: {
+    openHhmm: string | null;
+    closeHhmm: string | null;
+    durationLabel: string | null;
+    staffNames: string[];
+    staffHours: { name: string; durationLabel: string }[];
+    summaryLines: string[];
+  };
 }
 
 const STATE_ES: Record<string, string> = {
@@ -762,6 +771,10 @@ export class UIScene extends Phaser.Scene {
       `Clientes que se sentaron: ${s.servedCount ?? 0}`,
       `Dinero total: ${formatMoney(s.money)}`,
     ];
+    // Prompt B Phase B9: apertura / cierre / duración / empleadas.
+    if (s.shiftSummary?.summaryLines?.length) {
+      lines.push(...s.shiftSummary.summaryLines);
+    }
     // Prompt A Phase 10: small drink sales / stockout / attended lines (no sat numbers).
     if (s.nightSales?.summaryLines?.length) {
       lines.push(...s.nightSales.summaryLines);
