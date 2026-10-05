@@ -58,6 +58,15 @@ import {
   serializeDrinkPrefs,
   loadDrinkPrefs,
 } from '../systems/DrinkPreferences';
+import {
+  evaluateDrinkPrice,
+  applyPricePerception,
+  evaluateOutOfStock,
+  applyOosPerception,
+  pushPricingDebug,
+  getPricingDebug as readPricingDebug,
+  traitsOf,
+} from '../systems/PricePerception';
 import { nextWeekEndNight, nextMonthEndNight } from '../config/calendar';
 import { getPersonality, personalitySummary } from '../config/personality';
 import { TipAction } from '../config/tipActions';
@@ -1633,44 +1642,140 @@ export class ClubScene extends Phaser.Scene {
   }
 
   /**
-   * Prompt A Phase 4: preferred if in stock; else weighted among top in-stock prefs.
-   * Returns null when nothing is in stock.
+   * Prompt A Phase 4+6: preferred if in stock & price-ok; else best priced alternative.
+   * Phase 6: price perception + OOS reaction (once per drink). Skip uses existing leave path.
    */
-  private pickServeDrink(patron: Patron): { drink: Drink; wantedId: string; substituted: boolean } | null {
+  private pickServeDrink(
+    patron: Patron
+  ):
+    | { ok: true; drink: Drink; wantedId: string; substituted: boolean }
+    | { ok: false; reason: 'empty' | 'price' | 'oos_skip' } {
     const prefs = getDrinkPrefs(patron);
-    const wantedId = patron.profile.preferredDrink || Object.keys(prefs)[0] || DRINKS_CATALOG[0].id;
+    const wantedId =
+      patron.profile.preferredDrink || Object.keys(prefs)[0] || DRINKS_CATALOG[0].id;
+    const traits = traitsOf(patron);
+    const name = (patron.profile?.name || wantedId).trim() || wantedId;
+
+    // Cache price evals so refuse rolls are not re-rolled when applying.
+    const evalCache = new Map<
+      string,
+      { drink: Drink; refuse: boolean; ev: ReturnType<typeof evaluateDrinkPrice> | null }
+    >();
+
+    const resolveEval = (drinkId: string) => {
+      const cached = evalCache.get(drinkId);
+      if (cached) return cached;
+      if (!inventoryCanSell(drinkId)) {
+        const miss = { drink: null as unknown as Drink, refuse: true, ev: null };
+        return miss;
+      }
+      const drink = this.resolveServeDrink(drinkId);
+      if (!drink) {
+        return { drink: null as unknown as Drink, refuse: true, ev: null };
+      }
+      if (!traits) {
+        const row = { drink, refuse: false, ev: null };
+        evalCache.set(drinkId, row);
+        return row;
+      }
+      const ev = evaluateDrinkPrice(patron, drinkId, drink.price, traits);
+      const row = { drink, refuse: ev.refuse, ev };
+      evalCache.set(drinkId, row);
+      return row;
+    };
+
+    const applyEval = (
+      drinkId: string,
+      role: 'preferred' | 'alt'
+    ): number => {
+      const row = resolveEval(drinkId);
+      if (!row.ev || !traits) return 0;
+      const penalty = applyPricePerception(patron, row.ev);
+      pushPricingDebug({
+        patronName: name,
+        drinkId,
+        price: row.ev.price,
+        reasonable: row.ev.reasonable,
+        ratio: row.ev.ratio,
+        band: row.ev.band,
+        decision: row.refuse ? 'skip' : role === 'alt' ? 'alt' : 'bought',
+        penalty,
+        refused: row.refuse,
+      });
+      return penalty;
+    };
+
+    // Preferred in stock → price-check (apply once).
     if (inventoryCanSell(wantedId)) {
-      const drink = this.resolveServeDrink(wantedId);
-      if (drink) return { drink, wantedId, substituted: false };
+      const pref = resolveEval(wantedId);
+      if (pref.drink && !pref.refuse) {
+        applyEval(wantedId, 'preferred');
+        return { ok: true, drink: pref.drink, wantedId, substituted: false };
+      }
+      if (pref.drink && pref.refuse) {
+        applyEval(wantedId, 'preferred');
+        // fall through to alternatives
+      }
+    } else if (traits) {
+      // OOS of wanted drink only (never a global stock penalty).
+      const oos = evaluateOutOfStock(patron, wantedId, traits);
+      const penalty = applyOosPerception(patron, oos);
+      pushPricingDebug({
+        patronName: name,
+        drinkId: wantedId,
+        price: 0,
+        reasonable: 0,
+        ratio: 0,
+        decision: 'oos_penalty',
+        penalty,
+        refused: oos.skipBuy,
+      });
+      if (oos.skipBuy) return { ok: false, reason: 'oos_skip' };
     }
+
+    // Alternatives among in-stock.
     const inStock: Array<{ id: string; pref: number }> = [];
     for (const d of DRINKS_CATALOG) {
+      if (d.id === wantedId) continue;
       if (!inventoryCanSell(d.id)) continue;
       inStock.push({ id: d.id, pref: prefs[d.id] ?? 0 });
     }
-    if (!inStock.length) return null;
+    if (!inStock.length) {
+      return { ok: false, reason: inventoryCanSell(wantedId) ? 'price' : 'empty' };
+    }
     inStock.sort((a, b) => b.pref - a.pref);
     const top = inStock[0].pref;
     const band = inStock.filter((x) => x.pref >= top - DRINK_PREF.topBand);
-    const total = band.reduce((s, x) => s + Math.max(0.01, x.pref), 0);
-    let r = Math.random() * total;
-    let chosen = band[0].id;
+    const acceptable: Array<{ drink: Drink; pref: number; id: string }> = [];
     for (const x of band) {
+      const checked = resolveEval(x.id);
+      if (checked.drink && !checked.refuse) {
+        acceptable.push({ drink: checked.drink, pref: x.pref, id: x.id });
+      }
+    }
+    if (!acceptable.length) {
+      applyEval(band[0].id, 'alt');
+      return { ok: false, reason: 'price' };
+    }
+    const total = acceptable.reduce((s, x) => s + Math.max(0.01, x.pref), 0);
+    let r = Math.random() * total;
+    let chosen = acceptable[0];
+    for (const x of acceptable) {
       r -= Math.max(0.01, x.pref);
       if (r <= 0) {
-        chosen = x.id;
+        chosen = x;
         break;
       }
     }
-    const drink = this.resolveServeDrink(chosen);
-    if (!drink) return null;
-    return { drink, wantedId, substituted: chosen !== wantedId };
+    applyEval(chosen.id, 'alt');
+    return {
+      ok: true,
+      drink: chosen.drink,
+      wantedId,
+      substituted: chosen.drink.id !== wantedId,
+    };
   }
 
-  /**
-   * Prompt A Phase 4: buy units at supplierCost. Returns false if not enough money.
-   * Deducts via deductClubMoney; stock never goes negative.
-   */
   restockDrink(id: string, units: number): boolean {
     const prod = getDrinkProduct(id);
     const n = Math.max(0, Math.floor(units));
@@ -2802,6 +2907,11 @@ export class ClubScene extends Phaser.Scene {
     return { active, visits: getVisitDebug(), dirtEpisodes: getDirtEpisodesDebug() };
   }
 
+  /** Prompt A Phase 6 test/debug: recent price / OOS buy-alt-skip decisions. */
+  getPricingDebug() {
+    return readPricingDebug();
+  }
+
   /** Phase 6 test/debug: competitiveness + rolling tips per staff. */
   getCompetitionDebug() {
     return readCompetitionDebug();
@@ -2971,14 +3081,16 @@ export class ClubScene extends Phaser.Scene {
     const spots = this.barSpots();
     if (!spots) return false;
 
-    // Prompt A Phase 4: sell from stock (preferred → best in-stock alternative).
+    // Prompt A Phase 4+6: stock + price/availability perception → buy / alt / skip.
     const pick = this.pickServeDrink(patron);
-    if (!pick) {
-      // Intentional behaviour change: nothing in stock → leave, no money.
+    if (!pick.ok) {
+      // Existing leave path (no new navigation). Keep 'Se acabó todo' for empty stock.
       patron.wantedDrinkId = patron.profile.preferredDrink || null;
       patron.servedDrinkId = null;
-      patron.wasOutOfStock = true;
-      patron.showBubble('Se acabó todo');
+      patron.wasOutOfStock = pick.reason === 'empty' || pick.reason === 'oos_skip';
+      if (pick.reason === 'empty') patron.showBubble('Se acabó todo');
+      else if (pick.reason === 'price') patron.showBubble('Muy caro');
+      else patron.showBubble('Sin mi bebida');
       patron.waiting = false;
       patron.served = false;
       this.releasePatronSlot(patron);

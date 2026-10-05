@@ -89,3 +89,58 @@ export const PERCEPTION_SCALE = {
   posMin: 0.7,
   posMax: 1.2,
 } as const;
+
+/* ───────────── Prompt A Phase 6: price / availability perception ───────────── */
+
+/**
+ * Reasonable price = basePrice * lerp(factorLowSens, factorHighSens, priceSens)
+ *                   * (1 + stableVariation(name, drinkId)).
+ * Low priceSens (tolerant/"rich") accepts higher prices; high priceSens wants cheaper.
+ */
+export const PRICE_PERCEPTION = {
+  /** Multiplier on basePrice at priceSens=0 (tolerant). */
+  factorLowSens: 1.4,
+  /** Multiplier on basePrice at priceSens=1 (sensitive). */
+  factorHighSens: 0.8,
+  /** Stable per-patron per-drink jitter on the reasonable price (±). */
+  variationMin: -0.08,
+  variationMax: 0.08,
+  /**
+   * Ratio = publicPrice / reasonable. First band whose maxRatio ≥ ratio wins.
+   * Base deltas are then scaled by priceSens via applyPerceivedExperience.
+   */
+  bands: [
+    { band: 'cheap', maxRatio: 0.85, delta: 2 },
+    { band: 'reasonable', maxRatio: 1.1, delta: 0 },
+    { band: 'slightly_high', maxRatio: 1.35, delta: -3 },
+    { band: 'very_high', maxRatio: 1.7, delta: -7 },
+    { band: 'extreme', maxRatio: Number.POSITIVE_INFINITY, delta: -12 },
+  ] as const,
+  /** Refuse chance at very_high: lerp(min, max, priceSens). */
+  veryHighRefuseMin: 0.12,
+  veryHighRefuseMax: 0.5,
+  /** Refuse chance at extreme: lerp(min, max, priceSens). Never 100%. */
+  extremeRefuseMin: 0.4,
+  extremeRefuseMax: 0.92,
+} as const;
+
+/**
+ * Out-of-stock reaction for the patron's WANTED drink only (never global).
+ * Base penalty is scaled by preference strength, then by availSens + tolerance
+ * via applyPerceivedExperience (PERCEPTION_SCALE).
+ */
+export const AVAIL_REACTION = {
+  /** Base sat delta when preferred drink stock is 0 (before pref / trait scale). */
+  basePenalty: -6,
+  /** After applying penalty: P(skip buying an alternative). */
+  skipBase: 0.08,
+  /** Extra skip chance per |appliedPenalty| point. */
+  skipPerPenaltyPoint: 0.035,
+  /** Tolerance reduces skip chance. */
+  skipTolDamp: 0.45,
+  /** Cap so some patrons always try an alternative. */
+  skipMax: 0.55,
+} as const;
+
+/** Debug ring size for getPricingDebug(). */
+export const PRICING_DEBUG_CAP = 40;
