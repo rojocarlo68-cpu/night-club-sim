@@ -72,6 +72,9 @@ export const DIRT_BANDS = {
   delta: { clean: 2, dirty: -4, very_dirty: -8 },
 } as const;
 
+/** Floor-dirt perception uses the same radius; deltas live in config/floorDirt.ts. */
+export const FLOOR_DIRT_USES_PERCEPTION_RADIUS = true;
+
 /** Patron perceives dirty items within this Chebyshev tile distance of the footprint. */
 export const PERCEPTION_RADIUS_TILES = 2;
 /** How often each patron scans its surroundings (ms). Not every frame. */

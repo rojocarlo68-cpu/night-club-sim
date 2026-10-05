@@ -74,8 +74,8 @@ export const INTERVAL_JITTER_GAME_MINUTES = 2;
 
 /**
  * Late-open hook (B5): softCap reduction per full game-hour past recommended open.
- * Currently Abrir snaps clock to 18:00, so this rarely applies until Abrir can keep
- * a later clock (e.g. waiting from 17:00 without snap, or debug openAtGameMinutes).
+ * Abrir keeps the current CLOSED clock (no 18:00 snap), so late-open modifiers
+ * apply when the player opens after the recommended hour.
  */
 export const LATE_OPEN_PENALTY_PER_GAME_HOUR = 1;
 /** Minimum soft cap after late-open / scale reductions. */

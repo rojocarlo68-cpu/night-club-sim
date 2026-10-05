@@ -1,10 +1,10 @@
 /**
  * Prompt B Phase B1–B2 — day / game clock / shift state (single source of truth).
  *
- * B2 clock policy (documented):
- * - While CLOSED: clock frozen at day-start PRE_OPEN (17:00).
- * - On Abrir (beginShiftOpen): snap to 18:00 when USE_SNAP_TO_RECOMMENDED_OPEN (B11 flag).
- * - While OPEN or CLOSING: advance by REAL_SECONDS_PER_GAME_MINUTE.
+ * Clock policy (day-start correction):
+ * - While CLOSED: clock TICKS from PRE_OPEN (17:00) — prep / staff arrival.
+ * - On Abrir (beginShiftOpen): open at current clock (USE_SNAP_TO_RECOMMENDED_OPEN=false).
+ * - While OPEN or CLOSING: keep advancing by REAL_SECONDS_PER_GAME_MINUTE.
  * - Does NOT auto-close at 02:00. B7: night ends via CLOSING → SUMMARY (manual Cerrar).
  *
  * Maps to existing NightPhase:
@@ -164,9 +164,8 @@ function transition(to: ShiftState): boolean {
 }
 
 /**
- * Abrir noche: closed|summary → open.
- * B2: snaps game clock to recommended open (18:00) and starts ticking.
- * Spawn + 75s real timer remain owned by ClubScene until later phases.
+ * Abrir noche: closed|summary → open at the current game clock.
+ * Snap to 18:00 only when USE_SNAP_TO_RECOMMENDED_OPEN is true (default false).
  */
 export function beginShiftOpen(): boolean {
   if (shiftState === 'open') return true;
@@ -177,8 +176,7 @@ export function beginShiftOpen(): boolean {
   const ok =
     shiftState === 'summary' || shiftState === 'closed' ? transition('open') : false;
   if (!ok) return false;
-  // B2/B11: snap to recommended open unless USE_SNAP_TO_RECOMMENDED_OPEN is false
-  // (then keep current frozen CLOSED clock — typically 17:00).
+  // Day-start: keep current CLOSED clock (may be 17:20 etc). Optional legacy snap.
   if (USE_SNAP_TO_RECOMMENDED_OPEN) {
     setGameTime(RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE);
   }
@@ -215,7 +213,7 @@ export function openShiftAt(hour: number, minute: number): boolean {
   return true;
 }
 
-/** B11 test helper: set frozen / live game clock without opening. */
+/** Test helper: set game clock without opening (clock may still tick while CLOSED). */
 export function debugSetGameTime(hour: number, minute: number): void {
   setGameTime(hour, minute);
 }
@@ -259,11 +257,13 @@ export function beginShiftClosed(nextDay?: number): boolean {
 }
 
 /**
- * Advance game time while OPEN or CLOSING.
+ * Advance game time while CLOSED, OPEN, or CLOSING (not SUMMARY).
  * @returns number of whole game-minutes that advanced (0 if none / not ticking).
  */
 export function tickShiftClock(dtSec: number): number {
-  if (shiftState !== 'open' && shiftState !== 'closing') return 0;
+  if (shiftState !== 'closed' && shiftState !== 'open' && shiftState !== 'closing') {
+    return 0;
+  }
   if (!Number.isFinite(dtSec) || dtSec <= 0) return 0;
   const pace = REAL_SECONDS_PER_GAME_MINUTE;
   if (!(pace > 0)) return 0;
@@ -283,11 +283,11 @@ export function tickShiftClock(dtSec: number): number {
 }
 
 export function isShiftClockTicking(): boolean {
-  return shiftState === 'open' || shiftState === 'closing';
+  return shiftState === 'closed' || shiftState === 'open' || shiftState === 'closing';
 }
 
 /**
- * Test helper: advance N whole game minutes while OPEN/CLOSING.
+ * Test helper: advance N whole game minutes while CLOSED/OPEN/CLOSING.
  * Returns minutes actually advanced.
  */
 export function debugAdvanceGameMinutes(n: number): number {

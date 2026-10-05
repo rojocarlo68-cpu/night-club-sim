@@ -55,7 +55,37 @@ import {
   REAL_SECONDS_PER_GAME_MINUTE,
   CLOSING_NUDGE_AFTER_MS,
   CLOSING_FORCE_SUMMARY_MS,
+  PRE_OPEN_HOUR,
+  PRE_OPEN_MINUTE,
+  STAFF_ARRIVE_GAME_MINUTES_AFTER_DAY_START,
+  STAFF_ARRIVE_JITTER_GAME_MINUTES,
 } from '../config/shift';
+import {
+  SWEEP_DURATION_MS,
+  MOP_DURATION_MS,
+  FLOOR_JOB_ENERGY,
+  FLOOR_VISUAL,
+} from '../config/floorDirt';
+import {
+  initFloorDirt,
+  getFloorZones,
+  seedFloorDirtForDay,
+  findDirtiestSweepZone,
+  findDirtiestMopZone,
+  applySweep,
+  applyMop,
+  floorZoneCenter,
+  floorDirtBand,
+  floorDirtDelta,
+  floorDirtEpisodeKey,
+  isFloorVisiblyDirty,
+  distToFloorZone,
+  getFloorDirtDebug as readFloorDirtDebug,
+  serializeFloorDirt,
+  loadFloorDirt,
+  resetFloorDirtState,
+  type FloorZone,
+} from '../systems/FloorDirt';
 import {
   DAY_START_TOAST_CHANCE,
   DAY_START_MESSAGES,
@@ -431,6 +461,18 @@ export class ClubScene extends Phaser.Scene {
   private closingNudged = false;
   /** B10: guard against double Dormir. */
   private sleepInProgress = false;
+  /**
+   * Day-start: staff hidden until game clock reaches staffArriveTotalMinutes.
+   * AI / visibility gated by staffPresent.
+   */
+  private staffPresent = false;
+  /** Absolute game-minute-of-day (hour*60+minute) when staff appear while CLOSED. */
+  private staffArriveTotalMinutes = PRE_OPEN_HOUR * 60 + PRE_OPEN_MINUTE + STAFF_ARRIVE_GAME_MINUTES_AFTER_DAY_START;
+  /** Previous night had patrons/sales — seeds floor dirt on next day start. */
+  private lastNightUsed = false;
+  /** Floor zone id → staff id while sweep/mop runs. */
+  private floorClaim = new Map<string, string>();
+  private floorDirtGfx = new Map<string, Phaser.GameObjects.Ellipse>();
   /** Phase 7: absolute night index (1-based). Increments when a night ends. */
   nightNumber = 1;
   /** Phase 6: ms accumulator toward next peer-observation tick. */
@@ -612,6 +654,12 @@ export class ClubScene extends Phaser.Scene {
     this.loadStaffPool();
     this.ensureFreeStarterStaff();
     this.spawnHiredExtraStaff();
+
+    // Day-start: floor dirt zones + hide staff until ~17:05.
+    initFloorDirt(cols, rows);
+    seedFloorDirtForDay(true); // first load: mild demo dirt so prep is visible
+    this.refreshFloorDirtVisuals();
+    this.beginDayStaffHidden();
 
     // Prompt B Phase B3: overlay created here; dim applied after camera BG is set.
     this.createLightsOverlay();
@@ -943,11 +991,11 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
-  /** Normal character depth vs furniture — Luna always full-body visible. */
+  /** Normal character depth vs furniture — respect day-start hide until staff arrive. */
   private syncBartenderBarDepth(): void {
     if (!this.bartender) return;
     const g = this.bartender.grid;
-    this.bartender.setVisible(true);
+    if (this.staffPresent) this.bartender.setVisible(true);
     this.bartender.setDepth(depthForCharacter(g.col, g.row));
   }
 
@@ -1123,7 +1171,7 @@ export class ClubScene extends Phaser.Scene {
 
   /**
    * Dim when closed/summary; bright when open.
-   * Staff stay visible on the floor in both states (contradiction vs "enter on open" — see B3 report).
+   * Staff visibility is owned by staffPresent / day-start arrival (not lighting).
    */
   private applyClubLighting(mode: 'closed' | 'open', animate: boolean): void {
     if (!this.lightsOverlay) return;
@@ -1154,10 +1202,10 @@ export class ClubScene extends Phaser.Scene {
       },
     });
 
-    // Soft "wake" pulse on staff when lights come on (no AI rewrite).
-    if (mode === 'open') {
+    // Soft "wake" pulse on present staff when lights come on.
+    if (mode === 'open' && this.staffPresent) {
       for (const s of this.allStaff()) {
-        if (!s?.active) continue;
+        if (!s?.active || !s.visible) continue;
         const prev = s.alpha;
         s.setAlpha(Math.min(prev, 0.65));
         this.tweens.add({
@@ -1773,7 +1821,9 @@ export class ClubScene extends Phaser.Scene {
     syncShiftDay(this.nightNumber);
     if (!beginShiftOpen()) return;
     this.phase = legacyPhaseFromShift();
-    // Prompt B Phase B3: lights fade on (staff already present — prep feel via brightening).
+    // If player opens before ~17:05, staff arrive immediately for the shift.
+    if (!this.staffPresent) this.revealStaffForShift(true);
+    // Lights fade on; clock stays at current time (no 18:00 snap).
     this.applyClubLighting('open', true);
     this.nightEarned = 0;
     this.servedCount = 0;
@@ -2552,6 +2602,16 @@ export class ClubScene extends Phaser.Scene {
       const d = dirtBandFor(st, false);
       applyPerceivedExperience(patron, key, d.delta, 'cleanSens', `${this.furnitureDisplayName(def)}: ${d.band} (visto)`);
     }
+    // Floor dirt: local zone perception only (same radius / cleanSens path).
+    for (const z of getFloorZones()) {
+      if (!isFloorVisiblyDirty(z)) continue;
+      if (distToFloorZone(col, row, z) > 2) continue; // PERCEPTION_RADIUS_TILES
+      const band = floorDirtBand(z);
+      const delta = floorDirtDelta(band);
+      if (delta === 0) continue;
+      const key = floorDirtEpisodeKey(z);
+      applyPerceivedExperience(patron, key, delta, 'cleanSens', `Piso: ${band} (visto)`);
+    }
   }
 
   private qualityNearPatron(patron: Patron): number {
@@ -3061,6 +3121,11 @@ export class ClubScene extends Phaser.Scene {
     syncShiftDay(this.nightNumber);
     this.phase = legacyPhaseFromShift(); // prep
     this.resetForNewNight();
+    // Day-start: empty + dark + staff arrive ~17:05; seed floor dirt from last night.
+    seedFloorDirtForDay(this.lastNightUsed);
+    this.lastNightUsed = false;
+    this.refreshFloorDirtVisuals();
+    this.beginDayStaffHidden();
     this.applyClubLighting('closed', false);
     this.game.events.emit('stats-updated', this.getHudState());
     this.game.events.emit('day-started', {
@@ -3140,6 +3205,9 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private finishNight(): void {
+    // Day-start floor seed: remember if this night had activity.
+    this.lastNightUsed = this.servedCount > 0 || this.nightEarned > 0 || this.patrons.length > 0;
+
     const st = getShiftState();
     if (this.phase !== 'open' && st !== 'closing') return;
     // Prompt B Phase B7: CLOSING (or open fallback) → SUMMARY.
@@ -3470,6 +3538,7 @@ export class ClubScene extends Phaser.Scene {
     syncShiftDay(this.nightNumber);
     if (!shiftOpenAt(hour, minute)) return false;
     this.phase = legacyPhaseFromShift();
+    if (!this.staffPresent) this.revealStaffForShift(true);
     this.applyClubLighting('open', true);
     this.nightEarned = 0;
     this.servedCount = 0;
@@ -3502,8 +3571,22 @@ export class ClubScene extends Phaser.Scene {
    * Does not auto-close (B7: only Cerrar / CLOSING → SUMMARY).
    */
   debugAdvanceGameMinutes(n: number): number {
-    if (this.phase !== 'open') return 0;
-    if (getShiftState() === 'closing') {
+    const st = getShiftState();
+    // Day-start: allow advancing while CLOSED (prep clock + staff arrival).
+    if (st === 'closed' || this.phase === 'prep') {
+      const steps = Math.max(0, Math.floor(n) || 0);
+      let advanced = 0;
+      for (let i = 0; i < steps; i++) {
+        if (getShiftState() !== 'closed') break;
+        const got = shiftAdvanceGameMinutes(1);
+        if (got <= 0) break;
+        advanced += got;
+        this.checkStaffArrivalFromClock();
+      }
+      this.game.events.emit('stats-updated', this.getHudState());
+      return advanced;
+    }
+    if (st === 'closing') {
       // Still advance clock while closing, but no new arrivals.
       const steps = Math.max(0, Math.floor(n) || 0);
       let advanced = 0;
@@ -3516,6 +3599,7 @@ export class ClubScene extends Phaser.Scene {
       this.game.events.emit('stats-updated', this.getHudState());
       return advanced;
     }
+    if (this.phase !== 'open') return 0;
     const steps = Math.max(0, Math.floor(n) || 0);
     let advanced = 0;
     for (let i = 0; i < steps; i++) {
@@ -3936,6 +4020,254 @@ export class ClubScene extends Phaser.Scene {
     return true;
   }
 
+
+  /** Day start / after Dormir: hide staff, roll arrival ~17:05 ± jitter. */
+  private beginDayStaffHidden(): void {
+    this.staffPresent = false;
+    const base =
+      PRE_OPEN_HOUR * 60 +
+      PRE_OPEN_MINUTE +
+      STAFF_ARRIVE_GAME_MINUTES_AFTER_DAY_START;
+    const jit = Math.max(0, STAFF_ARRIVE_JITTER_GAME_MINUTES);
+    const delta = jit > 0 ? Phaser.Math.Between(-jit, jit) : 0;
+    this.staffArriveTotalMinutes = base + delta;
+    for (const s of this.allStaff()) {
+      if (!s) continue;
+      s.cancelWalk();
+      s.clearAiJob();
+      s.clearServeLabel();
+      s.state = 'idle';
+      s.setVisible(false);
+      s.stopBob();
+    }
+    this.floorClaim.clear();
+  }
+
+  /** Show staff when clock hits arrival (or Abrir early). Optional walk-in from door. */
+  private revealStaffForShift(fromDoor: boolean): void {
+    if (this.staffPresent) return;
+    this.staffPresent = true;
+    const door = {
+      col: this.scenario.spawnTile[0],
+      row: this.scenario.spawnTile[1],
+    };
+    const staff = this.allStaff();
+    staff.forEach((s, i) => {
+      if (!s) return;
+      const home = this.findFloorStaffSpawnTile();
+      if (fromDoor) {
+        s.snapTo(door);
+        s.setVisible(true);
+        s.setAlpha(1);
+        s.state = 'walking';
+        s.startBob();
+        const goal = this.findFreeStaffGoal(s, home) ?? home;
+        // Stagger slightly so they don't stack.
+        const delay = i * 120;
+        this.time.delayedCall(delay, () => {
+          if (!s.active) return;
+          s.walkTo(goal, () => {
+            s.state = 'idle';
+            s.startBob();
+            if (s === this.bartender) this.syncBartenderBarDepth();
+          });
+        });
+      } else {
+        s.snapTo(home);
+        s.setVisible(true);
+        s.setAlpha(1);
+        s.state = 'idle';
+        s.startBob();
+      }
+    });
+    this.syncBartenderBarDepth();
+    this.game.events.emit('stats-updated', this.getHudState());
+  }
+
+  /** While CLOSED: reveal staff when game clock reaches staffArriveTotalMinutes. */
+  private checkStaffArrivalFromClock(): void {
+    if (this.staffPresent) return;
+    if (getShiftState() !== 'closed') return;
+    const snap = getShiftSnapshot();
+    const nowMin = snap.gameHour * 60 + snap.gameMinute;
+    // Handle wrap past midnight (unlikely in prep, but safe).
+    const arrive = this.staffArriveTotalMinutes;
+    if (nowMin >= arrive || (snap.gameHour < PRE_OPEN_HOUR && nowMin + 24 * 60 >= arrive)) {
+      this.revealStaffForShift(true);
+    }
+  }
+
+  private refreshFloorDirtVisuals(): void {
+    const keep = new Set<string>();
+    for (const z of getFloorZones()) {
+      keep.add(z.id);
+      const intensity = Math.max(z.dryDirt, z.grime) / 100;
+      let g = this.floorDirtGfx.get(z.id);
+      if (intensity < 0.12) {
+        if (g) {
+          g.destroy();
+          this.floorDirtGfx.delete(z.id);
+        }
+        continue;
+      }
+      const c = floorZoneCenter(z);
+      const scr = tileToScreen(c.col, c.row, this.iso);
+      const alpha =
+        FLOOR_VISUAL.alphaMin +
+        (FLOOR_VISUAL.alphaMax - FLOOR_VISUAL.alphaMin) * Math.min(1, intensity);
+      if (!g) {
+        g = this.add.ellipse(scr.x, scr.y + 6, 48, 24, FLOOR_VISUAL.color, alpha);
+        g.setDepth(FLOOR_VISUAL.depth);
+        this.floorDirtGfx.set(z.id, g);
+      } else {
+        g.setPosition(scr.x, scr.y + 6);
+        g.setFillStyle(FLOOR_VISUAL.color, alpha);
+      }
+    }
+    for (const [id, g] of [...this.floorDirtGfx.entries()]) {
+      if (!keep.has(id)) {
+        g.destroy();
+        this.floorDirtGfx.delete(id);
+      }
+    }
+  }
+
+  private beginAiSweep(staff: Bartender, z: FloorZone): void {
+    if (this.floorClaim.has(z.id) && this.floorClaim.get(z.id) !== staff.profile.id) {
+      staff.aiNextThinkAt = this.time.now + 700;
+      return;
+    }
+    const center = floorZoneCenter(z);
+    const goal =
+      this.findFreeStaffGoal(staff, center) ??
+      (this.pathfinder.isWalkable(center.col, center.row) ? center : null);
+    if (!goal) {
+      staff.aiNextThinkAt = this.time.now + 900;
+      return;
+    }
+    this.floorClaim.set(z.id, staff.profile.id);
+    staff.aiJob = 'sweep';
+    staff.playerCommanded = false;
+    staff.state = 'busy';
+    staff.setServeLabel('Barriendo');
+    this.claimStaffTile(staff, goal);
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.emitStaffRoster();
+
+    const release = () => {
+      if (this.floorClaim.get(z.id) === staff.profile.id) this.floorClaim.delete(z.id);
+      this.releaseStaffTileClaims(staff);
+      staff.clearServeLabel();
+      staff.clearAiJob();
+      staff.state = 'idle';
+      staff.startBob();
+    };
+
+    const finish = () => {
+      staff.stopBob();
+      staff.setServeLabel('Barriendo');
+      this.playStaffActionTween(
+        staff,
+        () => {
+          applySweep(z);
+          this.refreshFloorDirtVisuals();
+          staff.profile.energy = Math.max(
+            0,
+            staff.profile.energy -
+              Phaser.Math.Between(FLOOR_JOB_ENERGY.min, FLOOR_JOB_ENERGY.max)
+          );
+          staff.aiNextThinkAt = this.time.now + Phaser.Math.Between(4000, 7000);
+          release();
+          this.showStatusFloat('Barrió el piso', { x: staff.x, y: staff.y });
+          this.game.events.emit('stats-updated', this.getHudState());
+          this.emitStaffRoster();
+        },
+        SWEEP_DURATION_MS
+      );
+    };
+    const ok = staff.walkTo(goal, finish);
+    if (!ok) finish();
+  }
+
+  private beginAiMop(staff: Bartender, z: FloorZone): void {
+    if (this.floorClaim.has(z.id) && this.floorClaim.get(z.id) !== staff.profile.id) {
+      staff.aiNextThinkAt = this.time.now + 700;
+      return;
+    }
+    const center = floorZoneCenter(z);
+    const goal =
+      this.findFreeStaffGoal(staff, center) ??
+      (this.pathfinder.isWalkable(center.col, center.row) ? center : null);
+    if (!goal) {
+      staff.aiNextThinkAt = this.time.now + 900;
+      return;
+    }
+    this.floorClaim.set(z.id, staff.profile.id);
+    staff.aiJob = 'mop';
+    staff.playerCommanded = false;
+    staff.state = 'busy';
+    staff.setServeLabel('Trapeando');
+    this.claimStaffTile(staff, goal);
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.emitStaffRoster();
+
+    const release = () => {
+      if (this.floorClaim.get(z.id) === staff.profile.id) this.floorClaim.delete(z.id);
+      this.releaseStaffTileClaims(staff);
+      staff.clearServeLabel();
+      staff.clearAiJob();
+      staff.state = 'idle';
+      staff.startBob();
+    };
+
+    const finish = () => {
+      staff.stopBob();
+      staff.setServeLabel('Trapeando');
+      this.playStaffActionTween(
+        staff,
+        () => {
+          applyMop(z);
+          this.refreshFloorDirtVisuals();
+          staff.profile.energy = Math.max(
+            0,
+            staff.profile.energy -
+              Phaser.Math.Between(FLOOR_JOB_ENERGY.min, FLOOR_JOB_ENERGY.max)
+          );
+          staff.aiNextThinkAt = this.time.now + Phaser.Math.Between(4000, 7000);
+          release();
+          this.showStatusFloat('Trapéó el piso', { x: staff.x, y: staff.y });
+          this.game.events.emit('stats-updated', this.getHudState());
+          this.emitStaffRoster();
+        },
+        MOP_DURATION_MS
+      );
+    };
+    const ok = staff.walkTo(goal, finish);
+    if (!ok) finish();
+  }
+
+  /** Test/debug: floor dirt zones. */
+  getFloorDirtDebug() {
+    return readFloorDirtDebug();
+  }
+
+  /** Test/debug: day-start staff arrival. */
+  getStaffArrivalDebug() {
+    const snap = getShiftSnapshot();
+    return {
+      staffPresent: this.staffPresent,
+      staffArriveTotalMinutes: this.staffArriveTotalMinutes,
+      staffArriveHHMM: formatGameClock(
+        Math.floor(this.staffArriveTotalMinutes / 60) % 24,
+        this.staffArriveTotalMinutes % 60
+      ),
+      clockHHMM: formatGameClock(snap.gameHour, snap.gameMinute),
+      visibleStaff: this.allStaff().filter((s) => s.visible).map((s) => s.displayName),
+      overlayAlpha: this.lightsOverlay?.alpha ?? null,
+      lastNightUsed: this.lastNightUsed,
+    };
+  }
+
   /** Walk adjacent to furniture, bob 2–3s, restore cleanliness (+bit comfort). */
   private beginAiCleanFurniture(staff: Bartender, def: FurnitureDef): void {
     if (this.cleanClaim.has(def.id) && this.cleanClaim.get(def.id) !== staff.profile.id) {
@@ -4089,9 +4421,12 @@ export class ClubScene extends Phaser.Scene {
 
   private tickStaffAi(): void {
     if (this.buildMode) return;
+    // Day-start: no AI until staff have arrived (or Abrir forced reveal).
+    if (!this.staffPresent) return;
     const now = this.time.now;
+    const prep = this.phase === 'prep' && getShiftState() === 'closed';
 
-    // Priority 1 — Atender: hand every waiting patron to a free staff member
+    // Priority 1 — Atender: only while OPEN (never during prep)
     const waiting = this.phase === 'open' ? this.waitingBarPatrons() : [];
     for (const patron of waiting) this.tryAssignServeAi(patron);
 
@@ -4115,21 +4450,36 @@ export class ClubScene extends Phaser.Scene {
         continue;
       }
 
-      // 1) Limpiar — ANY furniture with cleanliness < threshold
+      // 1) Limpiar muebles — ANY furniture with cleanliness < threshold
       const dirty = this.findDirtiestFurniture(AI_TUNABLES.cleanThreshold);
       if (dirty && !this.cleanClaim.has(dirty.id)) {
         this.beginAiCleanFurniture(staff, dirty);
         continue;
       }
 
-      // 2) Descansar — low energy
+      // 1b) Barrer / trapear piso (prep priority; also OK while open if idle)
+      const claimed = new Set(this.floorClaim.keys());
+      const sweepZ = findDirtiestSweepZone(claimed);
+      if (sweepZ) {
+        this.beginAiSweep(staff, sweepZ);
+        continue;
+      }
+      const mopZ = findDirtiestMopZone(claimed);
+      if (mopZ) {
+        this.beginAiMop(staff, mopZ);
+        continue;
+      }
+
+      // 2) Descansar — low energy (skip forced rest spam during short prep)
       if (staff.profile.energy < AI_TUNABLES.restEnergyThreshold) {
         this.beginStaffRest(staff, false);
         continue;
       }
 
-      // 3) Deambular
-      if (Math.random() < 0.55) {
+      // 3) Prep: idle wait (no purposeless wander). Open: wander as before.
+      if (prep) {
+        staff.aiNextThinkAt = now + Phaser.Math.Between(2000, 4000);
+      } else if (Math.random() < 0.55) {
         this.beginAiWander(staff);
       } else {
         staff.aiNextThinkAt =
@@ -4141,23 +4491,33 @@ export class ClubScene extends Phaser.Scene {
 
   update(_t: number, dt: number): void {
     this.syncBartenderBarDepth();
-    // AI runs in prep + open (wander/rest/clean); serve only when open.
+    // AI runs in prep (after staff arrive) + open; serve only when open.
     if (!this.buildMode) this.tickStaffAi();
     const dtSec = dt / 1000;
     if (!this.buildMode && (this.phase === 'open' || this.phase === 'prep')) {
       this.tickFurnitureDecay(dtSec);
     }
     const shiftNow = getShiftState();
-    if (this.phase !== 'open' && shiftNow !== 'closing') return;
-    // Prompt B Phase B7: no nightTimer auto-close. Clock may pass 02:00.
 
-    // Prompt B Phase B2: advance game clock (OPEN/CLOSING).
-    const minutesAdvanced = tickShiftClock(dtSec);
-
-    // Prompt B Phase B4: organic arrivals only while OPEN (not CLOSING).
-    if (shiftNow === 'open' && minutesAdvanced > 0) {
-      this.processArrivalsForAdvancedMinutes(minutesAdvanced);
+    // Day-start correction: clock ticks while CLOSED (and OPEN/CLOSING). Not SUMMARY.
+    if (shiftNow === 'closed' || shiftNow === 'open' || shiftNow === 'closing') {
+      const minutesAdvanced = tickShiftClock(dtSec);
+      if (minutesAdvanced > 0) {
+        this.game.events.emit('stats-updated', this.getHudState());
+        if (shiftNow === 'closed') {
+          this.checkStaffArrivalFromClock();
+        }
+        if (shiftNow === 'open') {
+          this.processArrivalsForAdvancedMinutes(minutesAdvanced);
+        }
+      }
     }
+
+    if (shiftNow === 'closed' || (this.phase !== 'open' && shiftNow !== 'closing')) {
+      // Prep / summary: no patrons / competition / closing logic.
+      return;
+    }
+    // Prompt B Phase B7: no nightTimer auto-close. Clock may pass 02:00.
 
     if (shiftNow === 'closing') {
       this.tickClosing();
@@ -4202,10 +4562,6 @@ export class ClubScene extends Phaser.Scene {
       }
     }
 
-    // B2/B7: refresh HUD when the game minute flips (no nightTimer pulse).
-    if (minutesAdvanced > 0) {
-      this.game.events.emit('stats-updated', this.getHudState());
-    }
   }
 
 

@@ -62,6 +62,8 @@ export const STATUS_ES: Record<string, string> = {
   angry: 'Enfadado',
   seated: 'Sentado',
   cleaning: 'Limpiando',
+  sweeping: 'Barriendo',
+  mopping: 'Trapeando',
   resting: 'Descansando',
   serving: 'Atendiendo',
   wandering: 'Deambulando',

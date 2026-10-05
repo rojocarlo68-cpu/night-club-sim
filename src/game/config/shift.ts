@@ -1,7 +1,6 @@
 /**
  * Prompt B — central tunables for the shift / game-time clock.
- * B2+: clock advances while OPEN/CLOSING; HUD shows HH:MM.
- * B7: night ends on manual Cerrar (CLOSING → SUMMARY), NOT a 75s timer / NOT at 02:00.
+ * Day-start correction: clock TICKS while CLOSED from 17:00; Abrir opens at current time.
  */
 
 /** Recommended club hours (informational; not a hard lock). */
@@ -10,13 +9,13 @@ export const RECOMMENDED_OPEN_MINUTE = 0;
 export const RECOMMENDED_CLOSE_HOUR = 2;
 export const RECOMMENDED_CLOSE_MINUTE = 0;
 
-/** Default wall-clock when a day starts closed (before Abrir noche). Frozen until open. */
+/** Default wall-clock when a day starts closed (before Abrir noche). Clock ticks from here. */
 export const PRE_OPEN_HOUR = 17;
 export const PRE_OPEN_MINUTE = 0;
 
 /**
- * Real seconds that must elapse for one game-minute to advance while OPEN/CLOSING.
- * B2 choice: 1 → one game minute per real second (easy to verify in smoke tests).
+ * Real seconds that must elapse for one game-minute to advance while CLOSED/OPEN/CLOSING.
+ * 1 → one game minute per real second (easy to verify in smoke tests).
  */
 export const REAL_SECONDS_PER_GAME_MINUTE = 1;
 
@@ -45,10 +44,17 @@ export const CLOSING_NUDGE_AFTER_MS = 20000;
  */
 export const CLOSING_FORCE_SUMMARY_MS = 120000;
 
+/**
+ * When true, Abrir snaps clock to recommended open (18:00).
+ * Day-start correction: false — open at the current ticking CLOSED clock.
+ */
+export const USE_SNAP_TO_RECOMMENDED_OPEN = false;
 
 /**
- * B11: when true (default), Abrir snaps clock to recommended open (18:00).
- * When false, open at the current frozen CLOSED time (still 17:00 unless
- * debugSetGameTime moved the frozen clock — useful for late-open tests).
+ * Staff (Luna/Nova) become visible this many game minutes after day start (17:00).
+ * With REAL_SECONDS_PER_GAME_MINUTE=1 → ~5 real seconds.
  */
-export const USE_SNAP_TO_RECOMMENDED_OPEN = true;
+export const STAFF_ARRIVE_GAME_MINUTES_AFTER_DAY_START = 5;
+
+/** Optional ± jitter (game minutes) around staff arrival. 0 = exact. */
+export const STAFF_ARRIVE_JITTER_GAME_MINUTES = 1;
