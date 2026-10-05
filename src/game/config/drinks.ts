@@ -30,6 +30,8 @@ export interface DrinkProduct {
   startStock: number;
   /** Pour duration used when/if this drink is served (ms). */
   serveTimeMs: number;
+  /** Scales patron preference rolls (staff-oriented products like café/agua ≈ low). Default 1. */
+  patronPrefScale?: number;
 }
 
 /**
@@ -108,6 +110,32 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     demandWeight: 0.65,
     startStock: 20,
     serveTimeMs: 1500,
+  },
+  {
+    id: 'cafe',
+    name: 'Café',
+    supplierCost: 1.5,
+    basePrice: 4,
+    minPrice: 1,
+    maxPrice: 12,
+    priceStep: 1,
+    demandWeight: 0.2,
+    startStock: 10,
+    serveTimeMs: 1400,
+    patronPrefScale: 0.3,
+  },
+  {
+    id: 'agua',
+    name: 'Agua',
+    supplierCost: 0.5,
+    basePrice: 2,
+    minPrice: 1,
+    maxPrice: 8,
+    priceStep: 1,
+    demandWeight: 0.15,
+    startStock: 15,
+    serveTimeMs: 600,
+    patronPrefScale: 0.25,
   },
 ] as const;
 

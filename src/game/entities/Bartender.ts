@@ -46,6 +46,10 @@ export class Bartender extends Character {
   aiJob: StaffAiJob = 'none';
   /** Next time (scene.time.now) this staff may pick a new AI job. */
   aiNextThinkAt = 0;
+  /** Bumped on every interruption: stale callbacks of an old job compare and bail. */
+  jobToken = 0;
+  /** Sprite pose saved by an action tween (restored if the job is interrupted mid-tween). */
+  actionTweenBase: { y: number; sx: number; sy: number } | null = null;
   /** Drink id currently being prepared (cerveza, etc.), or null. */
   servingDrinkId: string | null = null;
   /** Active tip-action status (Phase 3); null = none / expired. */

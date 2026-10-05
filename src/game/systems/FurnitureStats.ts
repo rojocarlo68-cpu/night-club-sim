@@ -173,6 +173,9 @@ export interface FurnitureInspectPayload {
   maxDurability: number;
   maxComfort: number;
   maxCleanliness: number;
+  /** Technician job stage, e.g. 'Técnico en camino'. */
+  repairStatus?: string;
+  repairCount?: number;
 }
 
 /**

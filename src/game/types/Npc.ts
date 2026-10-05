@@ -32,4 +32,13 @@ export interface NpcInfo {
   competitivenessLabel?: string | null;
   /** Phase 8: weekly salary paid by the club ($/semana). */
   weeklySalary?: number;
+  /** Staff personal money (tips − own purchases). */
+  walletMoney?: number;
+  /** Staff transient state: 'Achispada', 'Borracha', 'Con café'. */
+  condition?: string | null;
+  /** Patron: drink they want (not served yet) / drink they got. */
+  wantedDrink?: string;
+  servedDrink?: string;
+  /** Patron: last perceived thoughts (temporary bubbles also logged here). */
+  thoughts?: Array<{ text: string; emoji: string; tone: 'pos' | 'neg' | 'neutral' }>;
 }

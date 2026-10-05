@@ -258,3 +258,16 @@ export function resetFloorDirtState(): void {
   }
   floorEpisodes.clear();
 }
+
+/** Spills / spoiled food & drinks add dirt to the zone under a tile (feeds sweep/mop + flies). */
+export function addFloorDirtAt(col: number, row: number, dry: number, grime: number): FloorZone | null {
+  const z = zoneContaining(col, row);
+  if (!z) return null;
+  z.dryDirt = clamp01_100(z.dryDirt + Math.max(0, dry));
+  z.grime = clamp01_100(z.grime + Math.max(0, grime));
+  return z;
+}
+
+export function getFloorZoneById(id: string): FloorZone | null {
+  return zones.find((z) => z.id === id) ?? null;
+}

@@ -133,11 +133,81 @@ export function recordSale(id: string, units = 1): boolean {
   return true;
 }
 
+/** Night counters for pre-poured items, waste (merma) and staff consumption. */
+const wasteTonight: Record<string, number> = {};
+const wasteCostTonight: Record<string, number> = {};
+const staffUseTonight: Record<string, number> = {};
+const staffRevenueTonight: Record<string, number> = {};
+
+/**
+ * Take units out of stock WITHOUT a sale (pre-pour a beer / prepare a plate).
+ * The sale is recorded later with recordPrepouredSale, or the unit becomes merma.
+ */
+export function withdrawStock(id: string, units = 1): boolean {
+  ensureAll();
+  const s = state[id];
+  if (!s || !getProduct(id)) return false;
+  const n = Math.max(0, Math.floor(units));
+  if (n <= 0 || s.stock < n) return false;
+  s.stock -= n;
+  if (s.stock === 0 && stockoutFirstMs[id] == null) stockoutFirstMs[id] = Date.now();
+  return true;
+}
+
+/** A pre-poured unit was bought by a customer (stock already withdrawn). */
+export function recordPrepouredSale(id: string, units = 1): boolean {
+  ensureAll();
+  const s = state[id];
+  if (!s || !getProduct(id)) return false;
+  const n = Math.max(0, Math.floor(units));
+  s.soldTonight += n;
+  s.revenueTonight += n * s.price;
+  return true;
+}
+
+/** A withdrawn unit spoiled / was spilled (merma). Money is not recovered. */
+export function recordWaste(id: string, units = 1): void {
+  ensureAll();
+  const n = Math.max(0, Math.floor(units));
+  if (n <= 0) return;
+  wasteTonight[id] = (wasteTonight[id] ?? 0) + n;
+  wasteCostTonight[id] = (wasteCostTonight[id] ?? 0) + n * (getProduct(id)?.supplierCost ?? 0);
+}
+
+/** Staff bought one unit with her own money (internal consumption; club gets paid). */
+export function recordStaffConsumption(id: string, paid: number): boolean {
+  ensureAll();
+  const s = state[id];
+  if (!s || s.stock < 1) return false;
+  s.stock -= 1;
+  if (s.stock === 0 && stockoutFirstMs[id] == null) stockoutFirstMs[id] = Date.now();
+  staffUseTonight[id] = (staffUseTonight[id] ?? 0) + 1;
+  staffRevenueTonight[id] = (staffRevenueTonight[id] ?? 0) + paid;
+  return true;
+}
+
+export function getNightWaste(): { units: Record<string, number>; cost: number } {
+  return {
+    units: { ...wasteTonight },
+    cost: Object.values(wasteCostTonight).reduce((a, b) => a + b, 0),
+  };
+}
+
+export function getNightStaffConsumption(): { units: Record<string, number>; revenue: number } {
+  return {
+    units: { ...staffUseTonight },
+    revenue: Object.values(staffRevenueTonight).reduce((a, b) => a + b, 0),
+  };
+}
+
 export function resetNightInventory(): void {
   ensureAll();
   for (const id of Object.keys(state)) {
     state[id].soldTonight = 0;
     state[id].revenueTonight = 0;
+  }
+  for (const o of [wasteTonight, wasteCostTonight, staffUseTonight, staffRevenueTonight]) {
+    for (const k of Object.keys(o)) delete o[k];
   }
   clearStockoutFirstMs();
 }

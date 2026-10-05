@@ -5,6 +5,7 @@ import { ShopCatalogPayload } from '../types/Shop';
 import { FurnitureInspectPayload } from '../systems/FurnitureStats';
 import { listInventory } from '../systems/Inventory';
 import { SNACK_LOCKED_HINT } from '../config/snacks';
+import { ContextMenuPayload, RepairVerdictPayload, TechListPayload } from '../types/Intervention';
 
 interface HudBartender {
   name: string;
@@ -80,6 +81,10 @@ const STATE_ES: Record<string, string> = {
   serving_drink: 'Sirviendo bebida',
   cleaning: 'Limpiando',
   wandering: 'Deambulando',
+  sweeping: 'Barriendo',
+  mopping: 'Trapeando',
+  inspecting: 'Revisando',
+  consuming: 'Tomando algo',
 };
 
 
@@ -192,8 +197,26 @@ export class UIScene extends Phaser.Scene {
 
   // ---- Shared window dismiss (✕ / tap outside / right-click on PC) ----
   private dismissWins: DismissWin[] = [];
+  /** downTime of the last right-click that closed a window (ClubScene skips that click). */
+  lastRightDismissDownTime = -1;
+  private ctxMenu!: Phaser.GameObjects.Container;
+  private ctxMenuVisible = false;
+  private ctxPayload: ContextMenuPayload | null = null;
+  private techPanel!: Phaser.GameObjects.Container;
+  private techVisible = false;
+  private techPayload: TechListPayload | null = null;
+  private verdictPanel!: Phaser.GameObjects.Container;
+  private verdictVisible = false;
+  private verdictPayload: RepairVerdictPayload | null = null;
+  private toasts: Phaser.GameObjects.Text[] = [];
+  private toastLog: string[] = [];
+  private furnActionsBtn!: Phaser.GameObjects.Container;
+  private panelEBg!: Phaser.GameObjects.Rectangle;
+  private panelMBg!: Phaser.GameObjects.Rectangle;
+  private furnSelectedId: string | null = null;
   /** Dim layer behind centered modal windows; tap on it = close topmost modal. */
   private modalBackdrop!: Phaser.GameObjects.Rectangle;
+  private readonly modalBackdropAlpha = 0.25;
   private hudBg!: Phaser.GameObjects.Rectangle;
   /** Primary press that started on an "outside" surface while a modal was open. */
   private outsidePress: { id: number; downTime: number } | null = null;
@@ -310,7 +333,7 @@ export class UIScene extends Phaser.Scene {
       .text(-250, 38, '', { fontSize: '13px', color: '#2ad6ff' })
       .setOrigin(0, 0);
     this.panelStats = this.add
-      .text(-250, 58, '', { fontSize: '14px', color: '#e8d0ff', lineSpacing: 6 })
+      .text(-250, 58, '', { fontSize: '14px', color: '#e8d0ff', lineSpacing: 6, wordWrap: { width: 236 } })
       .setOrigin(0, 0);
 
     this.panelPortrait = this.add
@@ -322,6 +345,8 @@ export class UIScene extends Phaser.Scene {
     this.moodLabel = this.add.text(-250, 240, 'Ánimo', { fontSize: '12px', color: '#a080c0' });
     const eBg = this.add.rectangle(-250, 220, 220, 12, 0x2a1838).setOrigin(0, 0.5);
     const mBg = this.add.rectangle(-250, 260, 220, 12, 0x2a1838).setOrigin(0, 0.5);
+    this.panelEBg = eBg;
+    this.panelMBg = mBg;
     this.energyBar = this.add.rectangle(-250, 220, 220, 12, 0x3cff9a).setOrigin(0, 0.5);
     this.moodBar = this.add.rectangle(-250, 260, 220, 12, 0xffb84d).setOrigin(0, 0.5);
     this.restBtn = this.makeLocalButton(-250, 310, 200, 36, 'Descansar', () => {
@@ -398,6 +423,12 @@ export class UIScene extends Phaser.Scene {
       this.furnCleVal,
       furnDismiss,
     ]);
+    // Opens the staff context menu for this item (touch-friendly path to RMB actions).
+    this.furnActionsBtn = this.makeLocalButton(-250, 226, 200, 34, 'Acciones', () => {
+      if (!this.furnSelectedId) return;
+      this.game.events.emit('cmd-open-furniture-actions', { furnitureId: this.furnSelectedId });
+    });
+    this.furnPanel.add(this.furnActionsBtn);
 
     const kb = this.input.keyboard;
     if (kb) {
@@ -459,6 +490,7 @@ export class UIScene extends Phaser.Scene {
     this.createInventoryPanel();
     this.createShopPanel();
     this.createDeleteConfirm();
+    this.createInterventionUi();
     this.setupWindowDismiss();
 
     this.game.events.on('club-ready', this.onStats, this);
@@ -544,6 +576,366 @@ export class UIScene extends Phaser.Scene {
   }
 
 
+
+  // ---------------------------------------------------------------------------
+  // Direct-intervention UI: toasts, staff context menu, technician list, verdict.
+  // ---------------------------------------------------------------------------
+
+  private createInterventionUi(): void {
+    this.ctxMenu = this.add.container(0, 0).setScrollFactor(0).setVisible(false).setDepth(9700);
+    this.techPanel = this.add.container(0, 0).setScrollFactor(0).setVisible(false).setDepth(9720);
+    this.verdictPanel = this.add.container(0, 0).setScrollFactor(0).setVisible(false).setDepth(9740);
+    const ev = this.game.events;
+    ev.on('ui-toast', this.onUiToast, this);
+    ev.on('context-menu-open', this.onContextMenuOpen, this);
+    ev.on('repair-tech-list', this.onRepairTechList, this);
+    ev.on('repair-verdict', this.onRepairVerdict, this);
+    ev.on('repair-hire-failed', this.onRepairHireFailed, this);
+    ev.on('repair-ui-close', this.onRepairUiClose, this);
+    this.events.once('shutdown', () => {
+      ev.off('ui-toast', this.onUiToast, this);
+      ev.off('context-menu-open', this.onContextMenuOpen, this);
+      ev.off('repair-tech-list', this.onRepairTechList, this);
+      ev.off('repair-verdict', this.onRepairVerdict, this);
+      ev.off('repair-hire-failed', this.onRepairHireFailed, this);
+      ev.off('repair-ui-close', this.onRepairUiClose, this);
+    });
+  }
+
+  /** Small button with an enabled/disabled look; disabled = grey, no-op. */
+  private makeCtxButton(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    label: string,
+    enabled: boolean,
+    cb: () => void,
+    fontSize = 13
+  ): Phaser.GameObjects.Container {
+    const c = this.add.container(x, y);
+    const base = enabled ? 0x6a2a7a : 0x3a2a48;
+    const bg = this.add.rectangle(0, 0, w, h, base, 1).setOrigin(0);
+    bg.setStrokeStyle(1, enabled ? 0xff7ac8 : 0x5a4a68);
+    bg.setInteractive({ useHandCursor: enabled });
+    const t = this.add
+      .text(8, h / 2, label, {
+        fontSize: `${fontSize}px`,
+        color: enabled ? '#ffffff' : '#8a7a9a',
+        fontStyle: enabled ? 'bold' : 'normal',
+        wordWrap: { width: w - 12 },
+      })
+      .setOrigin(0, 0.5);
+    if (enabled) {
+      bg.on('pointerover', () => bg.setFillStyle(0x9a3aa8));
+      bg.on('pointerout', () => bg.setFillStyle(base));
+    }
+    bg.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (!this.isPrimaryPress(p)) return;
+      p.event.stopPropagation();
+      if (!enabled) return;
+      cb();
+    });
+    c.add([bg, t]);
+    c.setData('enabled', enabled);
+    c.setName(label);
+    return c;
+  }
+
+  private onUiToast = (msg: string): void => {
+    if (!msg) return;
+    const cam = this.cameras.main;
+    const t = this.add
+      .text(cam.width / 2, 0, msg, {
+        fontSize: '14px',
+        color: '#fff2c4',
+        backgroundColor: '#2a1238ee',
+        padding: { x: 10, y: 5 },
+        align: 'center',
+        wordWrap: { width: Math.min(440, cam.width - 30) },
+      })
+      .setOrigin(0.5, 0)
+      .setScrollFactor(0)
+      .setDepth(9900);
+    this.toasts.push(t);
+    while (this.toasts.length > 4) this.toasts.shift()?.destroy();
+    this.layoutToasts();
+    this.toastLog.push(msg);
+    if (this.toastLog.length > 30) this.toastLog.shift();
+    this.time.delayedCall(3200, () => {
+      this.tweens.add({
+        targets: t,
+        alpha: 0,
+        duration: 400,
+        onComplete: () => {
+          this.toasts = this.toasts.filter((x) => x !== t);
+          t.destroy();
+          this.layoutToasts();
+        },
+      });
+    });
+  };
+
+  private layoutToasts(): void {
+    const cam = this.cameras.main;
+    let y = 66;
+    for (const t of this.toasts) {
+      if (!t.active) continue;
+      t.setPosition(cam.width / 2, y);
+      y += t.height + 4;
+    }
+  }
+
+  private onContextMenuOpen = (m: ContextMenuPayload): void => {
+    if (this.buildMode || !m) return;
+    this.ctxPayload = m;
+    this.buildCtxMenu();
+    this.ctxMenuVisible = true;
+    this.ctxMenu.setVisible(true);
+    this.syncModalBackdrop();
+  };
+
+  private buildCtxMenu(): void {
+    const m = this.ctxPayload;
+    if (!m) return;
+    this.ctxMenu.removeAll(true);
+    const cam = this.cameras.main;
+    const n = Math.max(1, m.actions.length);
+    const cols = n > 7 && cam.width >= 380 ? 2 : 1;
+    const bw = cols === 2 ? Math.min(170, Math.floor((cam.width - 40) / 2)) : 220;
+    const bh = 28;
+    const gap = 5;
+    const rows = Math.ceil(n / cols);
+    const chips = m.staffOptions.length > 1;
+    const w = cols * bw + (cols - 1) * gap + 20;
+    const headerH = 48 + (chips ? 30 : 0);
+    const h = headerH + rows * (bh + gap) + 8;
+    const bg = this.add.rectangle(0, 0, w, h, 0x1a0e28, 0.97).setOrigin(0);
+    bg.setStrokeStyle(2, 0xffb84d);
+    bg.setInteractive();
+    const title = this.add.text(10, 7, m.title, { fontSize: '15px', color: '#ffd27a', fontStyle: 'bold' });
+    const sub = this.add.text(10, 27, m.subtitle, {
+      fontSize: '11px',
+      color: '#c8a0e0',
+      wordWrap: { width: w - 50 },
+    });
+    const close = this.makeLocalButton(w - 32, 5, 26, 22, '✕', () => this.hideCtxMenu());
+    this.ctxMenu.add([bg, title, sub, close]);
+    if (chips) {
+      let cx = 10;
+      for (const o of m.staffOptions) {
+        const active = o.id === m.staffId;
+        const chip = this.makeCtxButton(cx, 48, 76, 24, active ? `● ${o.name}` : o.name, true, () => {
+          if (active) return;
+          this.game.events.emit('cmd-context-menu-staff', { staffId: o.id });
+        }, 12);
+        chip.setAlpha(active ? 1 : 0.6);
+        this.ctxMenu.add(chip);
+        cx += 82;
+      }
+    }
+    if (!m.actions.length) {
+      this.ctxMenu.add(
+        this.add.text(10, headerH + 6, 'No hay acciones disponibles.', { fontSize: '12px', color: '#8a7a9a' })
+      );
+    }
+    m.actions.forEach((a, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const label = a.enabled || !a.hint ? a.label : `${a.label} · ${a.hint}`;
+      const btn = this.makeCtxButton(
+        10 + col * (bw + gap),
+        headerH + row * (bh + gap),
+        bw,
+        bh,
+        label,
+        a.enabled,
+        () => {
+          const p = this.ctxPayload;
+          this.hideCtxMenu();
+          if (!p) return;
+          this.game.events.emit('cmd-staff-action', { staffId: p.staffId, target: p.target, actionId: a.id });
+        },
+        cols === 2 ? 11 : 12
+      );
+      btn.setData('actionId', a.id);
+      this.ctxMenu.add(btn);
+    });
+    const x = Phaser.Math.Clamp(m.x + 14, 6, Math.max(6, cam.width - w - 6));
+    const y = Phaser.Math.Clamp(m.y - 12, 58, Math.max(58, cam.height - h - 6));
+    this.ctxMenu.setPosition(x, y);
+  }
+
+  private hideCtxMenu(): void {
+    this.ctxMenuVisible = false;
+    this.ctxMenu.setVisible(false);
+    this.syncModalBackdrop();
+  }
+
+  private onRepairTechList = (p: TechListPayload): void => {
+    if (!p) return;
+    this.hideCtxMenu();
+    this.techPayload = p;
+    this.techPanel.removeAll(true);
+    const cam = this.cameras.main;
+    const w = Math.min(380, cam.width - 20);
+    const rowH = 58;
+    const top = 92;
+    const h = top + p.techs.length * rowH + 36;
+    const bg = this.add.rectangle(0, 0, w, h, 0x140a22, 0.97).setOrigin(0);
+    bg.setStrokeStyle(2, 0x2ad6ff);
+    bg.setInteractive();
+    const title = this.add.text(12, 10, 'Solicitar técnico', { fontSize: '18px', color: '#7ad7ff', fontStyle: 'bold' });
+    const sub = this.add.text(12, 36, `${p.staffName}: “Hay que llamar a alguien para ${p.furnitureName}.”`, {
+      fontSize: '12px',
+      color: '#e8d0ff',
+      wordWrap: { width: w - 24 },
+    });
+    const note = this.add.text(12, 70, `La consulta se paga cuando llega el técnico · Dinero: $${p.money}`, {
+      fontSize: '11px',
+      color: '#a080c0',
+    });
+    const close = this.makeLocalButton(w - 42, 8, 34, 28, '✕', () => this.hideTechPanel());
+    this.techPanel.add([bg, title, sub, note, close]);
+    p.techs.forEach((t, i) => {
+      const y = top + i * rowH;
+      const line = this.add.rectangle(12, y - 4, w - 24, 1, 0x3a2a58).setOrigin(0);
+      const name = this.add.text(12, y + 2, t.name, { fontSize: '15px', color: '#ffffff', fontStyle: 'bold' });
+      const stars = this.add.text(12, y + 20, `Reputación: ${'★'.repeat(t.stars)}${'☆'.repeat(Math.max(0, 5 - t.stars))}`, {
+        fontSize: '12px',
+        color: '#ffd27a',
+      });
+      const fee = this.add.text(12, y + 36, `Consulta: $${t.fee}`, { fontSize: '12px', color: '#e8d0ff' });
+      const btn = this.makeCtxButton(
+        w - 118,
+        y + 6,
+        106,
+        34,
+        t.canAfford ? 'Contratar' : 'Fondos insuficientes.',
+        t.canAfford,
+        () => {
+          const pp = this.techPayload;
+          this.hideTechPanel();
+          if (!pp) return;
+          this.game.events.emit('cmd-hire-technician', { furnitureId: pp.furnitureId, techId: t.id });
+        },
+        t.canAfford ? 13 : 10
+      );
+      btn.setData('techId', t.id);
+      this.techPanel.add([line, name, stars, fee, btn]);
+    });
+    const hint = this.add.text(12, h - 26, 'La reputación es orientativa: ningún técnico es infalible.', {
+      fontSize: '10px',
+      color: '#8a7a9a',
+    });
+    this.techPanel.add(hint);
+    this.techPanel.setPosition(Math.round((cam.width - w) / 2), Math.round(Math.max(60, (cam.height - h) / 2)));
+    this.techVisible = true;
+    this.techPanel.setVisible(true);
+    this.syncModalBackdrop();
+  };
+
+  private hideTechPanel(): void {
+    this.techVisible = false;
+    this.techPanel.setVisible(false);
+    this.syncModalBackdrop();
+  }
+
+  private onRepairVerdict = (p: RepairVerdictPayload): void => {
+    if (!p) return;
+    this.verdictPayload = p;
+    this.verdictPanel.removeAll(true);
+    const cam = this.cameras.main;
+    const w = Math.min(360, cam.width - 20);
+    const h = 244;
+    const bg = this.add.rectangle(0, 0, w, h, 0x140a22, 0.97).setOrigin(0);
+    bg.setStrokeStyle(2, 0xffb84d);
+    bg.setInteractive();
+    const title = this.add.text(12, 10, `${p.techName} terminó la inspección.`, {
+      fontSize: '16px',
+      color: '#ffd27a',
+      fontStyle: 'bold',
+      wordWrap: { width: w - 60 },
+    });
+    const body = this.add.text(
+      12,
+      title.y + title.height + 10,
+      `${p.furnitureName}: ${p.diagnosis}\n\nReparación: $${p.cost}\nUno nuevo en la tienda: $${p.newPrice}\nDinero del club: $${p.money}`,
+      { fontSize: '13px', color: '#f0e0ff', lineSpacing: 4, wordWrap: { width: w - 24 } }
+    );
+    const close = this.makeLocalButton(w - 42, 8, 34, 28, '✕', () => this.dismissVerdict());
+    const bw = Math.floor((w - 36) / 2);
+    const rep = this.makeCtxButton(12, h - 50, bw, 38, p.canAfford ? 'REPARAR' : 'REPARAR · Fondos insuficientes.', p.canAfford, () => {
+      this.closeVerdictPanel();
+      this.game.events.emit('cmd-repair-decision', { jobId: p.jobId, repair: true });
+    }, p.canAfford ? 14 : 10);
+    rep.setData('verdict', 'repair');
+    const no = this.makeCtxButton(24 + bw, h - 50, bw, 38, 'NO REPARAR', true, () => this.dismissVerdict(), 14);
+    no.setData('verdict', 'no');
+    this.verdictPanel.add([bg, title, body, close, rep, no]);
+    this.verdictPanel.setPosition(Math.round((cam.width - w) / 2), Math.round(Math.max(60, (cam.height - h) / 2)));
+    this.verdictVisible = true;
+    this.verdictPanel.setVisible(true);
+    this.syncModalBackdrop();
+  };
+
+  /** Any dismiss path on the verdict (✕, outside, right-click, ESC) = NO REPARAR. */
+  private dismissVerdict(): void {
+    const p = this.verdictPayload;
+    this.closeVerdictPanel();
+    if (p) this.game.events.emit('cmd-repair-decision', { jobId: p.jobId, repair: false });
+  }
+
+  private closeVerdictPanel(): void {
+    this.verdictVisible = false;
+    this.verdictPanel.setVisible(false);
+    this.verdictPayload = null;
+    this.syncModalBackdrop();
+  }
+
+  private onRepairHireFailed = (p: { reason?: string }): void => {
+    this.onUiToast(p?.reason ?? 'Fondos insuficientes.');
+  };
+
+  private onRepairUiClose = (): void => {
+    if (this.techVisible) this.hideTechPanel();
+    if (this.verdictVisible) this.closeVerdictPanel();
+  };
+
+  /** Playwright/debug: what the intervention UI is showing. */
+  getInterventionUiDebug(): {
+    ctxOpen: boolean;
+    ctxTitle: string;
+    ctxActions: Array<{ id: string; label: string; enabled: boolean }>;
+    techOpen: boolean;
+    techs: Array<{ id: string; canAfford: boolean }>;
+    verdictOpen: boolean;
+    verdict: RepairVerdictPayload | null;
+    toasts: string[];
+  } {
+    return {
+      ctxOpen: this.ctxMenuVisible,
+      ctxTitle: this.ctxPayload?.title ?? '',
+      ctxActions: (this.ctxPayload?.actions ?? []).map((a) => ({ id: a.id, label: a.label, enabled: a.enabled })),
+      techOpen: this.techVisible,
+      techs: (this.techPayload?.techs ?? []).map((t) => ({ id: t.id, canAfford: t.canAfford })),
+      verdictOpen: this.verdictVisible,
+      verdict: this.verdictPayload,
+      toasts: [...this.toastLog],
+    };
+  }
+
+  /** Debug: press a context-menu action button exactly like a click would. */
+  debugPressCtxAction(actionId: string): boolean {
+    const p = this.ctxPayload;
+    if (!this.ctxMenuVisible || !p) return false;
+    const a = p.actions.find((x) => x.id === actionId);
+    if (!a || !a.enabled) return false;
+    this.hideCtxMenu();
+    this.game.events.emit('cmd-staff-action', { staffId: p.staffId, target: p.target, actionId });
+    return true;
+  }
+
   // ---------------------------------------------------------------------------
   // Shared window dismiss: ✕ (per-window button), tap/click outside, right-click.
   // ---------------------------------------------------------------------------
@@ -584,6 +976,10 @@ export class UIScene extends Phaser.Scene {
     });
     reg({ key: 'npc', root: this.panel, kind: 'side', isOpen: () => this.panelVisible, close: () => this.hidePanel() });
     reg({ key: 'summary', root: this.summary, kind: 'modal', isOpen: () => this.summary.visible, close: () => this.closeSummary() });
+    // Intervention windows (registered last = stack on top of everything above).
+    reg({ key: 'techList', root: this.techPanel, kind: 'modal', isOpen: () => this.techVisible, close: () => this.hideTechPanel() });
+    reg({ key: 'repairVerdict', root: this.verdictPanel, kind: 'modal', isOpen: () => this.verdictVisible, close: () => this.dismissVerdict() });
+    reg({ key: 'ctxMenu', root: this.ctxMenu, kind: 'modal', isOpen: () => this.ctxMenuVisible, close: () => this.hideCtxMenu() });
 
     // Browser context menu off on the canvas so right-click can close windows.
     this.input.mouse?.disableContextMenu();
@@ -591,7 +987,7 @@ export class UIScene extends Phaser.Scene {
     this.input.on('pointerdown', (p: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]) => {
       this.outsidePress = null;
       if (this.isRightClick(p)) {
-        this.handleRightClickDismiss(over);
+        if (this.handleRightClickDismiss(over)) this.lastRightDismissDownTime = p.downTime;
         return;
       }
       if (!this.isPrimaryPress(p)) return;
@@ -659,21 +1055,26 @@ export class UIScene extends Phaser.Scene {
   }
 
   /** PC right-click: on a window → close that window; elsewhere → close topmost modal. */
-  private handleRightClickDismiss(over: Phaser.GameObjects.GameObject[]): void {
+  private handleRightClickDismiss(over: Phaser.GameObjects.GameObject[]): boolean {
     const order = this.openWindowsTopFirst();
-    if (!order.length) return;
+    if (!order.length) return false;
     const hitWins = new Set(over.map((o) => this.windowForObject(o)).filter((w): w is DismissWin => !!w));
     const target = order.find((w) => hitWins.has(w)) ?? this.topmostOpen('modal');
-    if (!target) return;
+    if (!target) return false;
     target.close();
     this.syncModalBackdrop();
+    return true;
   }
 
   /** Backdrop only behind centered modals (delete confirm has its own dim). */
   private syncModalBackdrop(): void {
     if (!this.modalBackdrop) return;
-    const show = this.dismissWins.some((w) => w.kind === 'modal' && w.key !== 'deleteConfirm' && w.isOpen());
+    const open = this.dismissWins.filter((w) => w.kind === 'modal' && w.key !== 'deleteConfirm' && w.isOpen());
+    const show = open.length > 0;
     if (this.modalBackdrop.visible !== show) this.modalBackdrop.setVisible(show);
+    // A context menu alone should not dim the club (it is a small popover).
+    const alpha = show && open.every((w) => w.key === 'ctxMenu') ? 0.01 : this.modalBackdropAlpha;
+    if (this.modalBackdrop.fillAlpha !== alpha) this.modalBackdrop.setFillStyle(this.modalBackdrop.fillColor, alpha);
   }
 
   update(): void {
@@ -773,7 +1174,11 @@ export class UIScene extends Phaser.Scene {
 
   private refreshFurnPanel(f: FurnitureInspectPayload): void {
     this.furnName.setText(f.name);
-    this.furnCondition.setText(`Condición: ${f.condition}`);
+    this.furnSelectedId = f.id;
+    this.furnCondition.setText(
+      `Condición: ${f.condition}` +
+        (f.repairStatus ? `\n${f.repairStatus}` : f.repairCount ? ` · Reparado ×${f.repairCount}` : '')
+    );
     const setBar = (
       bar: Phaser.GameObjects.Rectangle,
       valText: Phaser.GameObjects.Text,
@@ -859,11 +1264,14 @@ export class UIScene extends Phaser.Scene {
         typeof npc.weeklySalary === 'number' && npc.weeklySalary > 0
           ? `\nSueldo: $${npc.weeklySalary}/semana`
           : '';
+      void tipsNight;
+      void tipsTotal;
+      const wallet = typeof npc.walletMoney === 'number' ? `\nDinero propio: $${npc.walletMoney}` : '';
+      const cond = npc.condition ? ` (${npc.condition})` : '';
       this.panelStats.setText(
-        `Estado: ${estado}\nHabilidad: ${npc.skill ?? '—'}\n` +
-          `Propinas esta noche: $${tipsNight}\n` +
-          `Propinas de la jornada: $${tipsDay}\n` +
-          `Propinas totales: $${tipsTotal}` +
+        `Estado: ${estado}${cond}\nHabilidad: ${npc.skill ?? '—'}\n` +
+          `Propinas de hoy: $${tipsDay}` +
+          wallet +
           salaryLine +
           (npc.performance ? `\nRendimiento: ${npc.performance}` : '') +
           persLine +
@@ -884,7 +1292,15 @@ export class UIScene extends Phaser.Scene {
       this.restBtn.setVisible(canRest);
       this.restBtn.setAlpha(canRest ? 1 : 0.4);
     } else {
-      this.panelStats.setText(`Estado: ${estado}`);
+      const lines = [`Estado: ${estado}`];
+      if (npc.servedDrink) lines.push(`Bebe: ${npc.servedDrink}`);
+      else if (npc.wantedDrink) lines.push(`Quiere: ${npc.wantedDrink}`);
+      const th = (npc.thoughts ?? []).slice(-2).reverse();
+      if (th.length) {
+        lines.push('Piensa:');
+        for (const t of th) lines.push(`${t.emoji} “${t.text}”`);
+      }
+      this.panelStats.setText(lines.join('\n'));
       this.energyLabel.setText('Ánimo de la noche');
       const mood = npc.mood ?? 100;
       this.energyBar.width = 220 * Phaser.Math.Clamp(mood / 100, 0, 1);
@@ -893,6 +1309,21 @@ export class UIScene extends Phaser.Scene {
       this.moodLabel.setVisible(false);
       this.restBtn.setVisible(false);
     }
+    this.layoutNpcPanelBars();
+  }
+
+  /** Push bars/button below the stats text so long staff/patron text never overlaps them. */
+  private layoutNpcPanelBars(): void {
+    this.panelStats.setFontSize(14);
+    if (58 + this.panelStats.height > 262) this.panelStats.setFontSize(12);
+    const y = Math.max(200, Math.min(270, Math.round(58 + this.panelStats.height + 10)));
+    this.energyLabel.setY(y);
+    this.panelEBg.setY(y + 20);
+    this.energyBar.setY(y + 20);
+    this.moodLabel.setY(y + 40);
+    this.panelMBg.setY(y + 60);
+    this.moodBar.setY(y + 60);
+    this.restBtn.setY(Math.min(PANEL_H - 44, y + 86));
   }
 
   private onBuildModeChanged = (on: boolean): void => {
@@ -1773,6 +2204,7 @@ export class UIScene extends Phaser.Scene {
       .setName('shopTitle');
     const close = this.makeLocalButton(180, -236, 36, 32, '✕', () => this.hideShopPanel());
     this.shopPanel.add([bg, title, close]);
+    this.input.on('wheel', this.onShopWheel);
   }
 
   private shopTabTitle(tab: ShopTabId): string {
@@ -2079,22 +2511,38 @@ export class UIScene extends Phaser.Scene {
       return;
     }
 
-    // Scroll controls
+    let y = -150;
+    const slice = items.slice(this.shopScroll, this.shopScroll + pageSize);
+    for (const it of slice) {
+      y = this.addShopItemRow(it, y, catalog.money);
+      y += 8;
+    }
+
+    // Scroll controls — added AFTER the cards (on top) in their own bottom bar so no card covers them.
     if (items.length > pageSize) {
-      const up = this.makeLocalButton(-190, -130, 36, 28, '▲', () => {
+      const canUp = this.shopScroll > 0;
+      const canDown = this.shopScroll < maxScroll;
+      const up = this.makeLocalButton(-200, 208, 110, 30, '▲ Subir', () => {
+        if (this.shopScroll <= 0) return;
         this.shopScroll = Math.max(0, this.shopScroll - 1);
         this.rebuildShopPanel();
       });
-      up.setAlpha(this.shopScroll > 0 ? 1 : 0.35);
-      const down = this.makeLocalButton(-190, 200, 36, 28, '▼', () => {
+      up.setName('shopUp');
+      up.setAlpha(canUp ? 1 : 0.3);
+      up.setData('enabled', canUp);
+      const down = this.makeLocalButton(90, 208, 110, 30, '▼ Bajar', () => {
+        if (this.shopScroll >= maxScroll) return;
         this.shopScroll = Math.min(maxScroll, this.shopScroll + 1);
         this.rebuildShopPanel();
       });
-      down.setAlpha(this.shopScroll < maxScroll ? 1 : 0.35);
+      down.setName('shopDown');
+      down.setAlpha(canDown ? 1 : 0.3);
+      down.setData('enabled', canDown);
+      const last = Math.min(items.length, this.shopScroll + pageSize);
       const page = this.add
-        .text(-190, 40, `${this.shopScroll + 1}/${maxScroll + 1}`, {
-          fontSize: '11px',
-          color: '#a080c0',
+        .text(0, 223, `${this.shopScroll + 1}–${last} de ${items.length}`, {
+          fontSize: '12px',
+          color: '#c8a0e0',
         })
         .setOrigin(0.5);
       this.shopPanel.add(up);
@@ -2102,13 +2550,42 @@ export class UIScene extends Phaser.Scene {
       this.shopPanel.add(page);
       this.shopRows.push(up, down, page);
     }
+  }
 
-    let y = -140;
-    const slice = items.slice(this.shopScroll, this.shopScroll + pageSize);
-    for (const it of slice) {
-      y = this.addShopItemRow(it, y, catalog.money);
-      y += 8;
-    }
+  /** Mouse wheel over the open shop scrolls the same list (no second navigation system). */
+  private onShopWheel = (p: Phaser.Input.Pointer, _over: unknown, _dx: number, dy: number): void => {
+    if (!this.shopPanelVisible || !this.shopCatalog) return;
+    const cam = this.cameras.main;
+    if (Math.abs(p.x - cam.width / 2) > 220 || Math.abs(p.y - cam.height / 2) > 250) return;
+    const items = this.shopCatalog.items.filter((it) => this.shopItemMatchesTab(it, this.shopTab));
+    const maxScroll = Math.max(0, items.length - 3);
+    const next = Phaser.Math.Clamp(this.shopScroll + (dy > 0 ? 1 : dy < 0 ? -1 : 0), 0, maxScroll);
+    if (next === this.shopScroll) return;
+    this.shopScroll = next;
+    this.rebuildShopPanel();
+  };
+
+  /** Test/debug: shop scroll state. */
+  getShopNavDebug() {
+    const up = this.shopPanel?.getByName('shopUp') as Phaser.GameObjects.Container | null;
+    const down = this.shopPanel?.getByName('shopDown') as Phaser.GameObjects.Container | null;
+    const items = this.shopCatalog
+      ? this.shopCatalog.items.filter((it) => this.shopItemMatchesTab(it, this.shopTab)).length
+      : 0;
+    return {
+      scroll: this.shopScroll,
+      items,
+      upEnabled: up ? !!up.getData('enabled') : null,
+      downEnabled: down ? !!down.getData('enabled') : null,
+      tab: this.shopTab,
+    };
+  }
+
+  /** Test helper: press the shop ▲/▼ buttons exactly like a click would. */
+  debugShopScroll(dir: 'up' | 'down'): void {
+    const btn = this.shopPanel?.getByName(dir === 'up' ? 'shopUp' : 'shopDown') as Phaser.GameObjects.Container | null;
+    const bg = btn?.list[0] as Phaser.GameObjects.Rectangle | undefined;
+    bg?.emit('pointerdown', { wasTouch: true, button: 0, event: { stopPropagation() {} } });
   }
 
   private addShopItemRow(

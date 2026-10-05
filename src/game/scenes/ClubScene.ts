@@ -293,6 +293,106 @@ import {
   mergeSavedStats,
   refundForWear,
 } from '../systems/FurnitureStats';
+import {
+  withdrawStock as inventoryWithdraw,
+  recordPrepouredSale as inventoryRecordPrepoured,
+  recordWaste as inventoryRecordWaste,
+  recordStaffConsumption as inventoryRecordStaffUse,
+  getNightWaste,
+  getNightStaffConsumption,
+} from '../systems/Inventory';
+import { CONSUMABLE_EFFECTS } from '../config/staffConsumption';
+import {
+  ORDER_COMPLIANCE,
+  REFUSE_LINES,
+  DRUNK_REFUSE_LINES,
+  DELAY_LINES,
+  ABANDON_LINES,
+} from '../config/orderCompliance';
+import {
+  TECHNICIANS,
+  TechnicianDef,
+  REPAIR_TIMING,
+  REPAIR_QUALITY,
+  REPAIR_COST,
+  DIAGNOSES,
+  NON_BREAKABLE_FUNCTIONS,
+  NON_BREAKABLE_IDS,
+} from '../config/technicians';
+import { FLIES } from '../config/spoilage';
+import { THOUGHT_RULES, THOUGHT_SAT, IMPRESSIVE_DECOR } from '../config/thoughts';
+import {
+  getWallet,
+  creditWallet,
+  debitWallet,
+  loadStaffWallets,
+  serializeStaffWallets,
+  intoxOf,
+  intoxLabel,
+  isCaffeinated,
+  applyConsumption,
+  tickStaffNeeds,
+  serviceFactor as staffServiceFactor,
+  spillChance as staffSpillChance,
+  slowServeFactor,
+  rollCompliance,
+  pickAutoConsumption,
+  noteAutoConsumption,
+  onStaffSleep,
+  getStaffNeedsDebug,
+  debugSetIntox,
+  debugSetWallet,
+} from '../systems/StaffNeeds';
+import {
+  addServedItem,
+  canAddAt as canAddServed,
+  claimServed,
+  itemsAt as servedItemsAt,
+  listServed,
+  removeServed,
+  stateOf as servedStateOf,
+  tickServed,
+  clearServed,
+  getServedDebug,
+  ServedItem,
+  profileFor as spoilProfileFor,
+} from '../systems/ServedItems';
+import { decideThought, hasThought, thoughtLog, getThoughtsDebug } from '../systems/Thoughts';
+import { addFloorDirtAt, getFloorZoneById, zoneContaining } from '../systems/FloorDirt';
+import {
+  CtxTarget,
+  CtxAction,
+  ContextMenuPayload,
+  TechListPayload,
+  RepairVerdictPayload,
+} from '../types/Intervention';
+
+/** Products a staff member can order at the bar (in-stock ones only are shown). */
+/** A customer waiting this long (ms) lets AI pull a staff off routine cleaning to serve. */
+const URGENT_PREEMPT_MS = 9000;
+
+const BAR_STAFF_DRINKS = ['cafe', 'agua', 'refresco', 'cerveza', 'shot_barato', 'vodka', 'ron', 'whiskey'];
+
+interface RepairJob {
+  id: string;
+  furnitureId: string;
+  tech: TechnicianDef;
+  stage: 'en_route' | 'walking' | 'inspecting' | 'verdict' | 'repairing';
+  arriveAt: number;
+  stageEndsAt: number;
+  quote?: number;
+  diagnosis?: string;
+  /** Hidden 0..1 job quality rolled from reputation (never shown). */
+  quality?: number;
+  sprite?: Patron;
+}
+
+interface FlyZoneState {
+  dirtySince: number;
+  active: boolean;
+  episode: number;
+  gfx?: Phaser.GameObjects.Container;
+}
 
 /** Single fixed orientation for every piece (Ultima Online style: fixed camera, no rotation).
  *  The medieval sofa's natural pose faces lower-left (SW): long side toward the viewer's left. */
@@ -330,6 +430,11 @@ interface FurnitureDef {
   maxDurability?: number;
   maxComfort?: number;
   maxCleanliness?: number;
+  /** Repair history (technicians): count, wear multiplier and sudden-failure chance per minute. */
+  repairCount?: number;
+  fragility?: number;
+  failChance?: number;
+  lastRepairQuality?: number;
 }
 
 interface Scenario {
@@ -381,9 +486,15 @@ interface SavedLayoutItem {
   maxDurability?: number;
   maxComfort?: number;
   maxCleanliness?: number;
+  repairCount?: number;
+  fragility?: number;
+  failChance?: number;
+  lastRepairQuality?: number;
 }
 
 interface SavedLayout {
+  /** Staff personal money (tips − own purchases). Old saves omit → starting pocket money. */
+  staffWallets?: Record<string, number>;
   furniture: SavedLayoutItem[];
   /** Hired staff ids from staff_pool (excludes starter Luna). */
   hiredStaff?: string[];
@@ -726,6 +837,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
     this.game.events.on('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
     this.game.events.on('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
+    this.registerInterventionEvents();
     this.emitStaffRoster();
     this.emitShopCatalog();
     this.scale.on('resize', this.onClubResize, this);
@@ -757,6 +869,11 @@ export class ClubScene extends Phaser.Scene {
       preferredDrink: p.preferredDrinkName,
       mood: p.nightMood,
       state: p.getActionKey(),
+      wantedDrink: p.servedDrinkId ? undefined : p.preferredDrinkName,
+      servedDrink: p.servedDrinkId ? this.drinkDisplayName(p.servedDrinkId) : undefined,
+      thoughts: thoughtLog(p)
+        .slice(-3)
+        .map((t) => ({ text: t.text, emoji: t.emoji, tone: t.tone })),
       portrait: this.textures.exists('patron_portrait') ? 'patron_portrait' : undefined,
     };
   }
@@ -811,6 +928,11 @@ export class ClubScene extends Phaser.Scene {
       competitivenessLabel:
         comp > PANEL_SHOW_THRESHOLD ? competitivenessLabel(comp) : null,
       weeklySalary: weeklySalaryFor(b.profile.id),
+      walletMoney: getWallet(b.profile.id),
+      condition:
+        [intoxLabel(b.profile.id), isCaffeinated(b.profile.id, this.time.now) ? 'Con café' : null]
+          .filter(Boolean)
+          .join(' · ') || null,
     };
   }
 
@@ -822,6 +944,7 @@ export class ClubScene extends Phaser.Scene {
     this.bartender.setSelected(target === this.bartender);
     this.extraStaff.forEach((s) => s.setSelected(s === target));
     this.selectedNpcId = target.profile.id;
+    this.lastSelectedStaffId = target.profile.id;
     const info = this.staffNpcInfo(target);
     this.game.events.emit('select-npc', info);
     if (target === this.bartender) {
@@ -851,10 +974,12 @@ export class ClubScene extends Phaser.Scene {
   };
 
   private wirePatronClick(patron: Patron): void {
-    patron.sprite.on('pointerdown', () => {
+    patron.sprite.on('pointerdown', (p?: Phaser.Input.Pointer) => {
+      if (p && !p.wasTouch && p.button === 2) return;
       if (!this.buildMode) this.npcTapHandled = true;
     });
     patron.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (!p.wasTouch && p.button === 2) return;
       if (this.panDragging || this.furnDragging || this.skipNextTap) return;
       if (p.getDistance() > TAP_THRESH) return;
       if (this.buildMode) return;
@@ -877,6 +1002,7 @@ export class ClubScene extends Phaser.Scene {
         this.money = ALLOW_NEGATIVE_BALANCE ? m : Math.max(0, m);
       }
       loadTips(saved?.staffTips);
+      loadStaffWallets(saved?.staffWallets);
       loadAffinities(saved?.affinities);
       loadCustomerTraits(saved?.customerTraits);
       loadInventory(saved?.inventory);
@@ -948,6 +1074,10 @@ export class ClubScene extends Phaser.Scene {
           def.price = item.price;
         }
         this.applyStatsFromSaved(def, item);
+        if (typeof item.repairCount === 'number') def.repairCount = item.repairCount;
+        if (typeof item.fragility === 'number') def.fragility = item.fragility;
+        if (typeof item.failChance === 'number') def.failChance = item.failChance;
+        if (typeof item.lastRepairQuality === 'number') def.lastRepairQuality = item.lastRepairQuality;
       }
       // Starter pieces added after this save was made (the drink bar) are offered ONCE: a save
       // without the `seeded` marker gets the bar at its starting spot (nearest free tile if taken);
@@ -988,7 +1118,12 @@ export class ClubScene extends Phaser.Scene {
         maxDurability: f.maxDurability,
         maxComfort: f.maxComfort,
         maxCleanliness: f.maxCleanliness,
+        repairCount: f.repairCount,
+        fragility: f.fragility,
+        failChance: f.failChance,
+        lastRepairQuality: f.lastRepairQuality,
       })),
+      staffWallets: serializeStaffWallets(),
       hiredStaff: [...this.hiredStaffIds],
       money: this.money,
       seeded: ['bar'],
@@ -1462,6 +1597,8 @@ export class ClubScene extends Phaser.Scene {
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
       if (p.rightButtonDown()) return;
       if (this.isPointerOverHud(p)) return;
+      // Mobile: long-press with a staff selected opens the context menu (= PC right-click).
+      this.startLongPress(p);
       if (this.furnDragging || this.blockPanGesture) return;
       // Two-finger touch is pinch zoom, not pan
       if (this.activePinchPointers() >= 2 || this.pinching) return;
@@ -1497,6 +1634,23 @@ export class ClubScene extends Phaser.Scene {
     });
 
     this.input.on('pointerup', (p: Phaser.Input.Pointer) => {
+      this.longPressTimer?.remove(false);
+      this.longPressTimer = undefined;
+      if (!p.wasTouch && p.button === 2) {
+        // Right-click: context menu for the selected staff (windows are closed by UIScene first).
+        if (!this.buildMode && !this.isPointerOverHud(p) && !this.uiConsumedRightClick(p)) {
+          this.handleWorldRightClick(p);
+        }
+        this.npcTapHandled = false;
+        return;
+      }
+      if (this.longPressFired) {
+        this.longPressFired = false;
+        this.panActive = false;
+        this.panDragging = false;
+        this.npcTapHandled = false;
+        return;
+      }
       if (this.furnDragging) {
         this.endFurnitureDrag();
       }
@@ -1937,6 +2091,7 @@ export class ClubScene extends Phaser.Scene {
     patron.reapplyDisplaySize();
     this.wirePatronClick(patron);
     this.patrons.push(patron);
+    this.patronSpawnAt.set(patron, this.time.now);
     // Prompt A Phase 1: invisible satisfaction (does not alter nightMood/patience).
     createExperience(patron);
     // B11: optional late-open sat stub (first N patrons only if open was late).
@@ -2174,6 +2329,7 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
     const bestSeat = this.listFreeSeats(patron.profile.id)[0] ?? null;
+    if (!bestSeat && Math.random() < AI_TUNABLES.seatChance) this.patronNoSeat(patron);
     if (
       !bestSeat ||
       Math.random() >= AI_TUNABLES.seatChance ||
@@ -2233,6 +2389,13 @@ export class ClubScene extends Phaser.Scene {
     if (patron.ateSnack) return sitMs;
     const snack = getSnackProduct('botanas');
     if (!snack) return sitMs;
+    // A plate already prepared on a table is eaten first (no new stock used).
+    const ready = claimServed('botanas', ['table:'], this.time.now);
+    if (ready) {
+      this.patronEatsServedSnack(patron, ready.item, ready.state);
+      const boostedReady = Math.round(sitMs * SNACK_EXPERIENCE.sitDurationMult + SNACK_EXPERIENCE.sitDurationBonusMs);
+      return Math.max(sitMs, boostedReady);
+    }
     if (!inventoryCanSell('botanas')) return sitMs;
     if (Math.random() >= snack.orderChance) return sitMs;
     const price = inventoryGetPrice('botanas');
@@ -2248,6 +2411,7 @@ export class ClubScene extends Phaser.Scene {
       'Botanas en la mesa'
     );
     patron.showBubble('Botanas');
+    this.patronThink(patron, 'snack_found');
     this.game.events.emit('stats-updated', this.getHudState());
     this.game.events.emit('inventory-updated');
     const boosted = Math.round(
@@ -2486,6 +2650,8 @@ export class ClubScene extends Phaser.Scene {
       if (used) this.perceiveUsedFurniture(patron, used.id, false);
       patron.refreshStatusLabel();
       patron.showBubble(this.drinkDisplayName(BEER_TAP_DRINK_ID));
+      // A beer already poured at the tap → take it (no wait for staff).
+      if (this.tryPatronTakeServedBeer(patron, 'tap')) return;
       this.tryAssignServeAi(patron);
     });
     if (!ok) {
@@ -2561,6 +2727,7 @@ export class ClubScene extends Phaser.Scene {
       if (usedBar) this.perceiveUsedFurniture(patron, usedBar.id, false);
       patron.refreshStatusLabel();
       patron.showBubble(this.drinkDisplayName(patron.profile.preferredDrink));
+      if (this.tryPatronTakeServedBeer(patron, 'bar')) return;
       this.tryAssignServeAi(patron);
     });
     if (!ok) {
@@ -2573,9 +2740,12 @@ export class ClubScene extends Phaser.Scene {
   private afterBarService(patron: Patron): void {
     if (!patron.active || this.phase !== 'open') return;
     const seat = this.listFreeSeats(patron.profile.id)[0] ?? null;
-    if (seat && Math.random() < AI_TUNABLES.seatChance && this.claimPatronSlot(patron, seat)) {
+    const wantsSit = Math.random() < AI_TUNABLES.seatChance;
+    if (seat && wantsSit && this.claimPatronSlot(patron, seat)) {
       this.sendPatronToSeat(patron, seat);
     } else {
+      // Wanted to sit but there's nowhere to → teaches "more seats" without a meter.
+      if (wantsSit && !seat) this.patronNoSeat(patron);
       this.sendPatronWandering(patron);
     }
   }
@@ -2610,6 +2780,8 @@ export class ClubScene extends Phaser.Scene {
     if (typeof staffMood === 'number') {
       tipChance *= MOOD_SERVICE_TIP_FACTOR[moodBand(staffMood)];
     }
+    // Drunk staff give worse service (1 when sober).
+    if (staffId) tipChance *= staffServiceFactor(staffId);
     if (tipAction) {
       tipChance += tipAction.tipChanceBonus;
     }
@@ -2835,11 +3007,17 @@ export class ClubScene extends Phaser.Scene {
     if (seat) {
       const cond = conditionFromDurability(st.durability, st.maxDurability);
       const c = comfortBandFor(st, cond);
-      applyPerceivedExperience(patron, `comfort:${def.id}`, c.delta, 'comfortSens', `${name}: ${c.band} (${cond})`);
+      const applied = applyPerceivedExperience(patron, `comfort:${def.id}`, c.delta, 'comfortSens', `${name}: ${c.band} (${cond})`);
+      if (applied != null) {
+        if (cond === 'Se rompió' || cond === 'Inservible') this.patronThink(patron, 'broken_furniture');
+        else if (c.delta > 0) this.patronThink(patron, 'good_seat');
+        else if (c.delta < 0) this.patronThink(patron, 'uncomfortable');
+      }
     }
     const d = dirtBandFor(st, true);
     if (d.band === 'dirty' || d.band === 'very_dirty') {
-      applyPerceivedExperience(patron, dirtEpisodeKey(def.id, true), d.delta, 'cleanSens', `${name}: ${d.band} (usado)`);
+      const applied = applyPerceivedExperience(patron, dirtEpisodeKey(def.id, true), d.delta, 'cleanSens', `${name}: ${d.band} (usado)`);
+      if (applied != null && applied < 0) this.patronThink(patron, 'dirty_furniture');
     } else {
       dirtEpisodeKey(def.id, false); // lazy episode bookkeeping
       if (d.band === 'clean') {
@@ -2858,7 +3036,8 @@ export class ClubScene extends Phaser.Scene {
       const key = dirtEpisodeKey(def.id, dirty);
       if (!dirty) continue;
       const d = dirtBandFor(st, false);
-      applyPerceivedExperience(patron, key, d.delta, 'cleanSens', `${this.furnitureDisplayName(def)}: ${d.band} (visto)`);
+      const applied = applyPerceivedExperience(patron, key, d.delta, 'cleanSens', `${this.furnitureDisplayName(def)}: ${d.band} (visto)`);
+      if (applied != null && applied < 0) this.patronThink(patron, 'dirty_furniture');
     }
     // Floor dirt: local zone perception only (same radius / cleanSens path).
     for (const z of getFloorZones()) {
@@ -2868,7 +3047,8 @@ export class ClubScene extends Phaser.Scene {
       const delta = floorDirtDelta(band);
       if (delta === 0) continue;
       const key = floorDirtEpisodeKey(z);
-      applyPerceivedExperience(patron, key, delta, 'cleanSens', `Piso: ${band} (visto)`);
+      const applied = applyPerceivedExperience(patron, key, delta, 'cleanSens', `Piso: ${band} (visto)`);
+      if (applied != null && applied < 0) this.patronThink(patron, 'dirty_floor');
     }
   }
 
@@ -2900,6 +3080,7 @@ export class ClubScene extends Phaser.Scene {
 
   private sendPatronHome(patron: Patron): void {
     if (!patron.active) return;
+    if (patron.goal !== 'leave') this.patronGoodbyeThought(patron);
     patron.waiting = false;
     patron.seated = false;
     this.releasePatronSlot(patron);
@@ -3014,10 +3195,12 @@ export class ClubScene extends Phaser.Scene {
     npc.refreshHitArea();
     npc.sprite.on('pointerdown', (p: Phaser.Input.Pointer) => {
       if (this.buildMode) return;
+      if (!p.wasTouch && p.button === 2) return;
       this.npcTapHandled = true;
       p.event?.stopPropagation?.();
     });
     npc.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (!p.wasTouch && p.button === 2) return;
       if (this.panDragging || this.furnDragging || this.skipNextTap) return;
       if (p.getDistance() > TAP_THRESH) return;
       if (this.buildMode) return;
@@ -3235,14 +3418,17 @@ export class ClubScene extends Phaser.Scene {
 
   private moveSelectedStaffToPointer(p: Phaser.Input.Pointer, staff: Bartender): void {
     if (staff.state === 'resting') return;
-    // Player override: cancel autonomous AI job
-    if (!staff.playerCommanded && staff.aiJob !== 'none') {
-      this.releaseStaffAiClaims(staff);
-      staff.cancelWalk();
-      staff.clearAiJob();
-      staff.state = 'idle';
-    } else if (staff.state === 'busy' && staff.playerCommanded) {
+    // Exhausted / fed-up / very drunk staff may not obey (probabilistic, never at normal levels).
+    const comp = rollCompliance(staff.profile.id, staff.profile.energy, staff.profile.mood);
+    if (comp === 'refuse') {
+      const drunk = intoxOf(staff.profile.id) >= ORDER_COMPLIANCE.extremeIntox;
+      this.staffSay(staff, this.pick(drunk ? DRUNK_REFUSE_LINES : REFUSE_LINES));
+      this.logOrder(staff, 'walk', 'refuse');
       return;
+    }
+    // Player order = priority #1: interrupt any AI job or previous order.
+    if (staff.aiJob !== 'none' || staff.state === 'busy') {
+      this.interruptStaff(staff);
     }
     const world = this.cameras.main.getWorldPoint(p.x, p.y);
     const tile = screenToTile(world.x, world.y, this.iso);
@@ -3310,6 +3496,8 @@ export class ClubScene extends Phaser.Scene {
     const baseSX = spr.scaleX;
     const baseSY = spr.scaleY;
     const cycles = Math.max(2, Math.round(totalMs / 450));
+    const tok = staff.jobToken;
+    staff.actionTweenBase = { y: baseY, sx: baseSX, sy: baseSY };
     this.tweens.add({
       targets: spr,
       y: baseY - 5,
@@ -3323,6 +3511,9 @@ export class ClubScene extends Phaser.Scene {
         spr.y = baseY;
         spr.setScale(baseSX, baseSY);
         staff.reapplyDisplaySize();
+        staff.actionTweenBase = null;
+        // Interrupted by a player order meanwhile → the old job's completion is void.
+        if (staff.jobToken !== tok) return;
         onDone();
       },
     });
@@ -3378,6 +3569,11 @@ export class ClubScene extends Phaser.Scene {
     beginShiftClosed(this.nightNumber);
     syncShiftDay(this.nightNumber);
     this.phase = legacyPhaseFromShift(); // prep
+    // Same-day services end; staff sleep it off (alcohol / café reset) and spend some money outside.
+    this.cancelAllRepairJobs();
+    this.wasteAllServed();
+    this.clearAllFlies();
+    onStaffSleep(this.allStaff().map((s) => s.profile.id));
     this.resetForNewNight();
     // Day-start: empty + dark + staff arrive ~17:05; seed floor dirt from last night.
     seedFloorDirtForDay(this.lastNightUsed);
@@ -3500,10 +3696,19 @@ export class ClubScene extends Phaser.Scene {
     this.barSpotHolderId = null;
     this.staffTileClaims.clear();
     for (const s of this.allStaff()) {
-      s.clearAiJob();
+      this.interruptStaff(s);
       s.state = 'idle';
       s.startBob();
     }
+    // Served-but-unsold mugs / plates become merma (money already spent is not recovered).
+    this.wasteAllServed();
+    const waste = getNightWaste();
+    const staffUse = getNightStaffConsumption();
+    const wasteUnits = Object.values(waste.units).reduce((a, b) => a + b, 0);
+    const staffUnits = Object.values(staffUse.units).reduce((a, b) => a + b, 0);
+    const interventionLines: string[] = [];
+    if (wasteUnits > 0) interventionLines.push(`Merma: ${wasteUnits} (costo $${Math.round(waste.cost)})`);
+    if (staffUnits > 0) interventionLines.push(`Consumo del personal: ${staffUnits} ($${Math.round(staffUse.revenue)})`);
     this.syncBartenderBarDepth();
     // Phase 7: roll-up + weekly/monthly hooks, then bump nightNumber.
     // Tips night/jornada stay visible for the summary; resetNightTips runs on openNight.
@@ -3572,6 +3777,7 @@ export class ClubScene extends Phaser.Scene {
           NIGHT_SUMMARY_LINES.drinks(nightStats.drinksSoldTotal, nightStats.drinksRevenueTotal),
           NIGHT_SUMMARY_LINES.stockout(nightStats.stockedOutNames),
           NIGHT_SUMMARY_LINES.served(nightStats.servedCount),
+          ...interventionLines,
         ].filter((x): x is string => !!x),
       },
       // Prompt B Phase B9
@@ -4120,6 +4326,7 @@ export class ClubScene extends Phaser.Scene {
         patron.wasOutOfStock = true;
         noteLeaveWithoutBuy('empty');
         patron.showBubble('Se acabó la cerveza');
+        this.patronThink(patron, 'no_beer');
         patron.waiting = false;
         patron.served = false;
         this.releasePatronSlot(patron);
@@ -4145,6 +4352,11 @@ export class ClubScene extends Phaser.Scene {
         if (pick.reason === 'empty') patron.showBubble('Se acabó todo');
         else if (pick.reason === 'price') patron.showBubble('Muy caro');
         else patron.showBubble('Sin mi bebida');
+        const wantedName = this.drinkDisplayName(patron.profile.preferredDrink).toLowerCase();
+        if (pick.reason === 'empty') this.patronThink(patron, 'nothing_left');
+        else if (pick.reason === 'price') this.patronThink(patron, 'too_expensive');
+        else if (patron.profile.preferredDrink === BEER_TAP_DRINK_ID) this.patronThink(patron, 'no_beer');
+        else this.patronThink(patron, 'no_drink', { drink: wantedName });
         patron.waiting = false;
         patron.served = false;
         this.releasePatronSlot(patron);
@@ -4156,6 +4368,10 @@ export class ClubScene extends Phaser.Scene {
       drink = pick.drink;
       wantedId = pick.wantedId;
       substituted = pick.substituted;
+      if (substituted && !inventoryCanSell(wantedId)) {
+        if (wantedId === BEER_TAP_DRINK_ID) this.patronThink(patron, 'no_beer');
+        else this.patronThink(patron, 'no_drink', { drink: this.drinkDisplayName(wantedId).toLowerCase() });
+      }
       patron.wantedDrinkId = wantedId;
       patron.servedDrinkId = drink.id;
       patron.wasOutOfStock = substituted;
@@ -4172,8 +4388,11 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.emit('stats-updated', this.getHudState());
     this.emitStaffRoster();
 
-    // The job is still ours (a player order or a night change releases the claim).
-    const mine = () => this.serveClaim.get(patron.profile.id) === staff.profile.id;
+    // The job is still ours (a player order or a night change releases the claim / bumps the token).
+    const tok = staff.jobToken;
+    const mine = () =>
+      staff.jobToken === tok && this.serveClaim.get(patron.profile.id) === staff.profile.id;
+    let spilledOnce = false;
     const release = () => {
       if (mine()) this.serveClaim.delete(patron.profile.id);
       staff.servingDrinkId = null;
@@ -4211,6 +4430,17 @@ export class ClubScene extends Phaser.Scene {
       if (!mine()) return;
       if (patronGone()) {
         release();
+        return;
+      }
+      // Drunk hands: a fumbled pour is merma and gets re-poured (once).
+      if (!spilledOnce && Math.random() < staffSpillChance(staff.profile.id) && inventoryWithdraw(drink.id)) {
+        spilledOnce = true;
+        inventoryRecordWaste(drink.id);
+        addFloorDirtAt(staff.grid.col, staff.grid.row, 2, 6);
+        this.refreshFloorDirtVisuals();
+        this.staffSay(staff, '¡Ups! Se me cayó…');
+        this.game.events.emit('inventory-updated');
+        this.time.delayedCall(Math.max(600, drink.serveTimeMs), completeServe);
         return;
       }
       // Stock may have raced to 0 while walking to the bar.
@@ -4262,10 +4492,23 @@ export class ClubScene extends Phaser.Scene {
       this.servedCount++;
       if (payout.tipAmount > 0) {
         recordTip(staff.profile.id, payout.tipAmount);
+        // Tips are the employee's own money (club payout unchanged).
+        creditWallet(staff.profile.id, payout.tipAmount);
         noteTip(staff.profile.id, payout.tipAmount);
       }
+      patron.servedByStaffId = staff.profile.id;
+      // Thoughts tied to what this customer just experienced.
+      if (patron.waitSince && this.time.now - patron.waitSince < THOUGHT_SAT.fastServeMs) {
+        const d = applyPerceivedExperience(patron, 'fast_drink', THOUGHT_SAT.fastDrink, 'tolerance', 'Servicio rápido');
+        if (d != null) this.patronThink(patron, 'fast_drink');
+      }
+      if (peekAffinity(patron.profile.name, staff.profile.id) === 'alta') {
+        this.patronThink(patron, 'affinity_served', { staff: staff.displayName });
+      }
+      if (patron.servedAtBeerTap && patron.beerServicePref === 'tap') this.patronThink(patron, 'tap_great');
       patron.showBubble(payout.tipped ? `¡Propina! +$${payout.earned}` : `+$${payout.earned}`);
       patron.served = true;
+      patron.waitSince = 0;
       patron.waiting = false;
       this.releasePatronSlot(patron);
       this.releaseTile(patron.grid);
@@ -4291,9 +4534,9 @@ export class ClubScene extends Phaser.Scene {
       this.game.events.emit('stats-updated', this.getHudState());
       this.emitStaffRoster();
       const prepareMs =
-        drink.id === 'cerveza'
+        (drink.id === 'cerveza'
           ? drink.serveTimeMs
-          : drink.serveTimeMs * (1 - (staff.skill / 200) * 0.3);
+          : drink.serveTimeMs * (1 - (staff.skill / 200) * 0.3)) * slowServeFactor(staff.profile.id);
       // Cerveza has a pour animation for Luna / Nova; other drinks keep the idle animation
       if (!(drink.id === 'cerveza' && staff.playServeBeerAnim())) staff.startBob();
       this.time.delayedCall(prepareMs, completeServe);
@@ -4354,8 +4597,7 @@ export class ClubScene extends Phaser.Scene {
     this.staffArriveTotalMinutes = base + delta;
     for (const s of this.allStaff()) {
       if (!s) continue;
-      s.cancelWalk();
-      s.clearAiJob();
+      this.interruptStaff(s);
       s.clearServeLabel();
       s.state = 'idle';
       s.setVisible(false);
@@ -4368,6 +4610,7 @@ export class ClubScene extends Phaser.Scene {
   private revealStaffForShift(fromDoor: boolean): void {
     if (this.staffPresent) return;
     this.staffPresent = true;
+    this.staffShiftStartAt = this.time.now;
     const door = {
       col: this.scenario.spawnTile[0],
       row: this.scenario.spawnTile[1],
@@ -4669,13 +4912,16 @@ export class ClubScene extends Phaser.Scene {
     npc.state = 'busy';
     this.game.events.emit('stats-updated', this.getHudState());
     this.emitStaffRoster();
+    const restTok = npc.jobToken;
     npc.walkTo(restGoal, () => {
+      if (npc.jobToken !== restTok) return;
       npc.state = 'resting';
       npc.stopBob();
       const dur = npc.profile.restDurationMs;
       this.game.events.emit('stats-updated', this.getHudState());
       this.emitStaffRoster();
       this.time.delayedCall(dur, () => {
+        if (npc.jobToken !== restTok) return;
         npc.applyRest();
         npc.clearServeLabel();
         npc.state = 'idle';
@@ -4750,6 +4996,24 @@ export class ClubScene extends Phaser.Scene {
     // Priority 1 — Atender: only while OPEN (never during prep)
     const waiting = this.phase === 'open' ? this.waitingBarPatrons() : [];
     for (const patron of waiting) this.tryAssignServeAi(patron);
+    // Urgent work (#2) outranks idle wandering (#4) at once, and routine upkeep (#3) once a
+    // customer has waited a while. Player orders (#1) are never preempted.
+    if (this.phase === 'open') {
+      for (const patron of this.waitingBarPatrons()) {
+        const waitedMs = patron.waitSince ? now - patron.waitSince : 0;
+        const pre = this.allStaff().find(
+          (st) =>
+            !st.playerCommanded &&
+            st.visible &&
+            st.profile.energy >= st.profile.energyDrainPerServe &&
+            (st.aiJob === 'wander' ||
+              (waitedMs >= URGENT_PREEMPT_MS && (st.aiJob === 'clean' || st.aiJob === 'sweep' || st.aiJob === 'mop')))
+        );
+        if (!pre) break;
+        this.interruptStaff(pre);
+        this.tryAssignServeAi(patron);
+      }
+    }
 
     for (const staff of this.allStaff()) {
       // Player command ALWAYS outranks autonomous AI
@@ -4797,6 +5061,9 @@ export class ClubScene extends Phaser.Scene {
         continue;
       }
 
+      // 2b) Idle: she may buy herself something (own money, real stock, personality).
+      if (this.tryAutoConsume(staff)) continue;
+
       // 3) Prep: idle wait (no purposeless wander). Open: wander as before.
       if (prep) {
         staff.aiNextThinkAt = now + Phaser.Math.Between(2000, 4000);
@@ -4815,6 +5082,16 @@ export class ClubScene extends Phaser.Scene {
     // AI runs in prep (after staff arrive) + open; serve only when open.
     if (!this.buildMode) this.tickStaffAi();
     const dtSec = dt / 1000;
+    // Intervention layer ticks (cheap; each self-throttles).
+    if (this.staffPresent) {
+      const nowMs = this.time.now;
+      for (const s of this.allStaff()) tickStaffNeeds(s.profile.id, s.profile, dtSec, nowMs);
+    }
+    this.tickRepairs();
+    if (!this.buildMode && (this.phase === 'open' || this.phase === 'prep')) {
+      this.tickServedItems(dt);
+      this.tickFlies(dt);
+    }
     if (!this.buildMode && (this.phase === 'open' || this.phase === 'prep')) {
       this.tickFurnitureDecay(dtSec);
     }
@@ -4856,11 +5133,26 @@ export class ClubScene extends Phaser.Scene {
     this.perceptionAccum += dt;
     if (this.perceptionAccum >= PERCEPTION_INTERVAL_MS) {
       this.perceptionAccum = 0;
-      for (const p of this.patrons) if (p.active) this.perceiveNearbyDirt(p);
+      for (const p of this.patrons) {
+        if (!p.active) continue;
+        this.perceiveNearbyDirt(p);
+        this.perceiveInterventionEvents(p);
+      }
     }
 
     for (const patron of [...this.patrons]) {
       if (!patron.active) continue;
+      // Wait tracking for "¡Eso fue rápido!" / "¿Cuánto falta…?" (real experience only).
+      if (patron.waiting && !patron.served) {
+        if (!patron.waitSince) patron.waitSince = this.time.now;
+      } else if (!patron.waiting) {
+        patron.waitSince = 0;
+      }
+      if (patron.impatient && !this.patronWasImpatient.has(patron)) {
+        this.patronWasImpatient.add(patron);
+        const d = applyPerceivedExperience(patron, 'long_wait', THOUGHT_SAT.longWait, 'tolerance', 'Espera larga');
+        if (d != null) this.patronThink(patron, 'long_wait');
+      }
       // The bar broke / was removed while they queued: give up on the drink
       if (
         (patron.goal === 'bar' || patron.goal === 'beer_tap') &&
@@ -5165,11 +5457,13 @@ export class ClubScene extends Phaser.Scene {
       this.ensureFurnitureStats(f);
       const before = f.cleanliness ?? 100;
       const st = this.statsOf(f);
+      const durBefore = st.durability;
       // Dirt snowballs: already-dirty pieces decay faster (stains escalate)
       const boost =
         before < DIRT_VISUAL_THRESHOLD ? AI_TUNABLES.dirtyDecayBoost : before < 75 ? 1.2 : 1;
       applyDecay(st, dtSec * boost, this.furniturePrice(f));
       this.writeStatsToDef(f, st);
+      if (f.repairCount) this.applyRepairAftereffects(f, durBefore, dtSec);
       const crossed =
         (before >= DIRT_VISUAL_THRESHOLD) !== (st.cleanliness >= DIRT_VISUAL_THRESHOLD) ||
         Math.floor(before / 8) !== Math.floor(st.cleanliness / 8);
@@ -5286,6 +5580,11 @@ export class ClubScene extends Phaser.Scene {
       maxDurability: Math.round(st.maxDurability),
       maxComfort: Math.round(st.maxComfort),
       maxCleanliness: Math.round(st.maxCleanliness),
+      repairStatus: (() => {
+        const job = this.repairJobFor(def.id);
+        return job ? this.repairStageLabel(job) : undefined;
+      })(),
+      repairCount: def.repairCount ?? 0,
     };
   }
 
@@ -5346,6 +5645,1497 @@ export class ClubScene extends Phaser.Scene {
     g.setDepth(img.depth + 0.5);
   }
 
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+  // Direct intervention layer (right-click orders, compliance, repairs, staff consumption,
+  // served mugs/plates + spoilage, flies, customer thoughts). Extends the existing jobs,
+  // claims, inventory, satisfaction and affinity systems — nothing here is a parallel copy.
+  // ═══════════════════════════════════════════════════════════════════════════════════════
+
+  private lastSelectedStaffId: string | null = null;
+  private longPressTimer?: Phaser.Time.TimerEvent;
+  private longPressFired = false;
+  private servedGfx = new Map<string, Phaser.GameObjects.Graphics>();
+  private servedTickAccum = 0;
+  private repairJobs: RepairJob[] = [];
+  private repairSeq = 0;
+  private flyZones = new Map<string, FlyZoneState>();
+  private flyTickAccum = 0;
+  private staffShiftStartAt = 0;
+  private patronSpawnAt = new WeakMap<Patron, number>();
+  private patronWasImpatient = new WeakSet<Patron>();
+  private patronDecorRolled = new WeakMap<Patron, Set<string>>();
+  private patronSparkRolled = new WeakMap<Patron, Set<string>>();
+  private orderLog: Array<{ at: number; staff: string; action: string; outcome: string }> = [];
+  private ctxLast: { staffId: string; target: CtxTarget; x: number; y: number } | null = null;
+  private staffSayText = new Map<string, Phaser.GameObjects.Text>();
+
+  private registerInterventionEvents(): void {
+    const ev = this.game.events;
+    ev.on('cmd-staff-action', this.onCmdStaffAction, this);
+    ev.on('cmd-context-menu-staff', this.onCmdContextMenuStaff, this);
+    ev.on('cmd-open-furniture-actions', this.onCmdOpenFurnitureActions, this);
+    ev.on('cmd-hire-technician', this.onCmdHireTechnician, this);
+    ev.on('cmd-repair-decision', this.onCmdRepairDecision, this);
+    this.events.once('shutdown', () => {
+      ev.off('cmd-staff-action', this.onCmdStaffAction, this);
+      ev.off('cmd-context-menu-staff', this.onCmdContextMenuStaff, this);
+      ev.off('cmd-open-furniture-actions', this.onCmdOpenFurnitureActions, this);
+      ev.off('cmd-hire-technician', this.onCmdHireTechnician, this);
+      ev.off('cmd-repair-decision', this.onCmdRepairDecision, this);
+    });
+  }
+
+  private uiToast(msg: string): void {
+    this.game.events.emit('ui-toast', msg);
+  }
+
+  /** Short speech line above a staff member (+ toast so it's never missed). */
+  private staffSay(staff: Bartender, text: string, toast = true): void {
+    const prev = this.staffSayText.get(staff.profile.id);
+    if (prev) prev.destroy();
+    const t = this.add
+      .text(staff.x, staff.y - 120, `“${text}”`, {
+        fontSize: '12px',
+        color: '#fff2c4',
+        backgroundColor: '#2a1238dd',
+        padding: { x: 6, y: 3 },
+        stroke: '#1a0a22',
+        strokeThickness: 2,
+      })
+      .setOrigin(0.5)
+      .setDepth(9000);
+    this.staffSayText.set(staff.profile.id, t);
+    this.tweens.add({
+      targets: t,
+      y: t.y - 14,
+      alpha: { from: 1, to: 0 },
+      delay: 2000,
+      duration: 700,
+      onComplete: () => {
+        t.destroy();
+        if (this.staffSayText.get(staff.profile.id) === t) this.staffSayText.delete(staff.profile.id);
+      },
+    });
+    if (toast) this.uiToast(`${staff.displayName}: “${text}”`);
+  }
+
+  private pick<T>(arr: readonly T[]): T {
+    return arr[Math.floor(Math.random() * arr.length)] ?? arr[0];
+  }
+
+  private randBetween(range: readonly [number, number]): number {
+    return range[0] + Math.random() * (range[1] - range[0]);
+  }
+
+  /**
+   * Stop whatever a staff member is doing (AI or previous order) so a new order can take over.
+   * Bumps jobToken so every pending callback of the old job bails out.
+   */
+  private interruptStaff(staff: Bartender): void {
+    staff.jobToken++;
+    this.releaseStaffAiClaims(staff);
+    for (const [zid, sid] of [...this.floorClaim.entries()]) {
+      if (sid === staff.profile.id) this.floorClaim.delete(zid);
+    }
+    staff.cancelWalk();
+    if (staff.actionTweenBase) {
+      this.tweens.killTweensOf(staff.sprite);
+      const b = staff.actionTweenBase;
+      staff.sprite.y = b.y;
+      staff.sprite.setScale(b.sx, b.sy);
+      staff.reapplyDisplaySize();
+      staff.actionTweenBase = null;
+    }
+    staff.clearAiJob();
+    staff.state = 'idle';
+    if (staff.visible) staff.startBob();
+  }
+
+  // ─── Input: right-click / long-press on world ───────────────────────────────────────────
+
+  private selectedStaff(): Bartender | null {
+    return this.selectedNpcId ? this.findStaffById(this.selectedNpcId) : null;
+  }
+
+  /** UIScene consumed this right-click to close a window → don't also open a menu. */
+  private uiConsumedRightClick(p: Phaser.Input.Pointer): boolean {
+    const ui = this.scene.get('UIScene') as Phaser.Scene & { lastRightDismissDownTime?: number };
+    return !!ui && ui.lastRightDismissDownTime === p.downTime;
+  }
+
+  private handleWorldRightClick(p: Phaser.Input.Pointer): void {
+    if (this.buildMode) return;
+    const staff = this.selectedStaff();
+    if (!staff) return;
+    if (!this.staffPresent || !staff.visible) {
+      this.uiToast('El personal todavía no llega.');
+      return;
+    }
+    const furnId = this.furnitureIdAtPointer(p);
+    if (furnId) {
+      this.openContextMenu(staff, { kind: 'furniture', id: furnId }, p.x, p.y);
+      return;
+    }
+    const world = this.cameras.main.getWorldPoint(p.x, p.y);
+    const tile = screenToTile(world.x, world.y, this.iso);
+    const z = zoneContaining(tile.col, tile.row);
+    if (z) this.openContextMenu(staff, { kind: 'floor', id: z.id }, p.x, p.y);
+  }
+
+  private startLongPress(p: Phaser.Input.Pointer): void {
+    this.longPressTimer?.remove(false);
+    this.longPressFired = false;
+    if (!p.wasTouch || this.buildMode || !this.selectedStaff()) return;
+    this.longPressTimer = this.time.delayedCall(520, () => {
+      if (!p.isDown || this.panDragging || this.pinching || p.getDistance() > TAP_THRESH) return;
+      if (this.isPointerOverHud(p)) return;
+      this.longPressFired = true;
+      this.handleWorldRightClick(p);
+    });
+  }
+
+  private onCmdOpenFurnitureActions = (payload: { furnitureId: string }): void => {
+    if (this.buildMode || !payload?.furnitureId) return;
+    const staff =
+      this.selectedStaff() ??
+      (this.lastSelectedStaffId ? this.findStaffById(this.lastSelectedStaffId) : null) ??
+      this.allStaff().find((s) => s.visible) ??
+      null;
+    if (!staff || !this.staffPresent) {
+      this.uiToast('El personal todavía no llega.');
+      return;
+    }
+    const cam = this.cameras.main;
+    this.openContextMenu(staff, { kind: 'furniture', id: payload.furnitureId }, cam.width / 2, cam.height / 2);
+  };
+
+  private onCmdContextMenuStaff = (payload: { staffId: string }): void => {
+    const staff = payload?.staffId ? this.findStaffById(payload.staffId) : null;
+    if (!staff || !this.ctxLast) return;
+    this.selectNpcStaff(staff.profile.id);
+    this.openContextMenu(staff, this.ctxLast.target, this.ctxLast.x, this.ctxLast.y);
+  };
+
+  private openContextMenu(staff: Bartender, target: CtxTarget, x: number, y: number): void {
+    const built = this.buildContextActions(staff, target);
+    if (!built) return;
+    this.ctxLast = { staffId: staff.profile.id, target, x, y };
+    this.game.events.emit('context-menu-open', {
+      staffId: staff.profile.id,
+      staffName: staff.displayName,
+      staffOptions: this.allStaff()
+        .filter((s) => s.visible)
+        .map((s) => ({ id: s.profile.id, name: s.displayName })),
+      target,
+      title: built.title,
+      subtitle: built.subtitle,
+      actions: built.actions,
+      x,
+      y,
+    } as ContextMenuPayload);
+  }
+
+  private unclaimedWaiting(goal: 'bar' | 'beer_tap'): Patron | null {
+    return this.waitingBarPatrons().find((p) => p.goal === goal) ?? null;
+  }
+
+  private isBreakable(def: FurnitureDef): boolean {
+    const cid = (def.catalogId || def.type || '').toLowerCase();
+    if (NON_BREAKABLE_IDS.has(cid)) return false;
+    const fn = this.shopCatalogById.get(cid)?.function ?? '';
+    if (NON_BREAKABLE_FUNCTIONS.has(fn)) return false;
+    return true;
+  }
+
+  private furnitureFunction(def: FurnitureDef): string {
+    const cid = (def.catalogId || def.type || '').toLowerCase();
+    return this.shopCatalogById.get(cid)?.function ?? (def.type === 'bar' ? 'service_bar' : 'seating');
+  }
+
+  private isBeerTapDef(def: FurnitureDef): boolean {
+    const cid = (def.catalogId || def.type || '').toLowerCase();
+    return cid === BEER_TAP_CATALOG_ID || def.type === 'beer_tap';
+  }
+
+  private isBarDef(def: FurnitureDef): boolean {
+    return def.type === 'bar' || def.catalogId === 'bar';
+  }
+
+  private servedSpotFor(def: FurnitureDef): string {
+    if (this.isBeerTapDef(def)) return `tap:${def.id}`;
+    if (this.isBarDef(def)) return `bar:${def.id}`;
+    return `table:${def.id}`;
+  }
+
+  private productName(pid: string): string {
+    return getDrinkProduct(pid)?.name ?? getSnackProduct(pid)?.name ?? pid;
+  }
+
+  /** Context actions = capabilities of THIS object for THIS staff right now (never a universal list). */
+  private buildContextActions(
+    staff: Bartender,
+    target: CtxTarget
+  ): { title: string; subtitle: string; actions: CtxAction[] } | null {
+    const name = staff.displayName;
+    const actions: CtxAction[] = [];
+    const add = (id: string, label: string, enabled = true, hint?: string) =>
+      actions.push({ id, label, enabled, hint });
+    const wallet = getWallet(staff.profile.id);
+    const consumeOpt = (pid: string, verb: string) => {
+      if (!CONSUMABLE_EFFECTS[pid] || !inventoryCanSell(pid)) return;
+      const price = inventoryGetPrice(pid);
+      const ok = wallet >= price;
+      add(`drink:${pid}`, `${verb} ${this.productName(pid).toLowerCase()} ($${price})`, ok, ok ? undefined : 'Sin dinero');
+    };
+
+    if (target.kind === 'floor') {
+      const z = getFloorZoneById(target.id);
+      if (!z) return null;
+      if (z.dryDirt >= 8) add(`sweep:${z.id}`, 'Barrer');
+      if (z.grime >= 8) add(`mop:${z.id}`, 'Trapear');
+      if (!actions.length) add('noop', 'Barrer', false, 'El piso está limpio');
+      const flies = this.flyZones.get(z.id)?.active;
+      const band = floorDirtBand(z);
+      const bandEs: Record<string, string> = { clean: 'Limpio', slight: 'Algo sucio', dirty: 'Sucio', very_dirty: 'Muy sucio' };
+      return {
+        title: `${name} → Piso`,
+        subtitle: `${bandEs[band] ?? band}${flies ? ' · Hay moscas' : ''}`,
+        actions,
+      };
+    }
+
+    const def = this.getFurnitureDef(target.id);
+    if (!def) return null;
+    const st = this.statsOf(def);
+    const cond = conditionFromDurability(st.durability, st.maxDurability);
+    const functional = cond !== 'Inservible' && st.durability > 0;
+    const furnName = this.furnitureDisplayName(def);
+    const isTap = this.isBeerTapDef(def);
+    const isBar = this.isBarDef(def);
+    const isTable = this.isTableFurniture(def);
+
+    if (isTap) {
+      if (!functional) add('serve_beer', 'Servir cerveza', false, 'Está averiado');
+      else if (!inventoryCanSell(BEER_TAP_DRINK_ID)) add('serve_beer', 'Servir cerveza', false, 'Sin cerveza');
+      else {
+        const waiting = this.unclaimedWaiting('beer_tap');
+        const room = canAddServed(`tap:${def.id}`);
+        add(
+          'serve_beer',
+          waiting ? `Servir cerveza a ${waiting.displayName}` : 'Servir cerveza',
+          !!waiting || room,
+          waiting || room ? undefined : 'Ya hay tarros servidos'
+        );
+        consumeOpt('cerveza', 'Beber');
+      }
+    }
+    if (isBar) {
+      if (!functional) add('serve_patron', 'Atender', false, 'Está averiada');
+      else {
+        const w = this.unclaimedWaiting('bar');
+        if (w) add('serve_patron', `Atender a ${w.displayName}`);
+        if (!this.activeBeerTap() && inventoryCanSell(BEER_TAP_DRINK_ID)) {
+          const room = canAddServed(`bar:${def.id}`);
+          add('serve_beer_bar', 'Servir cerveza', room, room ? undefined : 'Ya hay tarros servidos');
+        }
+        for (const pid of BAR_STAFF_DRINKS) consumeOpt(pid, 'Beber');
+      }
+    }
+    if (isTable && functional && this.hasFunctionalTable()) {
+      const stock = inventoryCanSell('botanas');
+      const room = canAddServed(`table:${def.id}`);
+      add(
+        'prep_snack',
+        'Preparar botanas',
+        stock && room,
+        !stock ? 'Sin botanas' : !room ? 'Ya hay platos servidos' : undefined
+      );
+      consumeOpt('botanas', 'Comer');
+    }
+    const now = this.time.now;
+    const old = servedItemsAt(this.servedSpotFor(def)).filter((i) => servedStateOf(i, now) !== 'fresh');
+    if (old.length) {
+      const what = old.every((i) => i.productId === 'botanas') ? 'platos' : 'tarros';
+      add('collect', `Retirar ${old.length} ${what} viejos`);
+    }
+    const needsClean = st.cleanliness < st.maxCleanliness * 0.95;
+    add('clean', 'Limpiar', needsClean, needsClean ? undefined : 'Ya está limpio');
+    add('inspect', 'Revisar');
+    if (this.isBreakable(def) && cond !== 'Óptimo') {
+      const job = this.repairJobFor(def.id);
+      add('repair', 'Reparar', !job, job ? this.repairStageLabel(job) : undefined);
+    }
+    const job = this.repairJobFor(def.id);
+    return {
+      title: `${name} → ${furnName}`,
+      subtitle: `${cond} · Limpieza ${Math.round((st.cleanliness / Math.max(1, st.maxCleanliness)) * 100)}%${
+        job ? ` · ${this.repairStageLabel(job)}` : ''
+      }`,
+      actions,
+    };
+  }
+
+  // ─── Orders: priority #1, compliance exception, execution ───────────────────────────────
+
+  private onCmdStaffAction = (payload: { staffId: string; target: CtxTarget; actionId: string }): void => {
+    if (!payload) return;
+    const staff = this.findStaffById(payload.staffId);
+    if (!staff) return;
+    this.issuePlayerOrder(staff, payload.target, payload.actionId);
+  };
+
+  private logOrder(staff: Bartender, action: string, outcome: string): void {
+    this.orderLog.push({ at: Math.round(this.time.now), staff: staff.profile.id, action, outcome });
+    if (this.orderLog.length > 40) this.orderLog.shift();
+  }
+
+  /** Player order: always obeyed at normal levels; only an exhausted / fed-up / very drunk staff may not. */
+  issuePlayerOrder(staff: Bartender, target: CtxTarget, actionId: string): string {
+    if (this.buildMode || !this.staffPresent || !staff.visible || actionId === 'noop') return 'ignored';
+    const outcome = rollCompliance(staff.profile.id, staff.profile.energy, staff.profile.mood);
+    const drunk = intoxOf(staff.profile.id) >= ORDER_COMPLIANCE.extremeIntox;
+    if (outcome === 'refuse') {
+      this.staffSay(staff, this.pick(drunk ? DRUNK_REFUSE_LINES : REFUSE_LINES));
+      this.logOrder(staff, actionId, 'refuse');
+      // At her limit she may go rest on her own (AI rest — not an order).
+      if (
+        Math.random() < ORDER_COMPLIANCE.restAfterRefuse &&
+        staff.state !== 'resting' &&
+        staff.aiJob !== 'rest' &&
+        staff.aiJob !== 'serve'
+      ) {
+        this.interruptStaff(staff);
+        this.beginStaffRest(staff, false);
+      }
+      return 'refuse';
+    }
+    if (outcome === 'delay') {
+      this.staffSay(staff, this.pick(DELAY_LINES));
+      this.logOrder(staff, actionId, 'delay');
+      const tok = staff.jobToken;
+      this.time.delayedCall(this.randBetween(ORDER_COMPLIANCE.delayMs), () => {
+        if (staff.jobToken !== tok || !staff.active) return;
+        this.executeOrder(staff, target, actionId, false);
+      });
+      return 'delay';
+    }
+    const ok = this.executeOrder(staff, target, actionId, outcome === 'abandon');
+    this.logOrder(staff, actionId, ok ? outcome : 'failed');
+    return ok ? outcome : 'failed';
+  }
+
+  private executeOrder(staff: Bartender, target: CtxTarget, actionId: string, abandon: boolean): boolean {
+    const def = target.kind === 'furniture' ? this.getFurnitureDef(target.id) : null;
+    const [verb, arg] = actionId.split(':');
+    // Validate BEFORE interrupting so an impossible order doesn't wreck her current job.
+    if (target.kind === 'furniture' && !def) return false;
+    // Someone else already on it: a player order outranks her autonomous job (she goes back to
+    // her own AI); only another *player-ordered* job blocks it.
+    const takeOver = (claim: Map<string, string>, key: string, busyMsg: string): boolean => {
+      const otherId = claim.get(key);
+      if (!otherId || otherId === staff.profile.id) return true;
+      const other = this.findStaffById(otherId);
+      if (other && other.playerCommanded) {
+        this.uiToast(`${other.displayName} ${busyMsg}`);
+        return false;
+      }
+      if (other) this.interruptStaff(other);
+      claim.delete(key);
+      return true;
+    };
+    if (verb === 'clean' && def && !takeOver(this.cleanClaim, def.id, 'ya lo está limpiando.')) return false;
+    if ((verb === 'sweep' || verb === 'mop') && arg && !takeOver(this.floorClaim, arg, 'ya está en esa zona.')) return false;
+    this.interruptStaff(staff);
+    const tok = staff.jobToken;
+    let started = false;
+    switch (verb) {
+      case 'serve_patron': {
+        const p = this.unclaimedWaiting('bar');
+        started = !!p && this.beginAiServe(staff, p);
+        if (!p) this.uiToast('No hay nadie esperando en la barra.');
+        break;
+      }
+      case 'serve_beer': {
+        const p = this.unclaimedWaiting('beer_tap');
+        if (p) started = this.beginAiServe(staff, p);
+        else if (def) started = this.beginPourMug(staff, 'tap', def);
+        break;
+      }
+      case 'serve_beer_bar':
+        if (def) started = this.beginPourMug(staff, 'bar', def);
+        break;
+      case 'clean':
+        if (def) {
+          this.beginAiCleanFurniture(staff, def);
+          started = staff.aiJob === 'clean';
+        }
+        break;
+      case 'sweep':
+      case 'mop': {
+        const z = arg ? getFloorZoneById(arg) : null;
+        if (z) {
+          if (verb === 'sweep') this.beginAiSweep(staff, z);
+          else this.beginAiMop(staff, z);
+          started = staff.aiJob === verb;
+        }
+        break;
+      }
+      case 'inspect':
+        if (def) started = this.beginStaffInspect(staff, def);
+        break;
+      case 'repair':
+        if (def) started = this.beginRepairRequest(staff, def);
+        break;
+      case 'drink':
+        if (arg) started = this.beginStaffConsume(staff, arg, true, def);
+        break;
+      case 'prep_snack':
+        if (def) started = this.beginPrepSnack(staff, def);
+        break;
+      case 'collect':
+        if (def) started = this.beginCollectServed(staff, def);
+        break;
+      default:
+        break;
+    }
+    if (!started) {
+      staff.aiNextThinkAt = this.time.now + 600;
+      this.emitStaffRoster();
+      return false;
+    }
+    // Player order outranks AI: tickStaffAi / tryAssignServeAi skip playerCommanded staff.
+    staff.playerCommanded = true;
+    this.emitStaffRoster();
+    this.game.events.emit('stats-updated', this.getHudState());
+    if (abandon) {
+      this.time.delayedCall(Phaser.Math.Between(1800, 4200), () => {
+        if (staff.jobToken !== tok || staff.aiJob === 'none') return;
+        this.interruptStaff(staff);
+        this.staffSay(staff, this.pick(ABANDON_LINES));
+        this.logOrder(staff, actionId, 'abandoned');
+        if (Math.random() < ORDER_COMPLIANCE.restAfterRefuse) this.beginStaffRest(staff, false);
+        else staff.aiNextThinkAt = this.time.now + 2500;
+        this.emitStaffRoster();
+      });
+    }
+    return true;
+  }
+
+  /** Generic: walk next to a piece, short action animation, then `onDone` (guarded by jobToken). */
+  private beginStaffFurnitureTask(
+    staff: Bartender,
+    def: FurnitureDef,
+    label: string,
+    ms: number,
+    onDone: () => void
+  ): boolean {
+    const adj = this.findAdjacentWalkable(def, staff);
+    if (!adj) {
+      this.staffSay(staff, 'No puedo llegar ahí.');
+      return false;
+    }
+    const tok = staff.jobToken;
+    staff.aiJob = 'player';
+    staff.playerCommanded = true;
+    staff.state = 'busy';
+    staff.setServeLabel(label);
+    this.claimStaffTile(staff, adj);
+    const act = () => {
+      if (staff.jobToken !== tok) return;
+      if (staff === this.bartender) this.syncBartenderBarDepth();
+      staff.stopBob();
+      staff.faceToward({ col: def.tile[0], row: def.tile[1] });
+      staff.setServeLabel(label);
+      this.playStaffActionTween(
+        staff,
+        () => {
+          this.releaseStaffTileClaims(staff);
+          staff.clearAiJob();
+          staff.state = 'idle';
+          staff.startBob();
+          staff.aiNextThinkAt = this.time.now + 1200;
+          onDone();
+          this.game.events.emit('stats-updated', this.getHudState());
+          this.emitStaffRoster();
+        },
+        ms
+      );
+    };
+    if (!staff.walkTo(adj, act)) act();
+    return true;
+  }
+
+  private beginStaffInspect(staff: Bartender, def: FurnitureDef): boolean {
+    return this.beginStaffFurnitureTask(staff, def, 'Revisando', 1400, () => {
+      const st = this.statsOf(def);
+      const cond = conditionFromDurability(st.durability, st.maxDurability);
+      const pct = Math.round((st.durability / Math.max(1, st.maxDurability)) * 100);
+      const clean = st.cleanliness < DIRT_VISUAL_THRESHOLD ? ' Necesita limpieza.' : '';
+      const repaired = def.repairCount ? ` Ya lo han reparado ${def.repairCount} ${def.repairCount === 1 ? 'vez' : 'veces'}.` : '';
+      const fails = cond === 'Se rompió' || cond === 'Inservible' ? ' Así ya no sirve bien.' : '';
+      this.staffSay(staff, `${this.furnitureDisplayName(def)}: ${cond.toLowerCase()} (${pct}%).${fails}${clean}${repaired}`);
+      this.openFurnitureInspectKeepNpc(def.id);
+    });
+  }
+
+  /** Show the furniture panel without dropping the staff selection (inspection result). */
+  private openFurnitureInspectKeepNpc(id: string): void {
+    const def = this.getFurnitureDef(id);
+    if (!def) return;
+    this.inspectedFurnitureId = id;
+    this.game.events.emit('select-furniture', this.buildFurnitureInspectPayload(def));
+  }
+
+  // ─── Staff consumption (paid from personal money, real inventory) ──────────────────────
+
+  private consumeSpotFor(pid: string): FurnitureDef | null {
+    if (pid === 'botanas') {
+      const table = this.scenario.furniture.find((f) => this.isTableFurniture(f) && this.statsOf(f).durability > 0);
+      return table ?? this.activeBar();
+    }
+    if (pid === BEER_TAP_DRINK_ID && this.activeBeerTap()) return this.activeBeerTap();
+    return this.activeBar() ?? (pid === BEER_TAP_DRINK_ID ? this.activeBeerTap() : null);
+  }
+
+  private beginStaffConsume(staff: Bartender, pid: string, asPlayer: boolean, at?: FurnitureDef | null): boolean {
+    const fx = CONSUMABLE_EFFECTS[pid];
+    if (!fx) return false;
+    const price = inventoryGetPrice(pid);
+    if (!inventoryCanSell(pid)) {
+      if (asPlayer) this.staffSay(staff, `Ya no hay ${this.productName(pid).toLowerCase()}.`);
+      return false;
+    }
+    if (getWallet(staff.profile.id) < price) {
+      if (asPlayer) this.staffSay(staff, 'No me alcanza…');
+      return false;
+    }
+    const spot = at ?? this.consumeSpotFor(pid);
+    if (!spot) return false;
+    const label = fx.verb === 'comió' ? 'Comiendo' : 'Tomando algo';
+    const ok = this.beginStaffFurnitureTask(staff, spot, label, 1500, () => {
+      this.finishStaffConsume(staff, pid, asPlayer);
+    });
+    if (ok && !asPlayer) staff.playerCommanded = false;
+    return ok;
+  }
+
+  private finishStaffConsume(staff: Bartender, pid: string, asPlayer: boolean): void {
+    const fx = CONSUMABLE_EFFECTS[pid];
+    if (!fx) return;
+    const price = inventoryGetPrice(pid);
+    if (!inventoryCanSell(pid)) {
+      this.staffSay(staff, `Se acabó ${this.productName(pid).toLowerCase()}.`);
+      return;
+    }
+    if (!debitWallet(staff.profile.id, price)) {
+      this.staffSay(staff, 'No me alcanza…');
+      return;
+    }
+    if (!inventoryRecordStaffUse(pid, price)) {
+      creditWallet(staff.profile.id, price);
+      return;
+    }
+    // The club is paid like any customer sale (internal consumption).
+    this.money += price;
+    const before = intoxLabel(staff.profile.id);
+    applyConsumption(staff.profile.id, staff.profile, pid, this.time.now);
+    if (!asPlayer) noteAutoConsumption(staff.profile.id, pid);
+    const msg = `${staff.displayName} ${fx.verb} ${fx.phrase}.`;
+    this.showStatusFloat(msg, { x: staff.x, y: staff.y });
+    this.uiToast(msg);
+    const after = intoxLabel(staff.profile.id);
+    if (after && after !== before) {
+      this.uiToast(after === 'Borracha' ? `${staff.displayName} está borracha 🥴` : `${staff.displayName} está achispada 🍻`);
+    }
+    this.persistLayout();
+    this.game.events.emit('inventory-updated');
+  }
+
+  /** Idle priority (#4): she may buy something on her own (personality + needs + money). */
+  private tryAutoConsume(staff: Bartender): boolean {
+    if (this.phase !== 'open' && this.phase !== 'prep') return false;
+    const shiftMin = this.staffShiftStartAt ? (this.time.now - this.staffShiftStartAt) / 1000 : 0;
+    const pid = pickAutoConsumption(
+      staff.profile.id,
+      staff.profile,
+      this.time.now,
+      shiftMin,
+      (id) => inventoryCanSell(id) && !!this.consumeSpotFor(id),
+      (id) => inventoryGetPrice(id)
+    );
+    if (!pid) return false;
+    return this.beginStaffConsume(staff, pid, false);
+  }
+
+  // ─── Served mugs / plates (pre-poured, spoil over time) ────────────────────────────────
+
+  /** Walk to the tap/bar staff tile (waiting for the pour spot like serving does), then `onReady`. */
+  private walkToServiceSpot(
+    staff: Bartender,
+    kind: 'tap' | 'bar',
+    spot: { col: number; row: number },
+    tok: number,
+    onReady: () => void
+  ): void {
+    const claim = (): boolean => {
+      if (kind === 'tap') {
+        if (this.tapSpotHolderId && this.tapSpotHolderId !== staff.profile.id) return false;
+        this.tapSpotHolderId = staff.profile.id;
+        this.claimStaffTile(staff, spot);
+        return true;
+      }
+      return this.claimBarSpot(staff, spot);
+    };
+    const go = () => {
+      if (staff.jobToken !== tok) return;
+      if (!staff.walkTo(spot, onReady)) onReady();
+    };
+    if (claim()) {
+      go();
+      return;
+    }
+    const wait = this.findStaffWaitNearBar(staff, spot);
+    this.claimStaffTile(staff, wait);
+    const poll = () => {
+      if (staff.jobToken !== tok) return;
+      if (!claim()) {
+        this.time.delayedCall(300, poll);
+        return;
+      }
+      go();
+    };
+    if (!staff.walkTo(wait, poll)) this.time.delayedCall(300, poll);
+  }
+
+  private beginPourMug(staff: Bartender, kind: 'tap' | 'bar', def: FurnitureDef): boolean {
+    const spots = kind === 'tap' ? this.beerTapSpots() : this.barSpots();
+    if (!spots) return false;
+    const spotKey = `${kind}:${def.id}`;
+    if (!canAddServed(spotKey)) {
+      this.staffSay(staff, 'Ya hay varios tarros servidos.');
+      return false;
+    }
+    if (!inventoryCanSell(BEER_TAP_DRINK_ID)) {
+      this.staffSay(staff, 'Se acabó la cerveza.');
+      return false;
+    }
+    const tok = staff.jobToken;
+    staff.aiJob = 'serve';
+    staff.playerCommanded = true;
+    staff.state = 'busy';
+    staff.servingDrinkId = BEER_TAP_DRINK_ID;
+    staff.setServeLabel('Sirviendo cerveza');
+    const release = () => {
+      this.releaseStaffTileClaims(staff);
+      staff.clearAiJob();
+      staff.state = 'idle';
+      staff.startBob();
+      staff.aiNextThinkAt = this.time.now + 800;
+      if (staff === this.bartender) this.syncBartenderBarDepth();
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.emitStaffRoster();
+    };
+    const pour = () => {
+      if (staff.jobToken !== tok) return;
+      if (staff === this.bartender) this.syncBartenderBarDepth();
+      staff.stopBob();
+      staff.faceToward({ col: staff.grid.col, row: staff.grid.row - 1 });
+      if (!staff.playServeBeerAnim()) staff.startBob();
+      const ms = (this.resolveServeDrink(BEER_TAP_DRINK_ID)?.serveTimeMs ?? 2000) * slowServeFactor(staff.profile.id);
+      this.time.delayedCall(ms, () => {
+        if (staff.jobToken !== tok) return;
+        if (!inventoryWithdraw(BEER_TAP_DRINK_ID)) {
+          this.staffSay(staff, 'Se acabó la cerveza.');
+          release();
+          return;
+        }
+        staff.profile.energy = Math.max(0, staff.profile.energy - 1);
+        const item = addServedItem(
+          BEER_TAP_DRINK_ID,
+          spotKey,
+          spots.interact ?? spots.staffSpot,
+          staff.profile.id,
+          this.time.now
+        );
+        this.refreshServedVisuals();
+        this.game.events.emit('inventory-updated');
+        // Someone already waiting for beer here takes it at once.
+        const waiter = this.waitingBarPatrons().find((p) =>
+          kind === 'tap' ? p.goal === 'beer_tap' : p.goal === 'bar' && this.patronWantsBeer(p)
+        );
+        if (waiter) {
+          const claimed = claimServed(BEER_TAP_DRINK_ID, [spotKey], this.time.now);
+          if (claimed) this.patronTakesServed(waiter, claimed.item, claimed.state);
+        } else {
+          this.showStatusFloat(`${staff.displayName} sirvió una cerveza`, { x: staff.x, y: staff.y });
+        }
+        void item;
+        release();
+      });
+    };
+    this.walkToServiceSpot(staff, kind, spots.staffSpot, tok, pour);
+    this.emitStaffRoster();
+    return true;
+  }
+
+  /** On arrival at tap/bar: a waiting (non-spoiled) mug is taken directly → faster service. */
+  private tryPatronTakeServedBeer(patron: Patron, at: 'tap' | 'bar'): boolean {
+    if (at === 'bar' && !this.patronWantsBeer(patron)) return false;
+    const def = at === 'tap' ? this.activeBeerTap() : this.activeBar();
+    if (!def) return false;
+    const claimed = claimServed(BEER_TAP_DRINK_ID, [`${at}:${def.id}`], this.time.now);
+    if (!claimed) return false;
+    this.patronTakesServed(patron, claimed.item, claimed.state);
+    return true;
+  }
+
+  /** Customer buys a pre-poured beer: sale + existing payout/tip/sat paths; freshness matters a bit. */
+  private patronTakesServed(patron: Patron, item: ServedItem, state: 'fresh' | 'stale' | 'spoiled'): void {
+    removeServed(item.id);
+    this.refreshServedVisuals();
+    const drink = this.resolveServeDrink(item.productId);
+    if (!drink) return;
+    drink.price = inventoryGetPrice(item.productId);
+    inventoryRecordPrepoured(item.productId);
+    this.serveClaim.delete(patron.profile.id);
+    patron.wantedDrinkId = item.productId;
+    patron.servedDrinkId = item.productId;
+    patron.wasOutOfStock = false;
+    patron.servedAtBeerTap = item.spot.startsWith('tap:');
+    const prof = spoilProfileFor(item.productId);
+    if (prof) {
+      const delta = state === 'fresh' ? prof.freshSat : prof.staleSat;
+      applyPerceivedExperience(patron, `prepoured:${patron.profile.id}`, delta, 'availSens', state === 'fresh' ? 'Cerveza ya servida' : 'Cerveza tibia');
+    }
+    this.patronThink(patron, state === 'fresh' ? 'ready_beer' : 'stale_beer');
+    const pourer = this.findStaffById(item.pouredBy);
+    const payout = this.computeServePayout(patron, drink, null, pourer?.profile.mood, pourer?.profile.id);
+    this.money += payout.earned;
+    this.nightEarned += payout.earned;
+    this.servedCount++;
+    if (payout.tipAmount > 0 && pourer) {
+      recordTip(pourer.profile.id, payout.tipAmount);
+      creditWallet(pourer.profile.id, payout.tipAmount);
+      noteTip(pourer.profile.id, payout.tipAmount);
+    }
+    if (patron.servedAtBeerTap && patron.beerServicePref === 'tap') this.patronThink(patron, 'tap_great');
+    patron.showBubble(payout.tipped ? `¡Propina! +$${payout.earned}` : `+$${payout.earned}`);
+    patron.served = true;
+    patron.waiting = false;
+    patron.waitSince = 0;
+    this.releasePatronSlot(patron);
+    this.releaseTile(patron.grid);
+    patron.refreshStatusLabel();
+    this.persistLayout();
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.game.events.emit('inventory-updated');
+    this.time.delayedCall(700, () => this.afterBarService(patron));
+  }
+
+  private beginPrepSnack(staff: Bartender, def: FurnitureDef): boolean {
+    const spotKey = `table:${def.id}`;
+    if (!inventoryCanSell('botanas') || !canAddServed(spotKey)) return false;
+    return this.beginStaffFurnitureTask(staff, def, 'Preparando botanas', 1600, () => {
+      if (!inventoryWithdraw('botanas')) {
+        this.staffSay(staff, 'Se acabaron las botanas.');
+        return;
+      }
+      addServedItem('botanas', spotKey, { col: def.tile[0], row: def.tile[1] }, staff.profile.id, this.time.now);
+      this.refreshServedVisuals();
+      this.game.events.emit('inventory-updated');
+      this.showStatusFloat(`${staff.displayName} preparó botanas`, { x: staff.x, y: staff.y });
+      // A customer already sitting at this table digs in.
+      const sitter = this.patrons.find((p) => p.active && p.seated && p.seatedFurnitureId === def.id && !p.ateSnack);
+      if (sitter) {
+        const claimed = claimServed('botanas', [spotKey], this.time.now);
+        if (claimed) this.patronEatsServedSnack(sitter, claimed.item, claimed.state);
+      }
+    });
+  }
+
+  private patronEatsServedSnack(patron: Patron, item: ServedItem, state: 'fresh' | 'stale' | 'spoiled'): void {
+    removeServed(item.id);
+    this.refreshServedVisuals();
+    const price = inventoryGetPrice('botanas');
+    inventoryRecordPrepoured('botanas');
+    this.money += price;
+    this.nightEarned += price;
+    patron.ateSnack = true;
+    applyPerceivedExperience(patron, `snack:botanas:${patron.profile.id}`, SNACK_EXPERIENCE.satDelta, 'comfortSens', 'Botanas en la mesa');
+    const prof = spoilProfileFor('botanas');
+    if (prof && state === 'stale') {
+      applyPerceivedExperience(patron, `prepared_snack:${patron.profile.id}`, prof.staleSat, 'availSens', 'Botanas aguadas');
+      this.patronThink(patron, 'stale_snack');
+    } else {
+      this.patronThink(patron, 'snack_found');
+    }
+    patron.showBubble(`Botanas +$${price}`);
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.game.events.emit('inventory-updated');
+  }
+
+  private beginCollectServed(staff: Bartender, def: FurnitureDef): boolean {
+    const spotKey = this.servedSpotFor(def);
+    return this.beginStaffFurnitureTask(staff, def, 'Recogiendo', 1200, () => {
+      const now = this.time.now;
+      const old = servedItemsAt(spotKey).filter((i) => servedStateOf(i, now) !== 'fresh');
+      for (const it of old) {
+        removeServed(it.id);
+        inventoryRecordWaste(it.productId);
+      }
+      this.refreshServedVisuals();
+      if (old.length) this.showStatusFloat(`Retiró ${old.length} (merma)`, { x: staff.x, y: staff.y });
+    });
+  }
+
+  /** Spoilage: fresh → stale → spoiled (refused) → dirt + auto-collected as merma. */
+  private tickServedItems(dt: number): void {
+    if (!listServed().length) return;
+    this.servedTickAccum += dt;
+    if (this.servedTickAccum < 500) return;
+    const dtSec = this.servedTickAccum / 1000;
+    this.servedTickAccum = 0;
+    const now = this.time.now;
+    const { newlySpoiled, collect } = tickServed(now);
+    for (const it of newlySpoiled) {
+      const prof = spoilProfileFor(it.productId);
+      if (prof) addFloorDirtAt(it.col, it.row, prof.spoilDry, prof.spoilGrime);
+    }
+    for (const it of listServed()) {
+      if (servedStateOf(it, now) !== 'spoiled') continue;
+      const prof = spoilProfileFor(it.productId);
+      if (prof) addFloorDirtAt(it.col, it.row, 0, prof.spoiledGrimePerSec * dtSec);
+    }
+    for (const it of collect) {
+      removeServed(it.id);
+      inventoryRecordWaste(it.productId);
+      const at = this.servedItemWorldPos(it, 0);
+      this.showStatusFloat(it.productId === 'botanas' ? 'Botanas echadas a perder (merma)' : 'Cerveza echada a perder (merma)', at ?? undefined);
+    }
+    if (newlySpoiled.length) this.refreshFloorDirtVisuals();
+    this.refreshServedVisuals();
+  }
+
+  private servedItemWorldPos(it: ServedItem, idx: number): { x: number; y: number } | null {
+    const fid = it.spot.split(':')[1];
+    const img = fid ? this.shopImages.get(fid) : undefined;
+    if (!img) {
+      const s = tileToScreen(it.col, it.row, this.iso);
+      return { x: s.x + idx * 9 - 9, y: s.y - 18 };
+    }
+    return { x: img.x - 12 + idx * 10, y: img.y - img.displayHeight * 0.32 };
+  }
+
+  private refreshServedVisuals(): void {
+    const now = this.time.now;
+    const live = new Set<string>();
+    const perSpot = new Map<string, number>();
+    for (const it of listServed()) {
+      live.add(it.id);
+      const idx = perSpot.get(it.spot) ?? 0;
+      perSpot.set(it.spot, idx + 1);
+      const pos = this.servedItemWorldPos(it, idx);
+      if (!pos) continue;
+      let g = this.servedGfx.get(it.id);
+      if (!g) {
+        g = this.add.graphics();
+        this.servedGfx.set(it.id, g);
+      }
+      const state = servedStateOf(it, now);
+      g.clear();
+      g.setPosition(pos.x, pos.y);
+      const fid = it.spot.split(':')[1];
+      const img = fid ? this.shopImages.get(fid) : undefined;
+      g.setDepth((img?.depth ?? depthForCharacter(it.col, it.row)) + 0.6);
+      if (it.productId === 'botanas') {
+        g.fillStyle(0xf4efe6, 1);
+        g.fillEllipse(0, 0, 14, 6);
+        const c = state === 'fresh' ? 0xf0a030 : state === 'stale' ? 0xb08040 : 0x6b6a2a;
+        g.fillStyle(c, 1);
+        g.fillCircle(-3, -1, 2);
+        g.fillCircle(1, -2, 2);
+        g.fillCircle(3, 0, 2);
+      } else {
+        const beer = state === 'fresh' ? 0xf2b632 : state === 'stale' ? 0xc89a3a : 0x7d7a2c;
+        g.fillStyle(0xdfeaf0, 0.55);
+        g.fillRect(-4, -11, 8, 12);
+        g.fillStyle(beer, 1);
+        g.fillRect(-3, state === 'fresh' ? -8 : -6, 6, state === 'fresh' ? 8 : 6);
+        if (state === 'fresh') {
+          g.fillStyle(0xffffff, 1);
+          g.fillRect(-4, -11, 8, 3);
+        }
+        g.lineStyle(1.5, 0xdfeaf0, 0.9);
+        g.strokeRect(4, -8, 3, 5);
+      }
+      if (state === 'spoiled') {
+        g.lineStyle(1, 0x9acd32, 0.9);
+        g.beginPath();
+        g.moveTo(-2, -14);
+        g.lineTo(-1, -18);
+        g.moveTo(2, -14);
+        g.lineTo(3, -19);
+        g.strokePath();
+      }
+    }
+    for (const [id, g] of [...this.servedGfx.entries()]) {
+      if (!live.has(id)) {
+        g.destroy();
+        this.servedGfx.delete(id);
+      }
+    }
+  }
+
+  /** End of night: leftovers are merma (stock already withdrawn, money not recovered). */
+  private wasteAllServed(): void {
+    for (const it of clearServed()) inventoryRecordWaste(it.productId);
+    this.refreshServedVisuals();
+  }
+
+  // ─── Flies: local consequence of dirt left too long ───────────────────────────────────
+
+  private tickFlies(dt: number): void {
+    this.flyTickAccum += dt;
+    if (this.flyTickAccum < 1000) return;
+    this.flyTickAccum = 0;
+    const now = this.time.now;
+    for (const z of getFloorZones()) {
+      const intensity = Math.max(z.dryDirt, z.grime);
+      let s = this.flyZones.get(z.id);
+      if (intensity >= FLIES.minIntensity) {
+        if (!s) {
+          s = { dirtySince: now, active: false, episode: 0 };
+          this.flyZones.set(z.id, s);
+        }
+        if (!s.active && now - s.dirtySince >= FLIES.appearAfterMs) {
+          s.active = true;
+          s.episode += 1;
+          this.spawnFlies(z.id, s);
+        }
+      } else if (s && intensity < FLIES.clearBelow) {
+        this.clearFlies(s);
+        this.flyZones.delete(z.id);
+      } else if (s && !s.active) {
+        s.dirtySince = now; // dipped below the threshold: timer restarts
+      }
+    }
+  }
+
+  private spawnFlies(zoneId: string, s: FlyZoneState): void {
+    const z = getFloorZoneById(zoneId);
+    if (!z) return;
+    const c = floorZoneCenter(z);
+    const base = tileToScreen(c.col, c.row, this.iso);
+    const cont = this.add.container(base.x, base.y - 22).setDepth(depthForCharacter(c.col, c.row) + 2);
+    for (let i = 0; i < 4; i++) {
+      const fly = this.add.circle(0, 0, 1.6, 0x101010, 1);
+      cont.add(fly);
+      const r = 8 + Math.random() * 10;
+      const ph = Math.random() * Math.PI * 2;
+      this.tweens.addCounter({
+        from: 0,
+        to: Math.PI * 2,
+        duration: 900 + Math.random() * 700,
+        repeat: -1,
+        onUpdate: (tw) => {
+          const a = (tw.getValue() ?? 0) + ph;
+          fly.setPosition(Math.cos(a) * r, Math.sin(a * 2) * r * 0.45);
+        },
+      });
+    }
+    s.gfx = cont;
+  }
+
+  private clearFlies(s: FlyZoneState): void {
+    if (s.gfx) {
+      for (const ch of s.gfx.list) this.tweens.killTweensOf(ch);
+      s.gfx.destroy(true);
+      s.gfx = undefined;
+    }
+    s.active = false;
+  }
+
+  private clearAllFlies(): void {
+    for (const s of this.flyZones.values()) this.clearFlies(s);
+    this.flyZones.clear();
+  }
+
+  // ─── Repairs via technicians ──────────────────────────────────────────────────────────
+
+  private repairJobFor(furnitureId: string): RepairJob | null {
+    return this.repairJobs.find((j) => j.furnitureId === furnitureId) ?? null;
+  }
+
+  private repairStageLabel(job: RepairJob): string {
+    switch (job.stage) {
+      case 'en_route':
+        return 'Técnico en camino';
+      case 'walking':
+        return 'Técnico llegando';
+      case 'inspecting':
+        return 'Técnico inspeccionando';
+      case 'verdict':
+        return 'Esperando tu decisión';
+      case 'repairing':
+        return 'Técnico reparando';
+      default:
+        return 'Técnico';
+    }
+  }
+
+  private beginRepairRequest(staff: Bartender, def: FurnitureDef): boolean {
+    if (this.repairJobFor(def.id)) return false;
+    return this.beginStaffFurnitureTask(staff, def, 'Revisando daño', 1300, () => {
+      this.staffSay(staff, 'Esto no lo arreglo yo. Hay que llamar a un técnico.', false);
+      this.emitTechnicianList(staff, def);
+    });
+  }
+
+  private emitTechnicianList(staff: Bartender, def: FurnitureDef): void {
+    this.game.events.emit('repair-tech-list', {
+      furnitureId: def.id,
+      furnitureName: this.furnitureDisplayName(def),
+      staffName: staff.displayName,
+      money: this.money,
+      techs: TECHNICIANS.map((t) => ({
+        id: t.id,
+        name: t.name,
+        stars: t.stars,
+        fee: t.consultFee,
+        canAfford: this.money >= t.consultFee,
+      })),
+    } as TechListPayload);
+  }
+
+  private onCmdHireTechnician = (payload: { furnitureId: string; techId: string }): void => {
+    const def = payload ? this.getFurnitureDef(payload.furnitureId) : null;
+    const tech = TECHNICIANS.find((t) => t.id === payload?.techId);
+    if (!def || !tech) return;
+    if (this.repairJobFor(def.id)) return;
+    if (this.money < tech.consultFee) {
+      this.game.events.emit('repair-hire-failed', { reason: 'Fondos insuficientes.' });
+      return;
+    }
+    const job: RepairJob = {
+      id: `rep_${++this.repairSeq}`,
+      furnitureId: def.id,
+      tech,
+      stage: 'en_route',
+      arriveAt: this.time.now + this.randBetween(REPAIR_TIMING.arrivalMs),
+      stageEndsAt: 0,
+    };
+    this.repairJobs.push(job);
+    this.uiToast(`${tech.name} viene en camino.`);
+    this.reemitFurnitureInspectIf(def.id);
+  };
+
+  private tickRepairs(): void {
+    if (!this.repairJobs.length) return;
+    const now = this.time.now;
+    for (const job of [...this.repairJobs]) {
+      const def = this.getFurnitureDef(job.furnitureId);
+      if (!def) {
+        this.endRepairJob(job, false);
+        continue;
+      }
+      if (job.stage === 'en_route' && now >= job.arriveAt) this.technicianArrives(job, def);
+      else if (job.stage === 'inspecting' && now >= job.stageEndsAt) this.technicianVerdict(job, def);
+      else if (job.stage === 'verdict' && now >= job.stageEndsAt) this.applyRepairDecision(job, false);
+      else if (job.stage === 'repairing' && now >= job.stageEndsAt) this.finishRepair(job, def);
+    }
+  }
+
+  private technicianArrives(job: RepairJob, def: FurnitureDef): void {
+    // Consultation is charged when he arrives and starts — never into negative money.
+    if (this.money < job.tech.consultFee) {
+      this.uiToast(`${job.tech.name} llegó, pero no hay fondos para la consulta. Se fue.`);
+      this.endRepairJob(job, false);
+      return;
+    }
+    this.money -= job.tech.consultFee;
+    this.persistLayout();
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.uiToast(`Llegó ${job.tech.name}. Consulta: −$${job.tech.consultFee}`);
+    const door = { col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] };
+    const sprite = new Patron(this, 'patron', door, this.iso, this.pathfinder, {
+      id: `tech_${job.id}`,
+      name: job.tech.name,
+      sprite: 'patron',
+      preferredDrink: 'agua',
+      tipChance: 0,
+      patience: 999,
+    });
+    sprite.reapplyDisplaySize();
+    sprite.sprite.setTint(0x9fd4ff);
+    sprite.statusLabel?.setText('Técnico').setColor('#9fd4ff').setVisible(true);
+    sprite.sprite.disableInteractive();
+    job.sprite = sprite;
+    job.stage = 'walking';
+    const dest = this.visitorTileNear(def) ?? door;
+    const startInspect = () => {
+      if (!this.repairJobs.includes(job)) return;
+      sprite.faceToward({ col: def.tile[0], row: def.tile[1] });
+      sprite.statusLabel?.setText('Inspeccionando…').setVisible(true);
+      job.stage = 'inspecting';
+      job.stageEndsAt = this.time.now + this.randBetween(REPAIR_TIMING.inspectMs);
+      this.reemitFurnitureInspectIf(def.id);
+    };
+    if (!sprite.walkTo(dest, startInspect)) startInspect();
+    this.reemitFurnitureInspectIf(def.id);
+  }
+
+  private visitorTileNear(def: FurnitureDef): { col: number; row: number } | null {
+    const cands = [...this.frontTiles(def)];
+    const fw = Math.max(1, def.footprint[0]);
+    const fh = Math.max(1, def.footprint[1]);
+    for (let c = def.tile[0] - 1; c <= def.tile[0] + fw; c++) {
+      for (let r = def.tile[1] - 1; r <= def.tile[1] + fh; r++) cands.push({ col: c, row: r });
+    }
+    for (const t of cands) {
+      if (!this.pathfinder.isWalkable(t.col, t.row)) continue;
+      if (this.allStaff().some((s) => s.grid.col === t.col && s.grid.row === t.row)) continue;
+      if (this.patrons.some((p) => p.active && p.grid.col === t.col && p.grid.row === t.row)) continue;
+      return t;
+    }
+    return null;
+  }
+
+  private technicianVerdict(job: RepairJob, def: FurnitureDef): void {
+    const st = this.statsOf(def);
+    const damage = 1 - st.durability / Math.max(1, st.maxDurability);
+    const price = this.furniturePrice(def);
+    const raw =
+      price * (REPAIR_COST.base + REPAIR_COST.span * damage) * this.randBetween(REPAIR_COST.jitter) * job.tech.quoteMult;
+    job.quote = Math.max(REPAIR_COST.min, Math.round(raw / 5) * 5);
+    const fn = this.furnitureFunction(def);
+    const lines = DIAGNOSES[fn] ?? DIAGNOSES.default;
+    job.diagnosis = this.pick(lines).replace('{name}', this.furnitureDisplayName(def).toLowerCase());
+    // Hidden quality for this job (reputation shifts the odds, never guarantees).
+    const mean = REPAIR_QUALITY.base + REPAIR_QUALITY.perStar * job.tech.stars;
+    const gauss = (Math.random() + Math.random() + Math.random() - 1.5) / 0.5; // ~N(0,1)-ish
+    job.quality = Phaser.Math.Clamp(mean + gauss * REPAIR_QUALITY.sd, 0.03, 0.97);
+    job.stage = 'verdict';
+    job.stageEndsAt = this.time.now + REPAIR_TIMING.verdictTimeoutMs;
+    job.sprite?.statusLabel?.setText('Esperando decisión').setVisible(true);
+    this.game.events.emit('repair-verdict', {
+      jobId: job.id,
+      techName: job.tech.name,
+      furnitureName: this.furnitureDisplayName(def),
+      diagnosis: job.diagnosis,
+      cost: job.quote,
+      newPrice: price,
+      money: this.money,
+      canAfford: this.money >= job.quote,
+    } as RepairVerdictPayload);
+    this.reemitFurnitureInspectIf(def.id);
+  }
+
+  private onCmdRepairDecision = (payload: { jobId: string; repair: boolean }): void => {
+    const job = this.repairJobs.find((j) => j.id === payload?.jobId);
+    if (!job || job.stage !== 'verdict') return;
+    this.applyRepairDecision(job, !!payload.repair);
+  };
+
+  private applyRepairDecision(job: RepairJob, repair: boolean): void {
+    const def = this.getFurnitureDef(job.furnitureId);
+    if (!def) {
+      this.endRepairJob(job, false);
+      return;
+    }
+    if (repair) {
+      const cost = job.quote ?? 0;
+      if (this.money < cost) {
+        this.game.events.emit('repair-hire-failed', { reason: 'Fondos insuficientes.' });
+        this.uiToast('Fondos insuficientes.');
+        this.endRepairJob(job, true);
+        return;
+      }
+      this.money -= cost;
+      this.persistLayout();
+      this.game.events.emit('stats-updated', this.getHudState());
+      job.stage = 'repairing';
+      job.stageEndsAt = this.time.now + this.randBetween(REPAIR_TIMING.repairWorkMs);
+      job.sprite?.statusLabel?.setText('Reparando…').setVisible(true);
+      this.uiToast(`${job.tech.name} está reparando (−$${cost}).`);
+      this.reemitFurnitureInspectIf(def.id);
+      return;
+    }
+    this.uiToast(`${this.furnitureDisplayName(def)}: sin reparar.`);
+    this.endRepairJob(job, true);
+  }
+
+  private finishRepair(job: RepairJob, def: FurnitureDef): void {
+    const q = job.quality ?? 0.5;
+    const st = this.statsOf(def);
+    const shrink = REPAIR_QUALITY.maxShrinkMin + REPAIR_QUALITY.maxShrinkBadExtra * (1 - q);
+    const newMax = Math.max(REPAIR_QUALITY.minMaxDurability, st.maxDurability * (1 - shrink));
+    st.maxDurability = newMax;
+    st.durability = Math.min(newMax, newMax * (REPAIR_QUALITY.restoreMin + REPAIR_QUALITY.restoreSpan * q));
+    this.writeStatsToDef(def, st);
+    def.repairCount = (def.repairCount ?? 0) + 1;
+    def.fragility = 1 + (1 - q) * REPAIR_QUALITY.fragilityPerBad;
+    def.failChance = (1 - q) * (1 - q) * REPAIR_QUALITY.suddenFailPerMin;
+    def.lastRepairQuality = Math.round(q * 100) / 100;
+    this.uiToast(`${job.tech.name} terminó: ${this.furnitureDisplayName(def)} vuelve a funcionar.`);
+    this.persistLayout();
+    this.endRepairJob(job, true);
+    this.game.events.emit('stats-updated', this.getHudState());
+  }
+
+  private endRepairJob(job: RepairJob, walkOut: boolean): void {
+    this.repairJobs = this.repairJobs.filter((j) => j !== job);
+    const sprite = job.sprite;
+    job.sprite = undefined;
+    if (sprite && sprite.active) {
+      if (walkOut) {
+        sprite.statusLabel?.setText('Técnico').setVisible(true);
+        const exit = { col: this.scenario.exitTile[0], row: this.scenario.exitTile[1] };
+        if (!sprite.walkTo(exit, () => sprite.destroy())) sprite.destroy();
+      } else sprite.destroy();
+    }
+    this.reemitFurnitureInspectIf(job.furnitureId);
+  }
+
+  private cancelAllRepairJobs(): void {
+    for (const j of [...this.repairJobs]) this.endRepairJob(j, false);
+    this.game.events.emit('repair-ui-close');
+  }
+
+  /** Sloppy repairs wear faster and may fail suddenly (even the same day). */
+  private applyRepairAftereffects(def: FurnitureDef, durBefore: number, dtSec: number): void {
+    const frag = def.fragility ?? 1;
+    const st = this.statsOf(def);
+    if (frag > 1 && st.durability < durBefore) {
+      st.durability = Math.max(0, st.durability - (durBefore - st.durability) * (frag - 1));
+      this.writeStatsToDef(def, st);
+    }
+    const fc = def.failChance ?? 0;
+    if (fc > 0 && st.durability > st.maxDurability * 0.1 && Math.random() < (fc / 60) * dtSec) {
+      st.durability = st.maxDurability * 0.05;
+      this.writeStatsToDef(def, st);
+      const img = this.shopImages.get(def.id);
+      this.showStatusFloat(`¡${this.furnitureDisplayName(def)} volvió a fallar!`, img ?? undefined);
+      this.uiToast(`¡${this.furnitureDisplayName(def)} volvió a fallar!`);
+      this.reemitFurnitureInspectIf(def.id);
+    }
+  }
+
+  // ─── Customer thoughts (perceived events only; anti-spam in systems/Thoughts) ─────────
+
+  private patronThink(patron: Patron, key: string, vars?: Record<string, string>): void {
+    if (!patron.active) return;
+    const onScreen = this.patrons.filter((p) => p.active && p.thoughtVisible).length;
+    const selected = this.selectedNpcId === patron.profile.id;
+    const d = decideThought(patron, key, this.time.now, { onScreen, selected, vars });
+    if (!d) return;
+    if (d.show) patron.showThought(d.text, d.emoji, THOUGHT_RULES.showMs, d.tone);
+    if (selected) this.game.events.emit('stats-updated', this.getHudState());
+  }
+
+  /** Extra local perception (decor, broken pieces, flies, spoiled items, staff sparks, clean place). */
+  private perceiveInterventionEvents(patron: Patron): void {
+    const { col, row } = patron.grid;
+    const now = this.time.now;
+    // Decor that impresses (one roll per piece per visit).
+    let rolled = this.patronDecorRolled.get(patron);
+    if (!rolled) {
+      rolled = new Set();
+      this.patronDecorRolled.set(patron, rolled);
+    }
+    for (const def of this.scenario.furniture) {
+      if (!withinPerception(col, row, def.tile, def.footprint)) continue;
+      const st = this.statsOf(def);
+      const cond = conditionFromDurability(st.durability, st.maxDurability);
+      if (cond === 'Se rompió' || cond === 'Inservible') {
+        const d = applyPerceivedExperience(patron, `broken:${def.id}`, -2, 'comfortSens', `${this.furnitureDisplayName(def)} roto (visto)`);
+        if (d != null) this.patronThink(patron, 'broken_furniture');
+        continue;
+      }
+      const cid = (def.catalogId || def.type || '').toLowerCase();
+      const imp = IMPRESSIVE_DECOR[cid];
+      if (imp && !rolled.has(def.id)) {
+        rolled.add(def.id);
+        if (st.cleanliness >= DIRT_VISUAL_THRESHOLD && Math.random() < imp.chance) {
+          const d = applyPerceivedExperience(patron, `decor:${def.id}`, imp.sat, 'comfortSens', `${this.furnitureDisplayName(def)} (impresiona)`);
+          if (d != null) this.patronThink(patron, imp.thought, { item: this.furnitureDisplayName(def).toLowerCase() });
+        }
+      }
+    }
+    // Flies: only zones right next to this patron.
+    for (const [zid, s] of this.flyZones) {
+      if (!s.active) continue;
+      const z = getFloorZoneById(zid);
+      if (!z || distToFloorZone(col, row, z) > FLIES.perceiveDist) continue;
+      const d = applyPerceivedExperience(patron, `flies:${zid}:${s.episode}`, FLIES.satDelta, 'cleanSens', 'Moscas (cerca)');
+      if (d != null) this.patronThink(patron, 'flies');
+    }
+    // Spoiled mugs / plates in view.
+    for (const it of listServed()) {
+      if (servedStateOf(it, now) !== 'spoiled') continue;
+      if (Math.max(Math.abs(it.col - col), Math.abs(it.row - row)) > 2) continue;
+      const d = applyPerceivedExperience(patron, `spoiled_seen:${it.id}`, THOUGHT_SAT.spoiledSeen, 'cleanSens', 'Comida/bebida echada a perder');
+      if (d != null) this.patronThink(patron, 'spoiled_seen');
+    }
+    // Staff up close: favourite (already liked) or a spontaneous spark (no opinion yet).
+    let sparks = this.patronSparkRolled.get(patron);
+    if (!sparks) {
+      sparks = new Set();
+      this.patronSparkRolled.set(patron, sparks);
+    }
+    for (const s of this.allStaff()) {
+      if (!s.visible || sparks.has(s.profile.id)) continue;
+      if (Math.max(Math.abs(s.grid.col - col), Math.abs(s.grid.row - row)) > 3) continue;
+      sparks.add(s.profile.id);
+      const pname = patron.profile.name;
+      const level = peekAffinity(pname, s.profile.id);
+      if (level === 'alta') {
+        applyPerceivedExperience(patron, `fav_seen:${s.profile.id}`, THOUGHT_SAT.affinityFav, 'tolerance', `Ve a ${s.displayName}`);
+        this.patronThink(patron, 'affinity_fav', { staff: s.displayName });
+      } else if (level === null || level === 'normal') {
+        const chance = level === null ? THOUGHT_SAT.sparkChance : THOUGHT_SAT.sparkChance * 0.4;
+        if (Math.random() < chance) {
+          setAffinity(pname, s.profile.id, 'alta');
+          applyPerceivedExperience(patron, `spark:${s.profile.id}`, THOUGHT_SAT.affinitySpark, 'tolerance', `Le gustó ${s.displayName}`);
+          this.patronThink(patron, 'affinity_spark', { staff: s.displayName });
+        }
+      }
+    }
+    // Clean place (after a while inside, nothing dirty perceived nearby).
+    const since = this.patronSpawnAt.get(patron) ?? now;
+    if (now - since >= THOUGHT_SAT.cleanPlaceAfterMs && !hasThought(patron, 'clean_place')) {
+      const dirtyNear = getFloorZones().some((z) => isFloorVisiblyDirty(z) && distToFloorZone(col, row, z) <= 2);
+      const dirtyFurn = this.scenario.furniture.some(
+        (f) => withinPerception(col, row, f.tile, f.footprint) && isVisiblyDirty(this.statsOf(f))
+      );
+      if (!dirtyNear && !dirtyFurn && this.clubVenueQuality() >= 0.7) {
+        if (Math.random() < THOUGHT_SAT.cleanPlaceChance) {
+          applyPerceivedExperience(patron, 'clean_place', THOUGHT_SAT.cleanPlace, 'cleanSens', 'Lugar limpio');
+          this.patronThink(patron, 'clean_place');
+        }
+      }
+    }
+  }
+
+  /** Leaving: a short goodbye thought from how the visit went (sat feeds return chance already). */
+  private patronGoodbyeThought(patron: Patron): void {
+    if (patron.angry) {
+      this.patronThink(patron, 'angry_leave');
+      return;
+    }
+    const exp = getExperience(patron);
+    if (!exp) return;
+    const servedBy = patron.servedByStaffId ? this.findStaffById(patron.servedByStaffId) : null;
+    if (servedBy && peekAffinity(patron.profile.name, servedBy.profile.id) === 'alta' && exp.satisfaction >= 60) {
+      applyPerceivedExperience(patron, 'goodbye_aff', THOUGHT_SAT.affinityGoodbye, 'tolerance', 'Se va contento');
+      this.patronThink(patron, 'affinity_goodbye', { staff: servedBy.displayName });
+      return;
+    }
+    if (exp.satisfaction >= 72) this.patronThink(patron, 'like_place');
+  }
+
+  // ─── Debug / test hooks ───────────────────────────────────────────────────────────────
+
+  getInterventionDebug() {
+    const now = this.time.now;
+    return {
+      served: getServedDebug(now),
+      waste: getNightWaste(),
+      staffUse: getNightStaffConsumption(),
+      needs: getStaffNeedsDebug(),
+      wallets: Object.fromEntries(this.allStaff().map((s) => [s.profile.id, getWallet(s.profile.id)])),
+      repairs: this.repairJobs.map((j) => ({
+        id: j.id,
+        furnitureId: j.furnitureId,
+        tech: j.tech.id,
+        stage: j.stage,
+        quote: j.quote ?? null,
+        msToArrive: Math.max(0, Math.round(j.arriveAt - now)),
+        msToStageEnd: Math.max(0, Math.round(j.stageEndsAt - now)),
+      })),
+      flies: [...this.flyZones.entries()].map(([id, s]) => ({ id, active: s.active, dirtyForMs: Math.round(now - s.dirtySince) })),
+      orders: [...this.orderLog],
+      thoughts: getThoughtsDebug(),
+      staff: this.allStaff().map((s) => ({
+        id: s.profile.id,
+        aiJob: s.aiJob,
+        state: s.state,
+        playerCommanded: s.playerCommanded,
+        energy: Math.round(s.profile.energy),
+        mood: Math.round(s.profile.mood),
+        intox: Math.round(intoxOf(s.profile.id) * 100) / 100,
+        label: intoxLabel(s.profile.id),
+        token: s.jobToken,
+      })),
+    };
+  }
+
+  debugContextActions(staffId: string, target: CtxTarget) {
+    const staff = this.findStaffById(staffId);
+    return staff ? this.buildContextActions(staff, target) : null;
+  }
+
+  debugOrder(staffId: string, target: CtxTarget, actionId: string): string {
+    const staff = this.findStaffById(staffId);
+    return staff ? this.issuePlayerOrder(staff, target, actionId) : 'no-staff';
+  }
+
+  debugSetStaffStats(staffId: string, stats: { energy?: number; mood?: number; intox?: number; wallet?: number }): void {
+    const s = this.findStaffById(staffId);
+    if (!s) return;
+    if (typeof stats.energy === 'number') s.profile.energy = stats.energy;
+    if (typeof stats.mood === 'number') s.profile.mood = stats.mood;
+    if (typeof stats.intox === 'number') debugSetIntox(staffId, stats.intox);
+    if (typeof stats.wallet === 'number') debugSetWallet(staffId, stats.wallet);
+  }
+
+  /** Age every served item by `ms` (test: spoilage without waiting minutes). */
+  debugAgeServed(ms: number): void {
+    for (const it of listServed()) it.createdAt -= ms;
+    this.servedTickAccum = 500;
+    this.tickServedItems(0);
+  }
+
+  debugRepairFastForward(): void {
+    const now = this.time.now;
+    for (const j of this.repairJobs) {
+      if (j.stage === 'en_route') j.arriveAt = now;
+      else if (j.stage === 'inspecting' || j.stage === 'repairing') j.stageEndsAt = now;
+    }
+    this.tickRepairs();
+  }
+
+  debugAgeFlies(ms: number): void {
+    for (const s of this.flyZones.values()) s.dirtySince -= ms;
+    this.flyTickAccum = 1000;
+    this.tickFlies(0);
+  }
+
+  debugSetFloorDirt(zoneId: string, dry: number, grime: number): void {
+    const z = getFloorZoneById(zoneId);
+    if (!z) return;
+    z.dryDirt = dry;
+    z.grime = grime;
+    this.refreshFloorDirtVisuals();
+  }
+
+  debugPatronThink(patronIndex: number, key: string): void {
+    const p = this.patrons.filter((x) => x.active)[patronIndex];
+    if (p) this.patronThink(p, key);
+  }
+
+  debugPerceive(): void {
+    for (const p of this.patrons) if (p.active) {
+      this.perceiveNearbyDirt(p);
+      this.perceiveInterventionEvents(p);
+    }
+  }
+
+
+  private patronNoSeat(patron: Patron): void {
+    const d = applyPerceivedExperience(patron, 'no_seat', THOUGHT_SAT.noSeat, 'comfortSens', 'Sin asiento');
+    if (d != null) this.patronThink(patron, 'no_seat');
+  }
 
   shutdown(): void {
     this.scale.off('resize', this.onClubResize, this);

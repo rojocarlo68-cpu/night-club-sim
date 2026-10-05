@@ -90,6 +90,13 @@ export class Patron extends Character {
   /** True when this visit consumed botanas at a table. */
   ateSnack = false;
   selected = false;
+  /** Staff who served this visit's drink (affinity goodbye thought). */
+  servedByStaffId: string | null = null;
+  /** scene.time.now when they started waiting for a drink (0 = not waiting). */
+  waitSince = 0;
+  /** Thought bubble (temporary, only on significant perceived events). */
+  private thoughtBox?: Phaser.GameObjects.Container;
+  private thoughtTimer?: Phaser.Time.TimerEvent;
   label?: Phaser.GameObjects.Text;
   /** Persistent Spanish status (Esperando, Impaciente, Sentado, …). */
   statusLabel?: Phaser.GameObjects.Text;
@@ -258,6 +265,56 @@ export class Patron extends Character {
   setSelected(v: boolean): void {
     this.selected = v;
     this.ring?.setFillStyle(0x2ad6ff, v ? 0.45 : 0);
+  }
+
+  /** True while a thought bubble is visible. */
+  get thoughtVisible(): boolean {
+    return !!this.thoughtBox && this.thoughtBox.visible;
+  }
+
+  /** Temporary thought bubble (text + emoji) above the head; replaces any previous one. */
+  showThought(text: string, emoji: string, ms = 3400, tone: 'pos' | 'neg' | 'neutral' = 'neutral'): void {
+    if (!this.scene || !this.active) return;
+    this.clearThought();
+    const y = -PATRON_DISPLAY_H - 34;
+    const box = this.scene.add.container(0, y);
+    const txt = this.scene.add
+      .text(0, 0, text, {
+        fontSize: '10px',
+        color: '#1a0a22',
+        wordWrap: { width: 132 },
+        align: 'center',
+      })
+      .setOrigin(0.5, 1);
+    const w = Math.min(150, txt.width + 14);
+    const h = txt.height + 8;
+    const border = tone === 'neg' ? 0xff6b6b : tone === 'pos' ? 0x6bdc8a : 0xbfa8ff;
+    const bg = this.scene.add.graphics();
+    bg.fillStyle(0xfff8ee, 0.96);
+    bg.lineStyle(2, border, 1);
+    bg.fillRoundedRect(-w / 2, -h - 2, w, h, 7);
+    bg.strokeRoundedRect(-w / 2, -h - 2, w, h, 7);
+    bg.fillStyle(0xfff8ee, 0.96);
+    bg.fillCircle(-6, 3, 3);
+    bg.fillCircle(-2, 8, 2);
+    txt.setY(-6);
+    const emo = this.scene.add.text(w / 2 - 2, -h - 6, emoji, { fontSize: '18px' }).setOrigin(0.5, 0.5);
+    box.add([bg, txt, emo]);
+    this.add(box);
+    this.thoughtBox = box;
+    box.setAlpha(0);
+    this.scene.tweens.add({ targets: box, alpha: 1, y: y - 4, duration: 220 });
+    this.thoughtTimer = this.scene.time.delayedCall(ms, () => this.clearThought());
+  }
+
+  clearThought(): void {
+    this.thoughtTimer?.remove(false);
+    this.thoughtTimer = undefined;
+    if (this.thoughtBox) {
+      if (this.scene) this.scene.tweens.killTweensOf(this.thoughtBox);
+      this.thoughtBox.destroy();
+      this.thoughtBox = undefined;
+    }
   }
 
   showBubble(text: string): void {

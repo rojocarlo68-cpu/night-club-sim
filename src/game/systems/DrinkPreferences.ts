@@ -26,7 +26,8 @@ function rollPrefs(preferredDrink: string, rng: () => number): DrinkPrefs {
       );
     } else {
       prefs[d.id] = clamp01(
-        DRINK_PREF.otherMin + rng() * (DRINK_PREF.otherMax - DRINK_PREF.otherMin)
+        (DRINK_PREF.otherMin + rng() * (DRINK_PREF.otherMax - DRINK_PREF.otherMin)) *
+          (d.patronPrefScale ?? 1)
       );
     }
   }
@@ -92,7 +93,9 @@ export function loadDrinkPrefs(raw: unknown): void {
     if (any) {
       for (const d of DRINKS_CATALOG) {
         if (prefs[d.id] == null) {
-          prefs[d.id] = clamp01((DRINK_PREF.otherMin + DRINK_PREF.otherMax) / 2);
+          prefs[d.id] = clamp01(
+            ((DRINK_PREF.otherMin + DRINK_PREF.otherMax) / 2) * (d.patronPrefScale ?? 1)
+          );
         }
       }
       cache[pk] = prefs;
