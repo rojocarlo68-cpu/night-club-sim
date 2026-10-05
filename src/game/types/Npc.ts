@@ -26,4 +26,6 @@ export interface NpcInfo {
   tipActionLabel?: string | null;
   /** True while serving and seeking a tip (Phase 1/3). */
   seekingTip?: boolean;
+  /** Phase 4: compact performance from energy/mood bands. */
+  performance?: 'alto' | 'medio' | 'bajo';
 }

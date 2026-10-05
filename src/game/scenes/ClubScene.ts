@@ -29,6 +29,11 @@ import {
 import { getPersonality, personalitySummary } from '../config/personality';
 import { TipAction } from '../config/tipActions';
 import {
+  MOOD_SERVICE_TIP_FACTOR,
+  moodBand,
+  performanceLabel,
+} from '../config/staffThresholds';
+import {
   pickTipAction,
   recordActionPerformed,
   getActionCounts,
@@ -456,6 +461,7 @@ export class ClubScene extends Phaser.Scene {
       personality,
       tipActionLabel,
       seekingTip,
+      performance: performanceLabel(b.energy, b.mood),
     };
   }
 
@@ -1685,7 +1691,8 @@ export class ClubScene extends Phaser.Scene {
   private computeServePayout(
     patron: Patron,
     drink: Drink,
-    tipAction: TipAction | null = null
+    tipAction: TipAction | null = null,
+    staffMood?: number
   ): { earned: number; tipped: boolean; tipAmount: number } {
     const q = this.qualityNearPatron(patron);
     const payMult = lerp(AI_TUNABLES.payQualityMin, AI_TUNABLES.payQualityMax, q);
@@ -1701,6 +1708,10 @@ export class ClubScene extends Phaser.Scene {
         tipChance *= 0.4;
         break;
       }
+    }
+    // Phase 4: staff mood → service quality (small configurable factor)
+    if (typeof staffMood === 'number') {
+      tipChance *= MOOD_SERVICE_TIP_FACTOR[moodBand(staffMood)];
     }
     if (tipAction) {
       tipChance += tipAction.tipChanceBonus;
@@ -2554,9 +2565,14 @@ export class ClubScene extends Phaser.Scene {
         return;
       }
       staff.applyServeDrain();
-      // Phase 3: personality-weighted tip action (no energy/mood cost yet — Phase 4)
-      const tipAction = pickTipAction(staff.profile.id);
+      // Phase 3/4: personality-weighted tip action, gated by existing energy/mood
+      const moodAtServe = staff.profile.mood;
+      const tipAction = pickTipAction(staff.profile.id, Math.random, undefined, {
+        energy: staff.profile.energy,
+        mood: staff.profile.mood,
+      });
       if (tipAction) {
+        staff.applyTipActionCost(tipAction.energyCost, tipAction.moodCost);
         staff.setTipAction(
           tipAction.id,
           tipAction.label,
@@ -2565,7 +2581,7 @@ export class ClubScene extends Phaser.Scene {
         recordActionPerformed(staff.profile.id, tipAction.id);
         staff.setServeLabel(`${tipAction.label} para el cliente`);
       }
-      const payout = this.computeServePayout(patron, drink, tipAction);
+      const payout = this.computeServePayout(patron, drink, tipAction, moodAtServe);
       this.money += payout.earned;
       this.nightEarned += payout.earned;
       this.servedCount++;

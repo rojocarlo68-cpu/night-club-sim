@@ -551,6 +551,7 @@ export class UIScene extends Phaser.Scene {
           `Propinas esta noche: $${tipsNight}\n` +
           `Propinas de la jornada: $${tipsDay}\n` +
           `Propinas totales: $${tipsTotal}` +
+          (npc.performance ? `\nRendimiento: ${npc.performance}` : '') +
           persLine +
           seeking
       );

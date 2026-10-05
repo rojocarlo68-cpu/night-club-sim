@@ -1,11 +1,20 @@
 /**
  * Personality-driven tip-action picker (Phase 3).
  * Does NOT pick max-profit — weights follow affinity + requirements + refusal.
- * Energy/mood gating is a Phase 4 hook (identity by default).
+ * Phase 4: optional StaffCondition (existing energy/mood, 0..100) gates actions.
  */
 
 import { getPersonality } from '../config/personality';
 import { TIP_ACTIONS, TipAction } from '../config/tipActions';
+import {
+  EFFORT_MIN_SCALE,
+  ENERGY_BAND_MULT,
+  ENERGY_BASIC_BOOST,
+  MOOD_BAND_MULT,
+  MOOD_BASIC_BOOST,
+  energyBand,
+  moodBand,
+} from '../config/staffThresholds';
 
 type CountsMap = Record<string, Record<string, number>>;
 
@@ -57,6 +66,40 @@ function reqFactor(value: number, min: number): number {
 
 export type EnergyMoodGate = (action: TipAction, staffId: string) => TipAction | null;
 
+/** Current existing-stat values of the staff (Bartender.energy / .mood, 0..100). */
+export interface StaffCondition {
+  energy: number;
+  mood: number;
+}
+
+const MAX_ENERGY_COST = Math.max(1, ...TIP_ACTIONS.map((a) => a.energyCost));
+const MAX_MOOD_COST = Math.max(1, ...TIP_ACTIONS.map((a) => a.moodCost));
+
+/** Band multiplier scaled by effort: costlier actions feel the penalty more. */
+function effortScaled(bandMult: number, cost: number, maxCost: number): number {
+  if (bandMult <= 0) return 0;
+  const effort = Math.max(0, Math.min(1, cost / maxCost));
+  const scale = EFFORT_MIN_SCALE + (1 - EFFORT_MIN_SCALE) * effort;
+  return Math.max(0, 1 - (1 - bandMult) * scale);
+}
+
+/**
+ * Phase 4: weight multiplier for an action given the staff's current energy/mood.
+ * 0 = never (critical band, or cost exceeds what she has left).
+ */
+export function energyMoodWeight(action: TipAction, cond: StaffCondition): number {
+  if (action.energyCost > cond.energy) return 0;
+  if (action.moodCost > cond.mood) return 0;
+  const eMult = effortScaled(ENERGY_BAND_MULT[energyBand(cond.energy)], action.energyCost, MAX_ENERGY_COST);
+  const mMult = effortScaled(MOOD_BAND_MULT[moodBand(cond.mood)], action.moodCost, MAX_MOOD_COST);
+  return eMult * mMult;
+}
+
+/** Phase 4: multiplier on the basic-service weight (tired / bad mood → more basic). */
+export function basicServiceBoost(cond: StaffCondition): number {
+  return MOOD_BASIC_BOOST[moodBand(cond.mood)] * ENERGY_BASIC_BOOST[energyBand(cond.energy)];
+}
+
 /**
  * Pick a tip action (or null = basic service).
  * Weighted by actionAffinity × personality-vs-requirements; includes a "none"
@@ -65,7 +108,8 @@ export type EnergyMoodGate = (action: TipAction, staffId: string) => TipAction |
 export function pickTipAction(
   staffId: string,
   rng: () => number = Math.random,
-  energyMoodGate: EnergyMoodGate = (a) => a
+  energyMoodGate: EnergyMoodGate = (a) => a,
+  condition?: StaffCondition
 ): TipAction | null {
   const p = getPersonality(staffId);
   const entries: { action: TipAction | null; weight: number }[] = [];
@@ -76,7 +120,8 @@ export function pickTipAction(
     (1 - p.sociability) * 0.55 +
     (1 - p.ambition) * 0.25 +
     (1 - p.disinhibition) * 0.2;
-  entries.push({ action: null, weight: Math.max(0.15, noneWeight) });
+  const basicBoost = condition ? basicServiceBoost(condition) : 1;
+  entries.push({ action: null, weight: Math.max(0.15, noneWeight) * basicBoost });
 
   for (const raw of TIP_ACTIONS) {
     const gated = energyMoodGate(raw, staffId);
@@ -96,6 +141,9 @@ export function pickTipAction(
 
     // Hard floor: if affinity is tiny and requirements fail, kill it
     if (affinity < 0.08 && (socF < 0.05 || disF < 0.05)) w = 0;
+
+    // Phase 4: energy / mood bands (effort-scaled; critical or unaffordable → 0)
+    if (condition) w *= energyMoodWeight(gated, condition);
 
     if (w > 0.001) entries.push({ action: gated, weight: w });
   }

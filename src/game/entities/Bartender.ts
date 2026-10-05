@@ -298,6 +298,12 @@ export class Bartender extends Character {
     if (this.profile.energy < 30) this.profile.mood = Math.max(0, this.profile.mood - 4);
   }
 
+  /** Phase 4: pay a tip action's cost from the existing energy / mood stats (0..100). */
+  applyTipActionCost(energyCost: number, moodCost: number): void {
+    this.profile.energy = Math.max(0, Math.min(100, this.profile.energy - energyCost));
+    this.profile.mood = Math.max(0, Math.min(100, this.profile.mood - moodCost));
+  }
+
   applyRest(): void {
     this.profile.energy = Math.min(100, this.profile.energy + this.profile.energyRegenOnRest);
     this.profile.mood = Math.min(100, this.profile.mood + 6);
