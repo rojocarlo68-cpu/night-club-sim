@@ -8,8 +8,9 @@ export interface StaffTips {
   tipsNight: number;
   /**
    * Tips for the current work day / jornada.
-   * For now the jornada aligns with the night cycle and resets with tipsNight;
-   * a future nightNumber counter can split day vs night (Phase 7).
+   * Phase 7: jornada still aligns with the night cycle and resets with tipsNight
+   * on openNight (resetNightTips). Night end does not clear these counters so the
+   * summary can show them; tipsTotal already rolls up on recordTip.
    */
   tipsDay: number;
   /** Lifetime tips; never reset. */
@@ -47,7 +48,7 @@ export function getTips(staffId: string): StaffTips {
 export function resetNightTips(): void {
   for (const id of Object.keys(byStaff)) {
     byStaff[id].tipsNight = 0;
-    // tipsDay tracks the current jornada; until nightNumber exists, reset with the night.
+    // tipsDay tracks the current jornada; Phase 7 keeps jornada == night (reset on open).
     byStaff[id].tipsDay = 0;
   }
 }

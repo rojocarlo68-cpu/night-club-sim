@@ -16,6 +16,8 @@ interface HudState {
   money: number;
   phase: string;
   nightTimer: number;
+  /** Phase 7: absolute night index (1-based). */
+  nightNumber?: number;
   bartender: HudBartender | null;
   selectedNpc?: NpcInfo | null;
   nightEarned?: number;
@@ -610,13 +612,21 @@ export class UIScene extends Phaser.Scene {
     }
   }
 
+  private nightLabel(s: HudState): string {
+    const n = typeof s.nightNumber === 'number' && s.nightNumber > 0 ? s.nightNumber : null;
+    return n != null ? `Noche ${n}` : 'Noche';
+  }
+
   private onStats = (s: HudState): void => {
     this.phase = s.phase;
     this.moneyText.setText(`Dinero: $${s.money}`);
+    const label = this.nightLabel(s);
     if (s.phase === 'open') {
-      this.timerText.setText(`Noche: ${s.nightTimer}s`);
+      this.timerText.setText(`${label} · ${s.nightTimer}s`);
     } else if (s.phase === 'prep') {
-      this.timerText.setText('Noche: lista');
+      this.timerText.setText(`${label} · lista`);
+    } else if (s.phase === 'summary') {
+      this.timerText.setText(`${label} · cerrada`);
     }
     if (this.panelVisible && s.selectedNpc) {
       this.selectedNpc = s.selectedNpc;
@@ -656,11 +666,13 @@ export class UIScene extends Phaser.Scene {
   private onSummary = (s: HudState): void => {
     this.openBtn.setVisible(true);
     this.closeBtn.setVisible(false);
-    this.timerText.setText('Noche: cerrada');
+    const label = this.nightLabel(s);
+    this.timerText.setText(`${label} · cerrada`);
     this.moneyText.setText(`Dinero: $${s.money}`);
     const body = this.summary.getByName('body') as Phaser.GameObjects.Text;
     body.setText(
-      `Ganado esta noche: $${s.nightEarned ?? 0}\n` +
+      `${label}\n` +
+        `Ganado esta noche: $${s.nightEarned ?? 0}\n` +
         `Clientes que se sentaron: ${s.servedCount ?? 0}\n` +
         `Dinero total: $${s.money}`
     );

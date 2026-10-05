@@ -26,6 +26,7 @@ import {
   resetNightTips,
   serializeTips,
 } from '../systems/Tips';
+import { onNightEnd, resetNightCycleState } from '../systems/NightCycle';
 import { getPersonality, personalitySummary } from '../config/personality';
 import { TipAction } from '../config/tipActions';
 import {
@@ -178,6 +179,8 @@ interface SavedLayout {
     string,
     { competitiveness?: number; lastObservedGap?: number; rollingTips?: number }
   >;
+  /** Phase 7: absolute night counter (starts at 1). Old saves omit → 1. */
+  nightNumber?: number;
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -214,6 +217,8 @@ export class ClubScene extends Phaser.Scene {
   servedCount = 0;
   phase: NightPhase = 'prep';
   nightTimer = 0;
+  /** Phase 7: absolute night index (1-based). Increments when a night ends. */
+  nightNumber = 1;
   /** Phase 6: ms accumulator toward next peer-observation tick. */
   private competitionObserveAccum = 0;
   buildMode = false;
@@ -563,6 +568,12 @@ export class ClubScene extends Phaser.Scene {
       loadTips(saved?.staffTips);
       loadAffinities(saved?.affinities);
       loadCompetition(saved?.competition);
+      resetNightCycleState();
+      if (typeof saved?.nightNumber === 'number' && Number.isFinite(saved.nightNumber)) {
+        this.nightNumber = Math.max(1, Math.floor(saved.nightNumber));
+      } else {
+        this.nightNumber = 1;
+      }
       if (!Array.isArray(saved?.furniture)) return;
       // Ensure shop catalog available before restoring purchased pieces
       this.loadShopCatalog();
@@ -663,6 +674,7 @@ export class ClubScene extends Phaser.Scene {
       staffTips: serializeTips(),
       affinities: serializeAffinities(),
       competition: serializeCompetition(),
+      nightNumber: this.nightNumber,
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -2397,6 +2409,7 @@ export class ClubScene extends Phaser.Scene {
   };
 
   private finishNight(): void {
+    if (this.phase !== 'open') return;
     this.phase = 'summary';
     this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
@@ -2420,13 +2433,22 @@ export class ClubScene extends Phaser.Scene {
       s.startBob();
     }
     this.syncBartenderBarDepth();
+    // Phase 7: roll-up + weekly/monthly hooks, then bump nightNumber.
+    // Tips night/jornada stay visible for the summary; resetNightTips runs on openNight.
+    const endedNight = onNightEnd(this);
     this.persistLayout();
     this.game.events.emit('night-summary', {
       ...this.getHudState(),
+      nightNumber: endedNight,
       nightEarned: this.nightEarned,
       servedCount: this.servedCount,
     });
     this.emitStaffRoster();
+  }
+
+  /** Phase 7 test/debug: end the open night via the normal close path. */
+  debugEndNight(): void {
+    this.closeNight();
   }
 
   /** Phase 3 test/debug: per-staff tip-action performance counts. */
@@ -2449,6 +2471,7 @@ export class ClubScene extends Phaser.Scene {
       money: this.money,
       phase: this.phase,
       nightTimer: Math.ceil(this.nightTimer),
+      nightNumber: this.nightNumber,
       bartender: this.bartender
         ? {
             name: this.bartender.displayName,
