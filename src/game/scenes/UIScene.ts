@@ -91,6 +91,21 @@ const PANEL_W = 260;
 const PANEL_H = 400;
 /** Gap above bottom edge (clears Construir/Staff row ~48px). */
 const PANEL_BOTTOM_MARGIN = 60;
+/** Max finger/mouse travel (px) for a tap outside a window to count as "close". */
+const OUTSIDE_TAP_SLOP = 16;
+
+/**
+ * A closable overlay window. 'modal' = centered window with the shared backdrop
+ * (tap outside closes it). 'side' = non-blocking inspector (bottom-right) whose
+ * outside taps keep going to the club (ClubScene already closes them on empty taps).
+ */
+interface DismissWin {
+  key: string;
+  root: Phaser.GameObjects.Container;
+  kind: 'modal' | 'side';
+  isOpen: () => boolean;
+  close: () => void;
+}
 
 export class UIScene extends Phaser.Scene {
   private moneyText!: Phaser.GameObjects.Text;
@@ -168,6 +183,16 @@ export class UIScene extends Phaser.Scene {
   private furnCleVal!: Phaser.GameObjects.Text;
   private inspectedFurniture: FurnitureInspectPayload | null = null;
 
+  // ---- Shared window dismiss (✕ / tap outside / right-click on PC) ----
+  private dismissWins: DismissWin[] = [];
+  /** Dim layer behind centered modal windows; tap on it = close topmost modal. */
+  private modalBackdrop!: Phaser.GameObjects.Rectangle;
+  private hudBg!: Phaser.GameObjects.Rectangle;
+  /** Primary press that started on an "outside" surface while a modal was open. */
+  private outsidePress: { id: number; downTime: number } | null = null;
+  /** HUD button to reopen the night summary after closing it (Dormir lives there). */
+  private summaryBtn!: Phaser.GameObjects.Container;
+
   constructor() {
     super({ key: 'UIScene', active: false });
   }
@@ -181,6 +206,17 @@ export class UIScene extends Phaser.Scene {
     const hudBg = this.add.rectangle(0, 0, cam.width, 52, 0x12081e, 0.85).setOrigin(0);
     hudBg.setScrollFactor(0);
     hudBg.setInteractive();
+    this.hudBg = hudBg;
+
+    // Shared backdrop for centered modals. Depth -1 keeps it under the HUD so the
+    // bottom/top buttons still work (e.g. Staff <-> Inventario switch) while it
+    // swallows taps on the club and closes the window instead.
+    this.modalBackdrop = this.add
+      .rectangle(0, 0, 8000, 8000, 0x000000, 0.25)
+      .setScrollFactor(0)
+      .setDepth(-1)
+      .setVisible(false)
+      .setInteractive();
 
     this.moneyText = this.add
       .text(16, 14, 'Dinero: $40', {
@@ -215,6 +251,10 @@ export class UIScene extends Phaser.Scene {
       this.game.events.emit('cmd-close-night');
     });
     this.closeBtn.setVisible(false);
+    this.summaryBtn = this.makeButton(cam.width - 150, 8, 130, 36, 'Ver resumen', () => {
+      this.reopenSummary();
+    });
+    this.summaryBtn.setVisible(false);
 
     this.buildBtn = this.makeButton(16, cam.height - 48, 110, 36, 'Construir', () => {
       if (this.phase === 'open') return;
@@ -346,14 +386,9 @@ export class UIScene extends Phaser.Scene {
     const kb = this.input.keyboard;
     if (kb) {
       kb.on('keydown-ESC', () => {
-        if (this.shopPanelVisible) this.hideShopPanel();
-        else if (this.inventoryPanelVisible) this.hideInventoryPanel();
-        else if (this.staffPanelVisible) this.hideStaffPanel();
-        else if (this.furnPanelVisible) {
-          this.hideFurnPanel();
-          this.game.events.emit('cmd-deselect-furniture');
-        } else if (this.panelVisible) this.hidePanel();
-        else if (this.buildMode) this.game.events.emit('cmd-set-build-mode', false);
+        // Same stacking as outside/right-click: topmost window first.
+        if (this.dismissTopmost()) return;
+        if (this.buildMode) this.game.events.emit('cmd-set-build-mode', false);
       });
     }
 
@@ -393,7 +428,7 @@ export class UIScene extends Phaser.Scene {
     });
     this.summaryAgain.setVisible(false);
     this.summaryClose = this.makeLocalButton(0, 0, 36, 32, '✕', () => {
-      this.summary.setVisible(false);
+      this.closeSummary();
     });
     this.summary.add([
       this.summaryBg,
@@ -408,6 +443,7 @@ export class UIScene extends Phaser.Scene {
     this.createInventoryPanel();
     this.createShopPanel();
     this.createDeleteConfirm();
+    this.setupWindowDismiss();
 
     this.game.events.on('club-ready', this.onStats, this);
     this.game.events.on('stats-updated', this.onStats, this);
@@ -455,6 +491,8 @@ export class UIScene extends Phaser.Scene {
     bg.on('pointerover', () => bg.setFillStyle(0xd44a9a));
     bg.on('pointerout', () => bg.setFillStyle(0xb43282));
     bg.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      // Right/middle click never activates buttons (right-click = close window)
+      if (!this.isPrimaryPress(p)) return;
       p.event.stopPropagation();
       cb();
     });
@@ -480,6 +518,8 @@ export class UIScene extends Phaser.Scene {
     bg.on('pointerover', () => bg.setFillStyle(0xd44a9a));
     bg.on('pointerout', () => bg.setFillStyle(0xb43282));
     bg.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      // Right/middle click never activates buttons (right-click = close window)
+      if (!this.isPrimaryPress(p)) return;
       p.event.stopPropagation();
       cb();
     });
@@ -487,6 +527,155 @@ export class UIScene extends Phaser.Scene {
     return c;
   }
 
+
+  // ---------------------------------------------------------------------------
+  // Shared window dismiss: ✕ (per-window button), tap/click outside, right-click.
+  // ---------------------------------------------------------------------------
+
+  /** Left mouse button or any touch. Right/middle mouse clicks are not "presses". */
+  private isPrimaryPress(p: Phaser.Input.Pointer): boolean {
+    return p.wasTouch || p.button === 0;
+  }
+
+  /** Desktop right-click (never true on touch). */
+  private isRightClick(p: Phaser.Input.Pointer): boolean {
+    return !p.wasTouch && (p.button === 2 || p.rightButtonDown());
+  }
+
+  /** Register every overlay window once; all close paths go through this list. */
+  private setupWindowDismiss(): void {
+    const reg = (w: DismissWin) => this.dismissWins.push(w);
+    reg({
+      key: 'deleteConfirm',
+      root: this.deleteConfirm,
+      kind: 'modal',
+      isOpen: () => this.deleteConfirmVisible,
+      // Outside / right-click on the confirm = "No" (never deletes)
+      close: () => this.handleDeleteConfirmChoice(false),
+    });
+    reg({ key: 'shop', root: this.shopPanel, kind: 'modal', isOpen: () => this.shopPanelVisible, close: () => this.hideShopPanel() });
+    reg({ key: 'inventory', root: this.inventoryPanel, kind: 'modal', isOpen: () => this.inventoryPanelVisible, close: () => this.hideInventoryPanel() });
+    reg({ key: 'staff', root: this.staffPanel, kind: 'modal', isOpen: () => this.staffPanelVisible, close: () => this.hideStaffPanel() });
+    reg({
+      key: 'furniture',
+      root: this.furnPanel,
+      kind: 'side',
+      isOpen: () => this.furnPanelVisible,
+      close: () => {
+        this.hideFurnPanel();
+        this.game.events.emit('cmd-deselect-furniture');
+      },
+    });
+    reg({ key: 'npc', root: this.panel, kind: 'side', isOpen: () => this.panelVisible, close: () => this.hidePanel() });
+    reg({ key: 'summary', root: this.summary, kind: 'modal', isOpen: () => this.summary.visible, close: () => this.closeSummary() });
+
+    // Browser context menu off on the canvas so right-click can close windows.
+    this.input.mouse?.disableContextMenu();
+
+    this.input.on('pointerdown', (p: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]) => {
+      this.outsidePress = null;
+      if (this.isRightClick(p)) {
+        this.handleRightClickDismiss(over);
+        return;
+      }
+      if (!this.isPrimaryPress(p)) return;
+      if (!this.topmostOpen('modal')) return;
+      if (over.every((o) => this.isOutsideSurface(o))) {
+        this.outsidePress = { id: p.id, downTime: p.downTime };
+      }
+    });
+
+    // Close on release (not press) so the same tap never falls through to the club.
+    this.input.on('pointerup', (p: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]) => {
+      const press = this.outsidePress;
+      this.outsidePress = null;
+      if (!press || press.id !== p.id || press.downTime !== p.downTime) return;
+      if (!over.every((o) => this.isOutsideSurface(o))) return;
+      if (p.getDistance() > OUTSIDE_TAP_SLOP) return; // drag, not a tap
+      const top = this.topmostOpen('modal');
+      if (!top) return;
+      top.close();
+      this.syncModalBackdrop();
+    });
+  }
+
+  /** Empty space around a modal: the shared backdrop, the delete dim or the HUD bar. */
+  private isOutsideSurface(o: Phaser.GameObjects.GameObject): boolean {
+    return o === this.modalBackdrop || o === this.hudBg || o.name === 'deleteDim';
+  }
+
+  /** Open windows, topmost first (delete confirm, then by depth; ties = registration order). */
+  private openWindowsTopFirst(kind?: DismissWin['kind']): DismissWin[] {
+    return this.dismissWins
+      .filter((w) => w.isOpen() && (!kind || w.kind === kind))
+      .map((w, i) => ({ w, i }))
+      .sort((a, b) => {
+        if (a.w.key === 'deleteConfirm') return -1;
+        if (b.w.key === 'deleteConfirm') return 1;
+        return b.w.root.depth - a.w.root.depth || a.i - b.i;
+      })
+      .map((e) => e.w);
+  }
+
+  private topmostOpen(kind?: DismissWin['kind']): DismissWin | null {
+    return this.openWindowsTopFirst(kind)[0] ?? null;
+  }
+
+  /** Close only the topmost window (nested confirm closes before the shop underneath). */
+  private dismissTopmost(kind?: DismissWin['kind']): boolean {
+    const top = this.topmostOpen(kind);
+    if (!top) return false;
+    top.close();
+    this.syncModalBackdrop();
+    return true;
+  }
+
+  /** Which registered window (if any) a hit object belongs to. */
+  private windowForObject(o: Phaser.GameObjects.GameObject): DismissWin | null {
+    let cur: Phaser.GameObjects.GameObject | null = o;
+    while (cur) {
+      const hit = this.dismissWins.find((w) => w.root === cur);
+      if (hit) return hit;
+      cur = (cur as Phaser.GameObjects.GameObject & { parentContainer?: Phaser.GameObjects.Container | null })
+        .parentContainer ?? null;
+    }
+    return null;
+  }
+
+  /** PC right-click: on a window → close that window; elsewhere → close topmost modal. */
+  private handleRightClickDismiss(over: Phaser.GameObjects.GameObject[]): void {
+    const order = this.openWindowsTopFirst();
+    if (!order.length) return;
+    const hitWins = new Set(over.map((o) => this.windowForObject(o)).filter((w): w is DismissWin => !!w));
+    const target = order.find((w) => hitWins.has(w)) ?? this.topmostOpen('modal');
+    if (!target) return;
+    target.close();
+    this.syncModalBackdrop();
+  }
+
+  /** Backdrop only behind centered modals (delete confirm has its own dim). */
+  private syncModalBackdrop(): void {
+    if (!this.modalBackdrop) return;
+    const show = this.dismissWins.some((w) => w.kind === 'modal' && w.key !== 'deleteConfirm' && w.isOpen());
+    if (this.modalBackdrop.visible !== show) this.modalBackdrop.setVisible(show);
+  }
+
+  update(): void {
+    this.syncModalBackdrop();
+  }
+
+  /** Hide the night summary without sleeping; HUD "Ver resumen" brings it back. */
+  private closeSummary(): void {
+    this.summary.setVisible(false);
+    this.refreshBuildButtons();
+  }
+
+  private reopenSummary(): void {
+    if (this.phase !== 'summary' || !this.lastSummaryBody) return;
+    this.layoutSummary(this.lastSummaryBody);
+    this.summary.setVisible(true);
+    this.refreshBuildButtons();
+  }
 
   /** Bottom-right NPC panel position (responsive). */
   private layoutNpcPanel(w: number, h: number): void {
@@ -498,6 +687,7 @@ export class UIScene extends Phaser.Scene {
     const h = this.cameras.main.height;
     // Full-screen modal: block all ClubScene gestures underneath
     if (this.deleteConfirmVisible) return true;
+    if (this.modalBackdrop?.visible) return true;
     if (p.y < 56) return true;
     if (p.x < 350 && p.y > h - 60) return true;
     if (this.panelVisible) {
@@ -716,6 +906,10 @@ export class UIScene extends Phaser.Scene {
     const showClose = this.phase === 'open';
     this.openBtn.setVisible(showOpen);
     this.closeBtn.setVisible(showClose);
+    // Summary closed (✕ / outside / right-click) -> let the player reopen it to Dormir.
+    if (this.summaryBtn) {
+      this.summaryBtn.setVisible(this.phase === 'summary' && !this.summary.visible);
+    }
   }
 
   private nightLabel(s: HudState): string {
@@ -1052,6 +1246,7 @@ export class UIScene extends Phaser.Scene {
     const h = gameSize.height;
     this.openBtn.setX(w - 150);
     this.closeBtn.setX(w - 150);
+    this.summaryBtn.setX(w - 150);
     this.buildBtn.setPosition(16, h - 48);
     this.doneBuildBtn.setPosition(16, h - 48);
     this.staffBtn.setPosition(136, h - 48);
@@ -1193,6 +1388,7 @@ export class UIScene extends Phaser.Scene {
       bg.on('pointerover', () => bg.setFillStyle(0xd44a9a));
       bg.on('pointerout', () => bg.setFillStyle(0xb43282));
       bg.on('pointerdown', (p: Phaser.Input.Pointer) => {
+        if (!this.isPrimaryPress(p)) return;
         p.event.stopPropagation();
         cb();
       });
@@ -1591,6 +1787,8 @@ export class UIScene extends Phaser.Scene {
       b.on('pointerout', () => b.setFillStyle(fill));
       const onPress = (p: Phaser.Input.Pointer) => {
         p.event?.stopPropagation?.();
+        // Right-click anywhere on the confirm = cancel (handled in setupWindowDismiss)
+        if (!this.isPrimaryPress(p)) return;
         // Ignore the tail of the press that opened the modal (Eliminar tap whose finger/mouse
         // lifts on top of Sí/No) — only presses that STARTED after the modal opened count.
         if (!this.isFreshDeletePress(p)) return;
@@ -1609,6 +1807,7 @@ export class UIScene extends Phaser.Scene {
     // inside the Sí/No rectangles (generous 150x80 zones) still resolves the modal.
     const geometric = (p: Phaser.Input.Pointer) => {
       if (!this.deleteConfirmVisible || !this.isFreshDeletePress(p)) return;
+      if (!this.isPrimaryPress(p)) return;
       const c = this.cameras.main;
       const cx = c.width / 2;
       const cy = c.height / 2 + 36;
