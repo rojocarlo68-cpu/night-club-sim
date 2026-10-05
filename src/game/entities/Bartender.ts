@@ -76,7 +76,7 @@ export class Bartender extends Character {
         displayHeight: displayH,
         y: 6,
         idleAnimPrefix: 'luna-idle',
-        // Two alternative walk cycles (SE/SW only; SW = SE mirrored via flipX). NE/NW keep the back idle.
+        // Walk cycles: SE/SW = two alternatives (random per trip, SW = flipX); NE/NW = back walk (anim luna-walk-{a,b}-ne/nw -> luna_walk_back, NW = flipX). Stopped -> luna-idle-ne/nw.
         walkAnimVariants: ['luna-walk-a', 'luna-walk-b'],
         scaleDisplayWByFrame: true, // walk frames are 200 wide vs 146 idle: same px→screen scale
         flipIdleFacings: true, // SE/SW=front sheet, NE/NW=back sheet + flipX

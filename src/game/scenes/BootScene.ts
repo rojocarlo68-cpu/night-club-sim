@@ -111,6 +111,11 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 200,
       frameHeight: 784,
     });
+    // Luna BACK walk (NE/NW): one cycle, 10 frames of 200×784, saved looking RIGHT (NE); NW = flipX
+    this.load.spritesheet('luna_walk_back', 'assets/characters/luna_walk_back_ne_sheet.png', {
+      frameWidth: 200,
+      frameHeight: 784,
+    });
     this.load.spritesheet('luna_serve_beer', 'assets/characters/luna_serve_beer_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
@@ -189,6 +194,21 @@ export class BootScene extends Phaser.Scene {
           frameRate: 9,
           repeat: -1,
         });
+      }
+    }
+    // Luna BACK walk (NE/NW): only one back cycle exists, so both variant prefixes (a/b) map to it.
+    if (this.textures.exists('luna_walk_back')) {
+      for (const v of ['a', 'b']) {
+        for (const f of ['ne', 'nw']) {
+          const k = `luna-walk-${v}-${f}`;
+          if (this.anims.exists(k)) continue;
+          this.anims.create({
+            key: k,
+            frames: this.anims.generateFrameNumbers('luna_walk_back', { start: 0, end: 9 }),
+            frameRate: 9,
+            repeat: -1,
+          });
+        }
       }
     }
     // Legacy alias (default SE)
