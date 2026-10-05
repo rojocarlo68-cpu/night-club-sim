@@ -43,7 +43,7 @@ const STATE_ES: Record<string, string> = {
 };
 
 const PANEL_W = 260;
-const PANEL_H = 320;
+const PANEL_H = 400;
 /** Gap above bottom edge (clears Construir/Staff row ~48px). */
 const PANEL_BOTTOM_MARGIN = 60;
 
@@ -188,13 +188,13 @@ export class UIScene extends Phaser.Scene {
       .setDisplaySize(56, 56)
       .setVisible(false);
 
-    this.energyLabel = this.add.text(-250, 130, 'Energía', { fontSize: '12px', color: '#a080c0' });
-    this.moodLabel = this.add.text(-250, 170, 'Ánimo', { fontSize: '12px', color: '#a080c0' });
-    const eBg = this.add.rectangle(-250, 150, 220, 12, 0x2a1838).setOrigin(0, 0.5);
-    const mBg = this.add.rectangle(-250, 190, 220, 12, 0x2a1838).setOrigin(0, 0.5);
-    this.energyBar = this.add.rectangle(-250, 150, 220, 12, 0x3cff9a).setOrigin(0, 0.5);
-    this.moodBar = this.add.rectangle(-250, 190, 220, 12, 0xffb84d).setOrigin(0, 0.5);
-    this.restBtn = this.makeLocalButton(-250, 230, 200, 36, 'Descansar', () => {
+    this.energyLabel = this.add.text(-250, 200, 'Energía', { fontSize: '12px', color: '#a080c0' });
+    this.moodLabel = this.add.text(-250, 240, 'Ánimo', { fontSize: '12px', color: '#a080c0' });
+    const eBg = this.add.rectangle(-250, 220, 220, 12, 0x2a1838).setOrigin(0, 0.5);
+    const mBg = this.add.rectangle(-250, 260, 220, 12, 0x2a1838).setOrigin(0, 0.5);
+    this.energyBar = this.add.rectangle(-250, 220, 220, 12, 0x3cff9a).setOrigin(0, 0.5);
+    this.moodBar = this.add.rectangle(-250, 260, 220, 12, 0xffb84d).setOrigin(0, 0.5);
+    this.restBtn = this.makeLocalButton(-250, 310, 200, 36, 'Descansar', () => {
       this.game.events.emit('cmd-rest');
     });
 
@@ -531,8 +531,19 @@ export class UIScene extends Phaser.Scene {
 
     const estado = STATE_ES[npc.state] || npc.state;
     if (isStaff) {
+      const tipsNight = npc.tipsNight ?? 0;
+      const tipsDay = npc.tipsDay ?? 0;
+      const tipsTotal = npc.tipsTotal ?? 0;
+      const seeking =
+        ['serving', 'serving_cerveza', 'serving_drink', 'busy'].includes(npc.state)
+          ? '\nBuscando propina…'
+          : '';
       this.panelStats.setText(
-        `Estado: ${estado}\nHabilidad: ${npc.skill ?? '—'}`
+        `Estado: ${estado}\nHabilidad: ${npc.skill ?? '—'}\n` +
+          `Propinas esta noche: $${tipsNight}\n` +
+          `Propinas de la jornada: $${tipsDay}\n` +
+          `Propinas totales: $${tipsTotal}` +
+          seeking
       );
       this.energyLabel.setText('Energía');
       this.moodLabel.setText('Ánimo');
@@ -605,6 +616,9 @@ export class UIScene extends Phaser.Scene {
         mood: s.bartender.mood,
         skill: s.bartender.skill,
         state: s.bartender.state,
+        tipsNight: this.selectedNpc.tipsNight,
+        tipsDay: this.selectedNpc.tipsDay,
+        tipsTotal: this.selectedNpc.tipsTotal,
       });
     }
     this.refreshBuildButtons();

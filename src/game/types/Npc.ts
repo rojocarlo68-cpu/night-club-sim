@@ -16,4 +16,8 @@ export interface NpcInfo {
   state: string;
   /** Texture key for small panel portrait (staff / patrons). */
   portrait?: string;
+  /** Per-staff tip counters (Phase 1). */
+  tipsNight?: number;
+  tipsDay?: number;
+  tipsTotal?: number;
 }

@@ -20,6 +20,13 @@ import {
   lerp,
 } from '../systems/AiTunables';
 import {
+  getTips,
+  loadTips,
+  recordTip,
+  resetNightTips,
+  serializeTips,
+} from '../systems/Tips';
+import {
   FurnitureInspectPayload,
   FurnitureRuntimeStats,
   STARTER_FURNITURE_PRICE,
@@ -128,6 +135,8 @@ interface SavedLayout {
   money?: number;
   /** Starter pieces already offered to this save (so a deleted starter bar stays deleted). */
   seeded?: string[];
+  /** Per-staff tip ledger (Phase 1). Old saves omit this → zeros. */
+  staffTips?: Record<string, { tipsNight?: number; tipsDay?: number; tipsTotal?: number }>;
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -418,6 +427,7 @@ export class ClubScene extends Phaser.Scene {
     } else {
       portrait = this.staffPool.find((c) => c.id === b.profile.id)?.portrait;
     }
+    const tips = getTips(b.profile.id);
     return {
       id: b.profile.id,
       name: b.displayName,
@@ -427,6 +437,9 @@ export class ClubScene extends Phaser.Scene {
       skill: Math.round(b.skill),
       state: b.getAiStateKey(),
       portrait,
+      tipsNight: tips.tipsNight,
+      tipsDay: tips.tipsDay,
+      tipsTotal: tips.tipsTotal,
     };
   }
 
@@ -491,6 +504,7 @@ export class ClubScene extends Phaser.Scene {
       if (typeof saved?.money === 'number' && Number.isFinite(saved.money)) {
         this.money = Math.max(0, Math.floor(saved.money));
       }
+      loadTips(saved?.staffTips);
       if (!Array.isArray(saved?.furniture)) return;
       // Ensure shop catalog available before restoring purchased pieces
       this.loadShopCatalog();
@@ -588,6 +602,7 @@ export class ClubScene extends Phaser.Scene {
       hiredStaff: [...this.hiredStaffIds],
       money: this.money,
       seeded: ['bar'],
+      staffTips: serializeTips(),
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -1355,6 +1370,7 @@ export class ClubScene extends Phaser.Scene {
     this.phase = 'open';
     this.nightEarned = 0;
     this.servedCount = 0;
+    resetNightTips();
     this.nightTimer = this.scenario.nightDurationSec;
     const [min, max] = this.scenario.patronSpawnCount;
     this.spawnLeft = Phaser.Math.Between(min, max);
@@ -1649,7 +1665,10 @@ export class ClubScene extends Phaser.Scene {
   }
 
   /** Pay + tip from drink price scaled by venue quality / patience / broken furniture. */
-  private computeServePayout(patron: Patron, drink: Drink): { earned: number; tipped: boolean } {
+  private computeServePayout(
+    patron: Patron,
+    drink: Drink
+  ): { earned: number; tipped: boolean; tipAmount: number } {
     const q = this.qualityNearPatron(patron);
     const payMult = lerp(AI_TUNABLES.payQualityMin, AI_TUNABLES.payQualityMax, q);
     let tipChance = patron.profile.tipChance * (0.55 + 0.9 * q);
@@ -1665,17 +1684,18 @@ export class ClubScene extends Phaser.Scene {
         break;
       }
     }
-    let earned = Math.max(1, Math.round(drink.price * payMult));
+    const drinkPay = Math.max(1, Math.round(drink.price * payMult));
+    let tipAmount = 0;
     let tipped = false;
     if (Math.random() < tipChance) {
       const tipBase = Math.max(1, Math.ceil(drink.price * 0.25));
-      earned += Math.max(
+      tipAmount = Math.max(
         1,
         Math.round(tipBase * lerp(AI_TUNABLES.tipQualityMin, AI_TUNABLES.tipQualityMax, q))
       );
       tipped = true;
     }
-    return { earned, tipped };
+    return { earned: drinkPay + tipAmount, tipped, tipAmount };
   }
 
   // ─── Patron seats / queues / venue quality ───────────────────────────
@@ -2508,6 +2528,9 @@ export class ClubScene extends Phaser.Scene {
       this.money += payout.earned;
       this.nightEarned += payout.earned;
       this.servedCount++;
+      if (payout.tipAmount > 0) {
+        recordTip(staff.profile.id, payout.tipAmount);
+      }
       patron.showBubble(payout.tipped ? `¡Propina! +$${payout.earned}` : `+$${payout.earned}`);
       patron.served = true;
       patron.waiting = false;
