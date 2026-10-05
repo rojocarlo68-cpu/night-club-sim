@@ -97,8 +97,8 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 146,
       frameHeight: 784,
     });
-    // Back-facing idle (8 frames, 146×784). Front 'luna_idle' is a single 146×784 standing frame.
-    this.load.spritesheet('luna_idle_back', 'assets/characters/luna_idle_back_sheet.png', {
+    // Back-facing idle: ONE static 146×784 standing frame (looks right; NW = flipX). Same as the front 'luna_idle'.
+    this.load.spritesheet('luna_idle_back', 'assets/characters/luna_idle_back_standing.png', {
       frameWidth: 146,
       frameHeight: 784,
     });
@@ -166,10 +166,10 @@ export class BootScene extends Phaser.Scene {
       if (!this.anims.exists(animKey) && this.textures.exists(f.texture)) {
         this.anims.create({
           key: animKey,
-          // Front (SE/SW) idle is ONE static standing frame; back (NE/NW) keeps its 8-frame loop.
+          // Both front (SE/SW) and back (NE/NW) idles are ONE static standing frame.
           frames: this.anims.generateFrameNumbers(f.texture, {
             start: 0,
-            end: f.texture === 'luna_idle' ? 0 : 7,
+            end: 0,
           }),
           frameRate: 9,
           repeat: -1,

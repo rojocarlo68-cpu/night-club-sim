@@ -1,4 +1,4 @@
-front=luna_idle_standing.png 146x784 single static frame (standing pose, content 416px, feet y=583); was luna_idle_sheet.png (8 frames)
-back=luna_idle_back_sheet.png 1168x784 frame=146x784 cols=8 (src B hair-back, native 200x1077 normalized)
+front=luna_idle_standing.png 146x784 single static frame (standing pose, content 416px, feet y=583)
+back=luna_idle_back_standing.png 146x784 single static frame (content 416px, feet y=583); saved MIRRORED (looks right) -> NE unflipped, NW = flipX (original orientation); replaces luna_idle_back_sheet.png (8 frames)
 facing: se=front, sw=front flipX, ne=back, nw=back flipX
 feet_origin_y=583/784 display_h=158 visible~84px
