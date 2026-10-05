@@ -229,6 +229,22 @@ export function isShiftClockTicking(): boolean {
   return shiftState === 'open' || shiftState === 'closing';
 }
 
+/**
+ * Test helper: advance N whole game minutes while OPEN/CLOSING.
+ * Returns minutes actually advanced.
+ */
+export function debugAdvanceGameMinutes(n: number): number {
+  const steps = Math.max(0, Math.floor(n) || 0);
+  let advanced = 0;
+  const pace = REAL_SECONDS_PER_GAME_MINUTE;
+  for (let i = 0; i < steps; i++) {
+    const got = tickShiftClock(pace);
+    if (got <= 0) break;
+    advanced += got;
+  }
+  return advanced;
+}
+
 export function serializeShift(): ShiftPersist {
   return {
     currentDay,

@@ -40,9 +40,18 @@ import {
   resetShiftState,
   tickShiftClock,
   formatGameClock,
+  debugAdvanceGameMinutes as shiftAdvanceGameMinutes,
+  getShiftState,
   type ShiftPersist,
 } from '../systems/Shift';
-import { SCHEDULE_LABEL, SCHEDULE_LABEL_MOBILE } from '../config/shift';
+import { SCHEDULE_LABEL, SCHEDULE_LABEL_MOBILE, REAL_SECONDS_PER_GAME_MINUTE } from '../config/shift';
+import {
+  beginArrivalsNight,
+  stopArrivals,
+  tickArrivals,
+  getArrivalsDebug as readArrivalsDebug,
+  setArrivalsSeed,
+} from '../systems/Arrivals';
 import {
   CLOSED_OVERLAY_COLOR,
   CLOSED_OVERLAY_ALPHA,
@@ -1730,10 +1739,12 @@ export class ClubScene extends Phaser.Scene {
     resetNightAccumulators();
     this.competitionObserveAccum = 0;
     this.nightTimer = this.scenario.nightDurationSec;
-    const [min, max] = this.scenario.patronSpawnCount;
-    this.spawnLeft = Phaser.Math.Between(min, max);
+    // Prompt B Phase B4: organic arrivals (replaces fixed 3–5 @ 400ms/2200ms).
+    this.spawnLeft = 0;
+    const snap = getShiftSnapshot();
+    const staffCount = this.allStaff().length;
+    beginArrivalsNight(snap.gameHour, snap.gameMinute, staffCount);
     this.game.events.emit('night-started', this.getHudState());
-    this.scheduleSpawns();
   };
 
   private resetForNewNight(): void {
@@ -1753,19 +1764,16 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * @deprecated Prompt B Phase B4 — fixed real-time spawn schedule removed.
+   * Arrivals are driven by tickArrivals() on the game clock.
+   */
   private scheduleSpawns(): void {
-    if (this.phase !== 'open' || this.spawnLeft <= 0) return;
-    this.time.delayedCall(400, () => this.spawnPatron());
-    for (let i = 1; i < this.spawnLeft; i++) {
-      this.time.delayedCall(400 + i * this.scenario.spawnIntervalMs, () => {
-        if (this.phase === 'open') this.spawnPatron();
-      });
-    }
+    // no-op (kept so any stray call is harmless)
   }
 
   private spawnPatron(): void {
-    if (this.spawnLeft <= 0 || this.phase !== 'open') return;
-    this.spawnLeft--;
+    if (this.phase !== 'open') return;
     const pool = this.chars.patrons;
     const pdata = { ...pool[Phaser.Math.Between(0, pool.length - 1)] };
     pdata.id = `${pdata.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -2989,6 +2997,7 @@ export class ClubScene extends Phaser.Scene {
     beginShiftSummary();
     syncShiftDay(this.nightNumber);
     this.phase = legacyPhaseFromShift();
+    stopArrivals();
     // Prompt B Phase B3: lights down for summary / closed look.
     this.applyClubLighting('closed', true);
     this.hideDeleteConfirmUi();
@@ -3188,9 +3197,63 @@ export class ClubScene extends Phaser.Scene {
     return readNightStatsDebug();
   }
 
+
+  /** Catch up any due arrivals at the current game clock (lag / multi-minute safe). */
+  private processArrivalsForAdvancedMinutes(_minutesAdvanced: number): void {
+    for (let guard = 0; guard < 8; guard++) {
+      if (this.phase !== 'open') return;
+      const snap = getShiftSnapshot();
+      const n = tickArrivals({
+        gameHour: snap.gameHour,
+        gameMinute: snap.gameMinute,
+        nightTimerSec: this.nightTimer,
+        shiftState: getShiftState(),
+        staffCount: this.allStaff().length,
+      });
+      if (n <= 0) return;
+      for (let k = 0; k < n; k++) this.spawnPatron();
+    }
+  }
+
   /** Prompt B Phase B1 test/debug: day / game clock / shift FSM. */
   getShiftDebug() {
     return readShiftDebug();
+  }
+
+  /** Prompt B Phase B4 test/debug: arrival log / soft cap. */
+  getArrivalsDebug() {
+    return readArrivalsDebug();
+  }
+
+  /** Prompt B Phase B4 test: set arrivals RNG seed. */
+  debugSetArrivalsSeed(seed: number): void {
+    setArrivalsSeed(seed);
+  }
+
+  /**
+   * Prompt B Phase B4 test: advance game minutes + process arrivals + tick nightTimer.
+   * Does not skip the legacy 75s auto-close.
+   */
+  debugAdvanceGameMinutes(n: number): number {
+    if (this.phase !== 'open') return 0;
+    const steps = Math.max(0, Math.floor(n) || 0);
+    let advanced = 0;
+    const pace = REAL_SECONDS_PER_GAME_MINUTE;
+    for (let i = 0; i < steps; i++) {
+      if (this.phase !== 'open') break;
+      this.nightTimer -= pace;
+      const got = shiftAdvanceGameMinutes(1);
+      if (got <= 0) break;
+      advanced += got;
+      this.processArrivalsForAdvancedMinutes(got);
+      this.game.events.emit('stats-updated', this.getHudState());
+      if (this.nightTimer <= 0) {
+        this.nightTimer = 0;
+        this.finishNight();
+        break;
+      }
+    }
+    return advanced;
   }
 
   /** Prompt A Phase 10 test/debug: reputation visit sats + return-chance hints (unused by spawn). */
@@ -3815,6 +3878,11 @@ export class ClubScene extends Phaser.Scene {
 
     // Prompt B Phase B2: advance game clock (OPEN/CLOSING). No auto-close at 02:00.
     const minutesAdvanced = tickShiftClock(dtSec);
+
+    // Prompt B Phase B4: organic arrivals on each advanced game minute.
+    if (minutesAdvanced > 0) {
+      this.processArrivalsForAdvancedMinutes(minutesAdvanced);
+    }
 
     // Phase 6: periodic peer observation (gradual competitiveness)
     this.competitionObserveAccum += dt;
