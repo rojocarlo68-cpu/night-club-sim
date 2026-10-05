@@ -99,6 +99,7 @@ export class BootScene extends Phaser.Scene {
     // neon placeholder pieces are gone (their art files were deleted from the repo).
     this.load.image('furn_sofa_medieval', 'assets/furniture/sofa_medieval_sw.png');
     this.load.image('furn_bar_medieval', 'assets/furniture/bar_medieval_sw.png');
+    this.load.image('furn_beer_tap', 'assets/furniture/beer_tap_sw.png');
 
     this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_standing.png', {
       frameWidth: 146,
