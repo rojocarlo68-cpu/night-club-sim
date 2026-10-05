@@ -1769,6 +1769,12 @@ export class ClubScene extends Phaser.Scene {
     const snap = getShiftSnapshot();
     const staffCount = this.allStaff().length;
     beginArrivalsNight(snap.gameHour, snap.gameMinute, staffCount, this.nightNumber);
+    // Prompt B Phase B8: record who is working and shift start clock.
+    recordStaffShiftStart(
+      this.allStaff().map((s) => ({ id: s.profile.id, name: s.displayName })),
+      snap.gameHour,
+      snap.gameMinute
+    );
     this.game.events.emit('night-started', this.getHudState());
   };
 
@@ -3019,6 +3025,10 @@ export class ClubScene extends Phaser.Scene {
     if (!beginShiftClosing()) return;
     this.phase = legacyPhaseFromShift(); // still 'open' for AI / patron loops
     stopArrivals();
+    {
+      const c = getShiftSnapshot();
+      recordStaffShiftEnd(c.gameHour, c.gameMinute);
+    }
     this.closingStartedAt = this.time.now;
     this.closingNudged = false;
     this.game.events.emit('night-closing', this.getHudState());
