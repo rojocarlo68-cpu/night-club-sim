@@ -30,4 +30,6 @@ export interface NpcInfo {
   performance?: 'alto' | 'medio' | 'bajo';
   /** Phase 6: Spanish competitiveness label when above threshold (e.g. 'un poco'). */
   competitivenessLabel?: string | null;
+  /** Phase 8: weekly salary paid by the club ($/semana). */
+  weeklySalary?: number;
 }

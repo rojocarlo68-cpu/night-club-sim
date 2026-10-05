@@ -27,6 +27,13 @@ import {
   serializeTips,
 } from '../systems/Tips';
 import { onNightEnd, resetNightCycleState } from '../systems/NightCycle';
+import {
+  takeLastPayroll,
+  serializePayrollHistory,
+  loadPayrollHistory,
+} from '../systems/Payroll';
+import { ALLOW_NEGATIVE_BALANCE, weeklySalaryFor } from '../config/salaries';
+import { nextWeekEndNight } from '../config/calendar';
 import { getPersonality, personalitySummary } from '../config/personality';
 import { TipAction } from '../config/tipActions';
 import {
@@ -181,6 +188,12 @@ interface SavedLayout {
   >;
   /** Phase 7: absolute night counter (starts at 1). Old saves omit → 1. */
   nightNumber?: number;
+  /** Phase 8: short weekly payroll history. Old saves omit → []. */
+  payrollHistory?: {
+    night: number;
+    total: number;
+    lines: { id: string; name: string; amount: number }[];
+  }[];
 }
 
 /** Every piece uses this single orientation (the sofa's front looks toward the lower-left). */
@@ -501,6 +514,7 @@ export class ClubScene extends Phaser.Scene {
       performance: performanceLabel(b.energy, b.mood),
       competitivenessLabel:
         comp > PANEL_SHOW_THRESHOLD ? competitivenessLabel(comp) : null,
+      weeklySalary: weeklySalaryFor(b.profile.id),
     };
   }
 
@@ -563,11 +577,13 @@ export class ClubScene extends Phaser.Scene {
         this.hiredStaffIds = saved.hiredStaff.filter((id) => typeof id === 'string');
       }
       if (typeof saved?.money === 'number' && Number.isFinite(saved.money)) {
-        this.money = Math.max(0, Math.floor(saved.money));
+        const m = Math.floor(saved.money);
+        this.money = ALLOW_NEGATIVE_BALANCE ? m : Math.max(0, m);
       }
       loadTips(saved?.staffTips);
       loadAffinities(saved?.affinities);
       loadCompetition(saved?.competition);
+      loadPayrollHistory(saved?.payrollHistory);
       resetNightCycleState();
       if (typeof saved?.nightNumber === 'number' && Number.isFinite(saved.nightNumber)) {
         this.nightNumber = Math.max(1, Math.floor(saved.nightNumber));
@@ -675,6 +691,7 @@ export class ClubScene extends Phaser.Scene {
       affinities: serializeAffinities(),
       competition: serializeCompetition(),
       nightNumber: this.nightNumber,
+      payrollHistory: serializePayrollHistory(),
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -2437,16 +2454,42 @@ export class ClubScene extends Phaser.Scene {
     // Tips night/jornada stay visible for the summary; resetNightTips runs on openNight.
     const endedNight = onNightEnd(this);
     this.persistLayout();
+    const payroll = takeLastPayroll();
     this.game.events.emit('night-summary', {
       ...this.getHudState(),
       nightNumber: endedNight,
       nightEarned: this.nightEarned,
       servedCount: this.servedCount,
+      payroll: payroll
+        ? { total: payroll.total, lines: payroll.lines.map((l) => ({ name: l.name, amount: l.amount })) }
+        : null,
+      nextPayrollNight: nextWeekEndNight(endedNight),
     });
     this.emitStaffRoster();
   }
 
-  /** Phase 7 test/debug: end the open night via the normal close path. */
+  /** Phase 8: employed staff for weekly payroll (NightCycle weekly hook). */
+  listPayrollStaff(): { id: string; name: string }[] {
+    return this.allStaff().map((s) => ({
+      id: s.profile.id,
+      name: s.displayName,
+    }));
+  }
+
+  /**
+   * Phase 8: money mutation path used by Payroll (same as hire/shop: mutate this.money).
+   * Tips are never touched. May go negative when ALLOW_NEGATIVE_BALANCE.
+   */
+  deductClubMoney(amount: number): void {
+    const n = Math.max(0, Math.floor(amount));
+    if (n <= 0) return;
+    this.money -= n;
+    if (!ALLOW_NEGATIVE_BALANCE && this.money < 0) {
+      this.money = 0;
+    }
+  }
+
+    /** Phase 7 test/debug: end the open night via the normal close path. */
   debugEndNight(): void {
     this.closeNight();
   }

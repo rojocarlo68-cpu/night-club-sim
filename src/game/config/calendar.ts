@@ -18,3 +18,11 @@ export function isWeekEnd(n: number): boolean {
 export function isMonthEnd(n: number): boolean {
   return Number.isFinite(n) && n > 0 && n % NIGHTS_PER_MONTH === 0;
 }
+
+/** Next night number that triggers weekly dues after `n` (or the following if `n` is already a week end). */
+export function nextWeekEndNight(n: number): number {
+  const cur = Math.max(0, Math.floor(n) || 0);
+  const rem = cur % NIGHTS_PER_WEEK;
+  return rem === 0 ? cur + NIGHTS_PER_WEEK : cur + (NIGHTS_PER_WEEK - rem);
+}
+

@@ -23,6 +23,10 @@ interface HudState {
   nightEarned?: number;
   servedCount?: number;
   buildMode?: boolean;
+  /** Phase 8: payroll paid on this night end (if any). */
+  payroll?: { total: number; lines: { name: string; amount: number }[] } | null;
+  /** Phase 8: next night that triggers weekly salaries. */
+  nextPayrollNight?: number;
 }
 
 const STATE_ES: Record<string, string> = {
@@ -286,7 +290,7 @@ export class UIScene extends Phaser.Scene {
 
     // Summary overlay
     this.summary = this.add.container(cam.width / 2, cam.height / 2).setScrollFactor(0).setVisible(false);
-    const sumBg = this.add.rectangle(0, 0, 380, 260, 0x140a22, 0.95);
+    const sumBg = this.add.rectangle(0, 0, 400, 320, 0x140a22, 0.95);
     sumBg.setStrokeStyle(2, 0x2ad6ff);
     sumBg.setInteractive();
     const sumTitle = this.add
@@ -298,15 +302,15 @@ export class UIScene extends Phaser.Scene {
       .setOrigin(0.5)
       .setName('title');
     const sumBody = this.add
-      .text(0, -20, '', {
-        fontSize: '16px',
+      .text(0, -10, '', {
+        fontSize: '15px',
         color: '#f0e0ff',
         align: 'center',
-        lineSpacing: 10,
+        lineSpacing: 8,
       })
       .setOrigin(0.5)
       .setName('body');
-    const again = this.makeLocalButton(-100, 80, 200, 40, 'Abrir noche', () => {
+    const again = this.makeLocalButton(-100, 110, 200, 40, 'Abrir noche', () => {
       if (this.buildMode) return;
       this.summary.setVisible(false);
       this.game.events.emit('cmd-open-night');
@@ -551,11 +555,16 @@ export class UIScene extends Phaser.Scene {
       const compLine = npc.competitivenessLabel
         ? `\nCompetitiva: ${npc.competitivenessLabel}`
         : '';
+      const salaryLine =
+        typeof npc.weeklySalary === 'number' && npc.weeklySalary > 0
+          ? `\nSueldo: $${npc.weeklySalary}/semana`
+          : '';
       this.panelStats.setText(
         `Estado: ${estado}\nHabilidad: ${npc.skill ?? '—'}\n` +
           `Propinas esta noche: $${tipsNight}\n` +
           `Propinas de la jornada: $${tipsDay}\n` +
           `Propinas totales: $${tipsTotal}` +
+          salaryLine +
           (npc.performance ? `\nRendimiento: ${npc.performance}` : '') +
           persLine +
           compLine +
@@ -648,6 +657,7 @@ export class UIScene extends Phaser.Scene {
         personality: this.selectedNpc.personality,
         competitivenessLabel: this.selectedNpc.competitivenessLabel,
         performance: this.selectedNpc.performance,
+        weeklySalary: this.selectedNpc.weeklySalary,
       });
     }
     this.refreshBuildButtons();
@@ -670,11 +680,28 @@ export class UIScene extends Phaser.Scene {
     this.timerText.setText(`${label} · cerrada`);
     this.moneyText.setText(`Dinero: $${s.money}`);
     const body = this.summary.getByName('body') as Phaser.GameObjects.Text;
+    let payrollBlock = '';
+    if (s.payroll && s.payroll.total > 0) {
+      const per =
+        s.payroll.lines.length > 0
+          ? '\n' + s.payroll.lines.map((l) => `  ${l.name}: $${l.amount}`).join('\n')
+          : '';
+      payrollBlock = `\nSueldos semanales: -$${s.payroll.total}` + per;
+    }
+    const nextPay =
+      typeof s.nextPayrollNight === 'number' && s.nextPayrollNight > 0
+        ? `\nPróximo pago de sueldos: noche ${s.nextPayrollNight}`
+        : '';
+    const debtWarn =
+      s.money < 0 ? '\n⚠ Dinero negativo: el club está en números rojos' : '';
     body.setText(
       `${label}\n` +
         `Ganado esta noche: $${s.nightEarned ?? 0}\n` +
         `Clientes que se sentaron: ${s.servedCount ?? 0}\n` +
-        `Dinero total: $${s.money}`
+        `Dinero total: $${s.money}` +
+        payrollBlock +
+        nextPay +
+        debtWarn
     );
     this.summary.setVisible(true);
     // Patrons are cleared — if a patron was selected, close panel

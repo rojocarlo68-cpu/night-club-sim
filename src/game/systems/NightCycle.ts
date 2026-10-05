@@ -8,6 +8,10 @@ import { isMonthEnd, isWeekEnd } from '../config/calendar';
 /** Minimal host so this module stays free of ClubScene imports. */
 export interface NightCycleHost {
   nightNumber: number;
+  /** Phase 8: currently employed staff for weekly payroll. */
+  listPayrollStaff?(): { id: string; name: string }[];
+  /** Phase 8: subtract from club money (may go negative). */
+  deductClubMoney?(amount: number): void;
 }
 
 export type NightDueHook = (nightNumber: number, host: NightCycleHost) => void;
