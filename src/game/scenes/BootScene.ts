@@ -134,6 +134,12 @@ export class BootScene extends Phaser.Scene {
       frameWidth: PATRON_FRAME_W,
       frameHeight: PATRON_FRAME_H,
     });
+    // Client (hoodie guy) hi-res idle for SE / SW: 2 frames of 560×960 (= patron 112×192 ×5; frame 1 = mirrored frame 0).
+    // Same on-screen scale as patron_idle: Patron.ts display size is 112:192 → PATRON_DISPLAY_H whatever the frame px.
+    this.load.spritesheet('client_hoodie_idle', 'assets/characters/client_hoodie_idle_sheet.png', {
+      frameWidth: 560,
+      frameHeight: 960,
+    });
     this.load.spritesheet('nova_idle', 'assets/characters/nova_idle_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
@@ -269,7 +275,16 @@ export class BootScene extends Phaser.Scene {
       }
       const idleKey = `patron-idle-${f.key}`;
       if (!this.anims.exists(idleKey)) {
-        if (this.textures.exists('patron_idle')) {
+        if ((f.key === 'se' || f.key === 'sw') && this.textures.exists('client_hoodie_idle')) {
+          // New clean client art: SE = frame 0, SW = frame 1 (mirrored). NE / NW keep the old patron_idle frames.
+          const hf = f.key === 'se' ? 0 : 1;
+          this.anims.create({
+            key: idleKey,
+            frames: this.anims.generateFrameNumbers('client_hoodie_idle', { start: hf, end: hf }),
+            frameRate: 1,
+            repeat: -1,
+          });
+        } else if (this.textures.exists('patron_idle')) {
           const idleFrame = facings.findIndex((x) => x.key === f.key);
           this.anims.create({
             key: idleKey,

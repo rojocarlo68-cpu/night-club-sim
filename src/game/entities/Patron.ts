@@ -61,6 +61,8 @@ export class Patron extends Character {
   /** Persistent Spanish status (Esperando, Impaciente, Sentado, …). */
   statusLabel?: Phaser.GameObjects.Text;
   private ring?: Phaser.GameObjects.Ellipse;
+  private lastHitFw = 0;
+  private lastHitFh = 0;
 
   constructor(
     scene: Phaser.Scene,
@@ -118,6 +120,10 @@ export class Patron extends Character {
     }
 
     this.refreshHitArea();
+    // Idle SE/SW use a hi-res 560×960 sheet, walk/NE/NW use 112×192: the hit area lives in frame pixels,
+    // so re-fit it whenever the texture (frame size) changes.
+    this.sprite.on('animationstart', this.syncHitArea, this);
+    this.sprite.on('animationupdate', this.syncHitArea, this);
     this.ring = scene.add.ellipse(0, -2, 18, 8, 0x2ad6ff, 0.0);
     this.add(this.ring);
     this.ring.setDepth(-1);
@@ -158,6 +164,23 @@ export class Patron extends Character {
       hitAreaCallback: Phaser.Geom.Rectangle.Contains,
       useHandCursor: true,
     });
+  }
+
+  /** Keep the click area at the same on-screen size when the frame size changes (see constructor). */
+  private syncHitArea(): void {
+    const rect = this.sprite.input?.hitArea as Phaser.Geom.Rectangle | undefined;
+    if (!rect || this.sheetDisplayW <= 0) return;
+    const fw = this.sprite.width;
+    const fh = this.sprite.height;
+    if (fw <= 0 || fh <= 0) return;
+    if (rect.width > 0 && Math.abs(this.lastHitFw - fw) < 0.5 && Math.abs(this.lastHitFh - fh) < 0.5) return;
+    const sx = this.sheetDisplayW / fw;
+    const sy = this.sheetDisplayH / fh;
+    const padX = Math.max(0, (64 / sx - fw) / 2);
+    const padY = Math.max(0, (120 / sy - fh) / 2);
+    rect.setTo(-padX, -padY, fw + padX * 2, fh + padY * 2);
+    this.lastHitFw = fw;
+    this.lastHitFh = fh;
   }
 
   setSelected(v: boolean): void {
