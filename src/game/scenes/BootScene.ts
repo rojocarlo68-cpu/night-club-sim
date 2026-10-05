@@ -93,11 +93,11 @@ export class BootScene extends Phaser.Scene {
     this.load.image('furn_sofa_medieval', 'assets/furniture/sofa_medieval_sw.png');
     this.load.image('furn_bar_medieval', 'assets/furniture/bar_medieval_sw.png');
 
-    this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_sheet.png', {
+    this.load.spritesheet('luna_idle', 'assets/characters/luna_idle_standing.png', {
       frameWidth: 146,
       frameHeight: 784,
     });
-    // Back-facing idle (normalized to same 146×784 as front)
+    // Back-facing idle (8 frames, 146×784). Front 'luna_idle' is a single 146×784 standing frame.
     this.load.spritesheet('luna_idle_back', 'assets/characters/luna_idle_back_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
@@ -157,7 +157,11 @@ export class BootScene extends Phaser.Scene {
       if (!this.anims.exists(animKey) && this.textures.exists(f.texture)) {
         this.anims.create({
           key: animKey,
-          frames: this.anims.generateFrameNumbers(f.texture, { start: 0, end: 7 }),
+          // Front (SE/SW) idle is ONE static standing frame; back (NE/NW) keeps its 8-frame loop.
+          frames: this.anims.generateFrameNumbers(f.texture, {
+            start: 0,
+            end: f.texture === 'luna_idle' ? 0 : 7,
+          }),
           frameRate: 9,
           repeat: -1,
         });
@@ -167,7 +171,7 @@ export class BootScene extends Phaser.Scene {
     if (!this.anims.exists('luna-idle') && this.anims.exists('luna-idle-se')) {
       this.anims.create({
         key: 'luna-idle',
-        frames: this.anims.generateFrameNumbers('luna_idle', { start: 0, end: 7 }),
+        frames: this.anims.generateFrameNumbers('luna_idle', { start: 0, end: 0 }),
         frameRate: 9,
         repeat: -1,
       });

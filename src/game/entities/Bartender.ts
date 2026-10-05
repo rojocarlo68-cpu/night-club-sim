@@ -16,7 +16,7 @@ export interface BartenderData {
   moveSpeed: number;
 }
 
-/** Luna idle front/back sheets: 1168×784 → 8 frames of 146×784; feet near y=583. */
+/** Luna idle: front = ONE 146×784 standing frame, back sheet = 8 frames of 146×784; feet at y=583. */
 export const LUNA_IDLE_FRAME_W = 146;
 export const LUNA_IDLE_FRAME_H = 784;
 export const LUNA_FEET_ORIGIN_Y = 583 / 784;
