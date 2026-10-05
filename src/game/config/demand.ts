@@ -1,5 +1,6 @@
 /**
  * Prompt B Phase B4–B6 — organic patron arrivals (early-night conservative).
+ * Phase B6: quiet stretches (15–30+ min) common; low group chance; hour curve.
  * Times are in GAME minutes (see REAL_SECONDS_PER_GAME_MINUTE in shift.ts).
  *
  * EARLY_NIGHT_SOFT_CAP is a CEILING / potential max — NOT a fill target.
