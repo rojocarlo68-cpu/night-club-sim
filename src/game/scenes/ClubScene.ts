@@ -60,6 +60,14 @@ import {
   setArrivalsSeed,
 } from '../systems/Arrivals';
 import {
+  recordStaffShiftStart,
+  recordStaffShiftEnd,
+  getStaffHoursDebug as readStaffHoursDebug,
+  getLastStaffHours,
+  formatDurationHm,
+  resetStaffHours,
+} from '../systems/StaffHours';
+import {
   CLOSED_OVERLAY_COLOR,
   CLOSED_OVERLAY_ALPHA,
   OPEN_OVERLAY_ALPHA,
@@ -3048,6 +3056,11 @@ export class ClubScene extends Phaser.Scene {
     if (this.phase !== 'open' && st !== 'closing') return;
     // Prompt B Phase B7: CLOSING (or open fallback) → SUMMARY.
     beginShiftSummary();
+    // Ensure hours closed even if finishNight skipped CLOSING (debugForceSummary).
+    {
+      const c = getShiftSnapshot();
+      recordStaffShiftEnd(c.gameHour, c.gameMinute);
+    }
     syncShiftDay(this.nightNumber);
     this.phase = legacyPhaseFromShift();
     stopArrivals();
@@ -3283,6 +3296,11 @@ export class ClubScene extends Phaser.Scene {
   /** Prompt B Phase B1 test/debug: day / game clock / shift FSM. */
   getShiftDebug() {
     return readShiftDebug();
+  }
+
+  /** Prompt B Phase B8 test/debug: per-staff hours / overtime / pending fatigue. */
+  getStaffHoursDebug() {
+    return readStaffHoursDebug();
   }
 
   /** Prompt B Phase B4 test/debug: arrival log / soft cap. */
