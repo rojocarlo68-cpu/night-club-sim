@@ -890,8 +890,9 @@ export class UIScene extends Phaser.Scene {
     const btnY = panelH / 2 - padBot - btnH / 2;
     this.summaryAgain.setPosition(-100, btnY);
 
-    const closeX = panelW / 2 - closeSize / 2 - 10;
-    const closeY = topY + closeSize / 2 + 8;
+    // makeLocalButton is top-left anchored
+    const closeX = panelW / 2 - 36 - 8;
+    const closeY = topY + 8;
     this.summaryClose.setPosition(closeX, closeY);
 
     this.summary.setPosition(cam.width / 2, cam.height / 2);
