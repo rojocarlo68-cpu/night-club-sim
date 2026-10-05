@@ -43,6 +43,28 @@
         170
       ],
       "blurb": "Barra de madera 2×1. El personal sirve bebidas desde el frente (lado inferior izquierdo) y los clientes piden y pagan ahí."
+    },
+    {
+      "id": "beer_tap",
+      "name": "Grifo de cerveza",
+      "price": 45,
+      "category": "muebles",
+      "sprite": "furn_beer_tap",
+      "spriteFile": "assets/furniture/beer_tap_sw.png",
+      "footprint": [
+        1,
+        1
+      ],
+      "displaySize": [
+        43,
+        68
+      ],
+      "yBias": 0,
+      "baseVertex": [
+        44,
+        143
+      ],
+      "blurb": "Columna de madera con tres grifos de latón. Mueble decorativo 1×1."
     }
   ]
 }
