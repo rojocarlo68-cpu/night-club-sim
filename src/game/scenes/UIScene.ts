@@ -1008,8 +1008,9 @@ export class UIScene extends Phaser.Scene {
 
   private fmtMoney(n: number): string {
     if (!Number.isFinite(n)) return '$0';
-    const r = Math.round(n * 100) / 100;
-    return Number.isInteger(r) ? `$${r}` : `$${r.toFixed(1)}`;
+    const r = Math.round(Math.abs(n) * 100) / 100;
+    const sign = n < 0 && r > 0 ? '-' : '';
+    return Number.isInteger(r) ? `${sign}$${r}` : `${sign}$${r.toFixed(1)}`;
   }
 
   /** Compact inventory button; greys out when disabled (price min/max). */
@@ -1056,38 +1057,29 @@ export class UIScene extends Phaser.Scene {
     }
     const lines = listInventory();
     const camW = this.cameras.main.width;
-    const panelW = Math.min(360, Math.max(300, camW - 24));
-    const half = panelW / 2 - 10;
-    const narrow = camW < 420;
-    const font = narrow ? '9px' : '10px';
-    const headerFont = narrow ? '9px' : '10px';
-    // Restock on second row at narrow widths so [−] price [+] fits.
-    const twoRow = narrow;
-    const rowH = twoRow ? 48 : 40;
-    const panelH = Math.min(520, 80 + 28 + lines.length * rowH + 40);
-    if (this.inventoryBg) {
-      this.inventoryBg.setSize(panelW, panelH);
-    }
+    const camH = this.cameras.main.height;
+    // Wide: one row per product. Narrow (phones): row 1 = data, row 2 = [−] price [+] and restock.
+    const twoRow = camW < 600;
+    const panelW = twoRow ? Math.max(300, camW - 16) : 580;
+    const half = panelW / 2 - 14;
+    const font = twoRow ? '11px' : '12px';
+    const rowH = twoRow ? 54 : 38;
+    const panelH = Math.min(camH - 70, 64 + 24 + lines.length * rowH + 40);
+    if (this.inventoryBg) this.inventoryBg.setSize(panelW, panelH);
+    const title = this.inventoryPanel.getByName('invTitle') as Phaser.GameObjects.Text | null;
+    if (title) title.setY(-panelH / 2 + 22);
+    const closeBtn = this.inventoryPanel.list.find(
+      (o) => o instanceof Phaser.GameObjects.Container && o !== this.inventoryPanel && !this.inventoryRows.includes(o)
+    ) as Phaser.GameObjects.Container | undefined;
+    if (closeBtn) closeBtn.setPosition(panelW / 2 - 40, -panelH / 2 + 8);
 
-    // Columns inside ±half. Price column holds [−]$N[+] (Phase 5).
-    const cols = {
-      name: -half,
-      stock: -half + (narrow ? 64 : 70),
-      sold: -half + (narrow ? 96 : 104),
-      cost: -half + (narrow ? 126 : 138),
-      price: -half + (narrow ? 164 : 180),
-      margin: half - (narrow ? 36 : 42),
-    };
+    const cols = twoRow
+      ? { name: -half, stock: -half + 96, sold: -half + 142, cost: -half + 188, margin: -half + 244, price: -half + 52, rest: half - 76 }
+      : { name: -half, stock: -half + 98, sold: -half + 146, cost: -half + 194, price: -half + 250, margin: -half + 352, rest: half - 76 };
 
-    const headerY = -panelH / 2 + 42;
+    const headerY = -panelH / 2 + 50;
     const mkH = (x: number, label: string) => {
-      const tt = this.add
-        .text(x, headerY, label, {
-          fontSize: headerFont,
-          color: '#a080c0',
-          fontStyle: 'bold',
-        })
-        .setOrigin(0, 0);
+      const tt = this.add.text(x, headerY, label, { fontSize: font, color: '#a080c0', fontStyle: 'bold' }).setOrigin(0, 0);
       this.inventoryPanel.add(tt);
       this.inventoryRows.push(tt);
     };
@@ -1095,101 +1087,69 @@ export class UIScene extends Phaser.Scene {
     mkH(cols.stock, 'Exis.');
     mkH(cols.sold, 'Vend.');
     mkH(cols.cost, 'Costo');
-    mkH(cols.price, 'Precio');
-    mkH(cols.margin, 'Mar.');
+    if (!twoRow) mkH(cols.price, 'Precio');
+    mkH(cols.margin, 'Margen');
+    if (!twoRow) mkH(cols.rest, 'Comprar');
 
-    let y = headerY + 18;
+    let y = headerY + 22;
     for (const line of lines) {
-      const mk = (x: number, label: string, color = '#e8d0ff', oy = 2) => {
+      const mk = (x: number, yy: number, label: string, color = '#e8d0ff', bold = false) => {
         const tt = this.add
-          .text(x, y + oy, label, { fontSize: font, color })
+          .text(x, yy, label, { fontSize: font, color, fontStyle: bold ? 'bold' : 'normal' })
           .setOrigin(0, 0);
         this.inventoryPanel.add(tt);
         this.inventoryRows.push(tt);
       };
       const stockColor = line.stock <= 0 ? '#ff6688' : '#e8d0ff';
       const marginColor = line.margin < 0 ? '#ff6688' : '#3cff9a';
-      mk(cols.name, line.name, '#ff9ad5');
-      mk(cols.stock, String(line.stock), stockColor);
-      mk(cols.sold, String(line.soldTonight));
-      mk(cols.cost, this.fmtMoney(line.supplierCost));
-      mk(cols.margin, this.fmtMoney(line.margin), marginColor);
+      mk(cols.name, y + 4, line.name, '#ff9ad5');
+      mk(cols.stock, y + 4, String(line.stock), stockColor);
+      mk(cols.sold, y + 4, String(line.soldTonight));
+      mk(cols.cost, y + 4, this.fmtMoney(line.supplierCost));
+      mk(cols.margin, y + 4, this.fmtMoney(line.margin), marginColor);
 
-      // Phase 5: [−] $N [+] — emit cmd-set-drink-price
+      // [−] $N [+] — emits cmd-set-drink-price
       const step = Math.max(1, line.priceStep || 1);
       const atMin = line.price <= line.minPrice;
       const atMax = line.price >= line.maxPrice;
-      const btnH = 24;
-      const btnW = 24;
-      const priceStr = this.fmtMoney(line.price);
-      const priceTw = Math.max(28, priceStr.length * 7);
-      const clusterW = btnW + 4 + priceTw + 4 + btnW;
-      const priceX = cols.price;
-      const minus = this.makeInvBtn(
-        priceX,
-        y - 2,
-        btnW,
-        btnH,
-        '−',
-        () => {
-          this.game.events.emit('cmd-set-drink-price', {
-            id: line.id,
-            delta: -step,
-          });
-        },
-        !atMin
-      );
+      const btn = 26;
+      const priceW = 38;
+      const rowY2 = twoRow ? y + 24 : y;
+      if (twoRow) mk(cols.name, rowY2 + 6, 'Precio', '#a080c0');
+      const minus = this.makeInvBtn(cols.price, rowY2, btn, btn - 2, '−', () => {
+        this.game.events.emit('cmd-set-drink-price', { id: line.id, delta: -step });
+      }, !atMin);
       const priceLabel = this.add
-        .text(priceX + btnW + 4, y + 4, priceStr, {
+        .text(cols.price + btn + priceW / 2, rowY2 + (btn - 2) / 2, this.fmtMoney(line.price), {
           fontSize: font,
           color: '#7ad7ff',
           fontStyle: 'bold',
         })
-        .setOrigin(0, 0);
-      const plus = this.makeInvBtn(
-        priceX + btnW + 4 + priceTw + 4,
-        y - 2,
-        btnW,
-        btnH,
-        '+',
-        () => {
-          this.game.events.emit('cmd-set-drink-price', {
-            id: line.id,
-            delta: step,
-          });
-        },
-        !atMax
-      );
-      for (const b of [minus, plus]) {
-        this.inventoryPanel.add(b);
-        this.inventoryRows.push(b);
-      }
-      this.inventoryPanel.add(priceLabel);
-      this.inventoryRows.push(priceLabel);
-
-      // Restock +5 / +20 (Phase 4)
-      const restY = twoRow ? y + 22 : y - 2;
-      const restX = twoRow ? cols.price : Math.min(half - 68, priceX + clusterW + 8);
-      const b5 = this.makeInvBtn(restX, restY, 30, 22, '+5', () => {
+        .setOrigin(0.5);
+      const plus = this.makeInvBtn(cols.price + btn + priceW, rowY2, btn, btn - 2, '+', () => {
+        this.game.events.emit('cmd-set-drink-price', { id: line.id, delta: step });
+      }, !atMax);
+      // Restock +5 / +20
+      const b5 = this.makeInvBtn(cols.rest, rowY2, 34, btn - 2, '+5', () => {
         this.game.events.emit('cmd-restock-drink', { id: line.id, units: 5 });
       });
-      const b20 = this.makeInvBtn(restX + 34, restY, 34, 22, '+20', () => {
+      const b20 = this.makeInvBtn(cols.rest + 38, rowY2, 38, btn - 2, '+20', () => {
         this.game.events.emit('cmd-restock-drink', { id: line.id, units: 20 });
       });
-      for (const b of [b5, b20]) {
-        this.inventoryPanel.add(b);
-        this.inventoryRows.push(b);
+      for (const o of [minus, priceLabel, plus, b5, b20]) {
+        this.inventoryPanel.add(o);
+        this.inventoryRows.push(o);
       }
       y += rowH;
     }
 
     const hint = this.add
-      .text(
-        0,
-        panelH / 2 - 22,
-        '−/+ precio · +5/+20 proveedor · Vendidas = esta noche',
-        { fontSize: '9px', color: '#8060a0' }
-      )
+      .text(0, panelH / 2 - 20, '−/+ cambia el precio · +5/+20 compra al proveedor · Vendidas = esta noche', {
+        fontSize: '10px',
+        color: '#8060a0',
+        align: 'center',
+        wordWrap: { width: panelW - 24 },
+      })
       .setOrigin(0.5);
     this.inventoryPanel.add(hint);
     this.inventoryRows.push(hint);
