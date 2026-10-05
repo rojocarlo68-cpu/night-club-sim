@@ -76,6 +76,9 @@ export class Bartender extends Character {
         displayHeight: displayH,
         y: 6,
         idleAnimPrefix: 'luna-idle',
+        // Two alternative walk cycles (SE/SW only; SW = SE mirrored via flipX). NE/NW keep the back idle.
+        walkAnimVariants: ['luna-walk-a', 'luna-walk-b'],
+        scaleDisplayWByFrame: true, // walk frames are 200 wide vs 146 idle: same px→screen scale
         flipIdleFacings: true, // SE/SW=front sheet, NE/NW=back sheet + flipX
       });
       this.ring.setPosition(0, -2);

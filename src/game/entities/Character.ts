@@ -17,6 +17,12 @@ export class Character extends Phaser.GameObjects.Container {
   protected idleAnimPool: string[] | null = null;
   /** Prefix for directional walk anims: `${prefix}-${facing}` e.g. patron-walk-se */
   protected walkAnimPrefix: string | null = null;
+  /** Alternative walk anim prefixes; one is picked at random per trip (walkTo). Overrides walkAnimPrefix. */
+  protected walkAnimVariants: string[] | null = null;
+  private walkVariantCur: string | null = null;
+  /** Frame width of the idle sheet; walk sheets with wider frames are scaled by the same px→screen ratio. */
+  protected sheetBaseFrameW = 0;
+  protected scaleDisplayWByFrame = false;
   /** Prefix for directional idle: `${prefix}-${facing}`; falls back to idleAnimKey. */
   protected idleAnimPrefix: string | null = null;
   /** When true, SW/NW mirror the SE/NE sheets via flipX (Luna front/back). */
@@ -60,6 +66,10 @@ export class Character extends Phaser.GameObjects.Container {
     displayHeight: number;
     y?: number;
     walkAnimPrefix?: string;
+    /** Alternative walk anim prefixes (`${prefix}-${facing}`), random pick per trip. */
+    walkAnimVariants?: string[];
+    /** Keep the same screen scale when a walk sheet has a different frame width than the idle sheet. */
+    scaleDisplayWByFrame?: boolean;
     idleAnimPrefix?: string;
     /** Mirror SW/NW with flipX (front/back sheet pairs). */
     flipIdleFacings?: boolean;
@@ -71,6 +81,9 @@ export class Character extends Phaser.GameObjects.Container {
         ? [opts.animKey, ...opts.altAnimKeys]
         : null;
     this.walkAnimPrefix = opts.walkAnimPrefix ?? null;
+    this.walkAnimVariants = opts.walkAnimVariants ?? null;
+    this.scaleDisplayWByFrame = opts.scaleDisplayWByFrame ?? false;
+    this.sheetBaseFrameW = this.sprite.frame?.realWidth ?? 0;
     this.idleAnimPrefix = opts.idleAnimPrefix ?? null;
     this.flipIdleFacings = opts.flipIdleFacings ?? false;
     this.sheetDisplayW = opts.displayWidth;
@@ -92,7 +105,11 @@ export class Character extends Phaser.GameObjects.Container {
   reapplyDisplaySize(): void {
     if (this.sheetDisplayW > 0 && this.sheetDisplayH > 0) {
       // Prefer setDisplaySize over setScale(1) — native frames (e.g. 112×192) look huge.
-      this.sprite.setDisplaySize(this.sheetDisplayW, this.sheetDisplayH);
+      let w = this.sheetDisplayW;
+      if (this.scaleDisplayWByFrame && this.sheetBaseFrameW > 0 && this.sprite.frame) {
+        w = (this.sheetDisplayW * this.sprite.frame.realWidth) / this.sheetBaseFrameW;
+      }
+      this.sprite.setDisplaySize(w, this.sheetDisplayH);
     }
   }
 
@@ -159,8 +176,9 @@ export class Character extends Phaser.GameObjects.Container {
   protected playWalkFacing(facing: IsoFacing): void {
     this.facing = facing;
     this.applyFacingFlip();
-    if (this.walkAnimPrefix) {
-      const key = `${this.walkAnimPrefix}-${facing}`;
+    const walkPrefix = this.walkVariantCur ?? this.walkAnimPrefix;
+    if (walkPrefix) {
+      const key = `${walkPrefix}-${facing}`;
       if (this.scene.anims.exists(key)) {
         this.sprite.play(key, true);
         this.reapplyDisplaySize();
@@ -240,6 +258,11 @@ export class Character extends Phaser.GameObjects.Container {
     this.pathIndex = 0;
     this.onArrive = onArrive;
     this.state = 'walking';
+    // Alternative walk cycles: pick one at random per trip (kept for the whole trip).
+    this.walkVariantCur =
+      this.walkAnimVariants && this.walkAnimVariants.length > 0
+        ? this.walkAnimVariants[Math.floor(Math.random() * this.walkAnimVariants.length)] ?? null
+        : null;
     this.followPath();
     return true;
   }
@@ -260,7 +283,7 @@ export class Character extends Phaser.GameObjects.Container {
     const dist = Phaser.Math.Distance.Between(this.x, this.y, screen.x, screen.y);
     const duration = Math.max(120, (dist / this.moveSpeed) * 1000);
     // Prefer walk anim; else directional idle keeps playing (don't stopBob freeze).
-    if (this.walkAnimPrefix || this.idleAnimPrefix) {
+    if (this.walkAnimPrefix || this.walkVariantCur || this.idleAnimPrefix) {
       this.bobTween?.stop();
       this.bobTween = undefined;
     } else {

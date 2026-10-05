@@ -102,6 +102,15 @@ export class BootScene extends Phaser.Scene {
       frameWidth: 146,
       frameHeight: 784,
     });
+    // Luna walk, two alternative cycles (SE = semi-right, 10 frames of 200×784; SW = flipX of these)
+    this.load.spritesheet('luna_walk_a', 'assets/characters/luna_walk_a_se_sheet.png', {
+      frameWidth: 200,
+      frameHeight: 784,
+    });
+    this.load.spritesheet('luna_walk_b', 'assets/characters/luna_walk_b_se_sheet.png', {
+      frameWidth: 200,
+      frameHeight: 784,
+    });
     this.load.spritesheet('luna_serve_beer', 'assets/characters/luna_serve_beer_sheet.png', {
       frameWidth: 146,
       frameHeight: 784,
@@ -162,6 +171,21 @@ export class BootScene extends Phaser.Scene {
             start: 0,
             end: f.texture === 'luna_idle' ? 0 : 7,
           }),
+          frameRate: 9,
+          repeat: -1,
+        });
+      }
+    }
+    // Luna walk variants a/b: SE anim; SW anim uses the same SE frames, Character mirrors with flipX.
+    for (const v of ['a', 'b']) {
+      const tex = `luna_walk_${v}`;
+      if (!this.textures.exists(tex)) continue;
+      for (const f of ['se', 'sw']) {
+        const k = `luna-walk-${v}-${f}`;
+        if (this.anims.exists(k)) continue;
+        this.anims.create({
+          key: k,
+          frames: this.anims.generateFrameNumbers(tex, { start: 0, end: 9 }),
           frameRate: 9,
           repeat: -1,
         });
