@@ -28,6 +28,19 @@ import {
 } from '../systems/Tips';
 import { onNightEnd, resetNightCycleState } from '../systems/NightCycle';
 import {
+  initShift,
+  loadShift,
+  serializeShift,
+  beginShiftOpen,
+  beginShiftSummary,
+  syncShiftDay,
+  legacyPhaseFromShift,
+  getShiftDebug as readShiftDebug,
+  getShiftSnapshot,
+  resetShiftState,
+  type ShiftPersist,
+} from '../systems/Shift';
+import {
   resetNightAccumulators,
   noteLeaveWithoutBuy,
   snapshotNightStats,
@@ -278,6 +291,8 @@ interface SavedLayout {
   >;
   /** Phase 7: absolute night counter (starts at 1). Old saves omit → 1. */
   nightNumber?: number;
+  /** Prompt B Phase B1: day/game-clock/shift FSM. Old saves omit → day=nightNumber @ 17:00 closed. */
+  shift?: ShiftPersist;
   /** Phase 8: short weekly payroll history. Old saves omit → []. */
   payrollHistory?: {
     night: number;
@@ -467,6 +482,10 @@ export class ClubScene extends Phaser.Scene {
     this.nightEarned = 0;
     this.servedCount = 0;
     this.phase = 'prep';
+    // Prompt B Phase B1: shift FSM (day/hour). Spawn + 75s timer unchanged.
+    resetShiftState();
+    initShift({ currentDay: this.nightNumber, shiftState: 'closed' });
+    this.phase = legacyPhaseFromShift();
     this.patrons = [];
     this.drinks = Array.isArray(this.scenario.drinks) ? this.scenario.drinks : [];
     // Prompt A Phase 3: inventory catalogue (serving still uses this.drinks / scenario prices).
@@ -723,6 +742,10 @@ export class ClubScene extends Phaser.Scene {
       } else {
         this.nightNumber = 1;
       }
+      // Prompt B Phase B1: restore day/hour; mid-open saves force closed @ pre-open.
+      loadShift(saved?.shift, this.nightNumber);
+      syncShiftDay(this.nightNumber);
+      this.phase = legacyPhaseFromShift();
       if (!Array.isArray(saved?.furniture)) return;
       // Ensure shop catalog available before restoring purchased pieces
       this.loadShopCatalog();
@@ -830,6 +853,7 @@ export class ClubScene extends Phaser.Scene {
       reputation: serializeReputation(),
       competition: serializeCompetition(),
       nightNumber: this.nightNumber,
+      shift: serializeShift(),
       payrollHistory: serializePayrollHistory(),
       utilitiesHistory: serializeUtilitiesHistory(),
     };
@@ -1596,7 +1620,10 @@ export class ClubScene extends Phaser.Scene {
     this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     this.rebuildPathfinder();
-    this.phase = 'open';
+    // Prompt B Phase B1: CLOSED/SUMMARY → OPEN (spawn + 75s timer still below).
+    syncShiftDay(this.nightNumber);
+    if (!beginShiftOpen()) return;
+    this.phase = legacyPhaseFromShift();
     this.nightEarned = 0;
     this.servedCount = 0;
     resetNightTips();
@@ -2859,7 +2886,10 @@ export class ClubScene extends Phaser.Scene {
 
   private finishNight(): void {
     if (this.phase !== 'open') return;
-    this.phase = 'summary';
+    // Prompt B Phase B1: OPEN → SUMMARY (CLOSING dwell comes in B7).
+    beginShiftSummary();
+    syncShiftDay(this.nightNumber);
+    this.phase = legacyPhaseFromShift();
     this.hideDeleteConfirmUi();
     this.clearFurnitureSelection();
     if (this.selectedNpcId && this.selectedNpcId !== this.bartender?.profile.id) {
@@ -2886,6 +2916,7 @@ export class ClubScene extends Phaser.Scene {
     // Phase 7: roll-up + weekly/monthly hooks, then bump nightNumber.
     // Tips night/jornada stay visible for the summary; resetNightTips runs on openNight.
     const endedNight = onNightEnd(this);
+    syncShiftDay(this.nightNumber); // post night-end bump
     // Prompt A Phase 10: snapshot sales/tips/leaves/sat BEFORE openNight resets soldTonight.
     const nightStats = snapshotNightStats({
       nightNumber: endedNight,
@@ -3056,6 +3087,11 @@ export class ClubScene extends Phaser.Scene {
     return readNightStatsDebug();
   }
 
+  /** Prompt B Phase B1 test/debug: day / game clock / shift FSM. */
+  getShiftDebug() {
+    return readShiftDebug();
+  }
+
   /** Prompt A Phase 10 test/debug: reputation visit sats + return-chance hints (unused by spawn). */
   getReputationDebug() {
     return readReputationDebug();
@@ -3101,11 +3137,16 @@ export class ClubScene extends Phaser.Scene {
   }
 
     getHudState() {
+    const shift = getShiftSnapshot();
     return {
       money: this.money,
       phase: this.phase,
       nightTimer: Math.ceil(this.nightTimer),
       nightNumber: this.nightNumber,
+      shiftState: shift.shiftState,
+      currentDay: shift.currentDay,
+      gameHour: shift.gameHour,
+      gameMinute: shift.gameMinute,
       bartender: this.bartender
         ? {
             name: this.bartender.displayName,
