@@ -26,6 +26,7 @@ import {
   resetNightTips,
   serializeTips,
 } from '../systems/Tips';
+import { getPersonality, personalitySummary } from '../config/personality';
 import {
   FurnitureInspectPayload,
   FurnitureRuntimeStats,
@@ -428,6 +429,7 @@ export class ClubScene extends Phaser.Scene {
       portrait = this.staffPool.find((c) => c.id === b.profile.id)?.portrait;
     }
     const tips = getTips(b.profile.id);
+    const personality = personalitySummary(getPersonality(b.profile.id));
     return {
       id: b.profile.id,
       name: b.displayName,
@@ -440,6 +442,7 @@ export class ClubScene extends Phaser.Scene {
       tipsNight: tips.tipsNight,
       tipsDay: tips.tipsDay,
       tipsTotal: tips.tipsTotal,
+      personality,
     };
   }
 

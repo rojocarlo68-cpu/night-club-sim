@@ -538,11 +538,17 @@ export class UIScene extends Phaser.Scene {
         ['serving', 'serving_cerveza', 'serving_drink', 'busy'].includes(npc.state)
           ? '\nBuscando propina…'
           : '';
+      const pers = npc.personality ?? [];
+      const persLine =
+        pers.length > 0
+          ? '\n' + pers.map((x) => `${x.label}: ${x.level}`).join(' · ')
+          : '';
       this.panelStats.setText(
         `Estado: ${estado}\nHabilidad: ${npc.skill ?? '—'}\n` +
           `Propinas esta noche: $${tipsNight}\n` +
           `Propinas de la jornada: $${tipsDay}\n` +
           `Propinas totales: $${tipsTotal}` +
+          persLine +
           seeking
       );
       this.energyLabel.setText('Energía');

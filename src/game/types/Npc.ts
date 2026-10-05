@@ -20,4 +20,6 @@ export interface NpcInfo {
   tipsNight?: number;
   tipsDay?: number;
   tipsTotal?: number;
+  /** Personality summary for selection panel (Phase 2). */
+  personality?: { label: string; level: string }[];
 }
