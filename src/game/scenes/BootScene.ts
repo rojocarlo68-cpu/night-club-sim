@@ -258,9 +258,9 @@ export class BootScene extends Phaser.Scene {
         repeat: 0,
       });
     }
-    // Nova idle: new clean art, 2 static frames of 146×784 — frame 0 = SE (semi-right, as drawn), frame 1 = SW (pre-mirrored).
-    // No back-view art exists, so NE uses the SE frame and NW the SW frame (staff face NE/NW at the bar most of the time).
-    for (const [facing, frame] of [['se', 0], ['sw', 1], ['ne', 0], ['nw', 1]] as const) {
+    // Nova idle: 4 static frames of 146×784 (476px body, soles y=610) — 0 = SE (front, as drawn), 1 = SW (front, pre-mirrored),
+    // 2 = NE (back, pre-mirrored), 3 = NW (back, as drawn).
+    for (const [facing, frame] of [['se', 0], ['sw', 1], ['ne', 2], ['nw', 3]] as const) {
       const k = `nova-idle-${facing}`;
       if (!this.anims.exists(k) && this.textures.exists('nova_idle')) {
         this.anims.create({
