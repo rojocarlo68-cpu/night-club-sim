@@ -475,6 +475,31 @@ import {
   loadTrash,
   getTrashDebug,
 } from '../systems/Trash';
+import { installSimClock, getSimNow, setSimNow } from '../systems/SimClock';
+import {
+  LAYOUT_KEY,
+  SAVE_FORMAT_VERSION,
+  SLOT_COUNT,
+  SaveSlotData,
+  readSlot,
+  writeSlot,
+  bootIntoSave,
+  bootIntoAutosave,
+  bootNewGame,
+  takePendingLive,
+} from '../systems/SaveSlots';
+import { exportShiftLive, importShiftLive } from '../systems/Shift';
+import { exportInventoryLive, importInventoryLive } from '../systems/Inventory';
+import { exportStaffNeedsLive, importStaffNeedsLive } from '../systems/StaffNeeds';
+import { exportServedLive, importServedLive } from '../systems/ServedItems';
+import { exportLateOpenLive, importLateOpenLive } from '../systems/LateOpen';
+import { exportStaffHoursLive, importStaffHoursLive } from '../systems/StaffHours';
+import { exportArrivalsLive, importArrivalsLive } from '../systems/Arrivals';
+import { exportTrashLive, importTrashLive } from '../systems/Trash';
+import { exportNightStatsLive, importNightStatsLive } from '../systems/NightStats';
+import { exportThoughts, importThoughts } from '../systems/Thoughts';
+import { exportExperience, importExperience } from '../systems/CustomerExperience';
+import { exportDemandLive, importDemandLive } from '../config/demand';
 
 /** Products a staff member can order at the bar (in-stock ones only are shown). */
 /** A customer waiting this long (ms) lets AI pull a staff off routine cleaning to serve. */
@@ -501,6 +526,91 @@ interface FlyZoneState {
   active: boolean;
   episode: number;
   gfx?: Phaser.GameObjects.Container;
+}
+
+/** Save slot `live` half: the night in progress (see applyLiveSnapshot). */
+interface LivePatron {
+  profile: PatronData;
+  col: number;
+  row: number;
+  goal: string;
+  waiting: boolean;
+  served: boolean;
+  seated: boolean;
+  seatedFurnitureId: string | null;
+  angry: boolean;
+  impatient: boolean;
+  patienceRemaining: number;
+  patienceMax: number;
+  preferredDrinkName: string;
+  wantedDrinkId: string | null;
+  servedDrinkId: string | null;
+  wasOutOfStock: boolean;
+  beerServicePref: 'tap' | 'bar' | 'indifferent';
+  servedAtBeerTap: boolean;
+  ateSnack: boolean;
+  servedByStaffId: string | null;
+  waitSince: number;
+  recurrent: boolean;
+  rememberedFavStaffId: string | null;
+  pendingPriceThought: string | null;
+  alcoholTolerance: number;
+  alcoholIntake: number;
+  lastAlcoholAt: number;
+  spawnAt: number | null;
+  wasImpatient: boolean;
+  decor: string[];
+  spark: string[];
+  experience: unknown;
+  thoughts: unknown;
+}
+
+interface LiveRepair {
+  id: string;
+  furnitureId: string;
+  techId: string;
+  stage: RepairJob['stage'];
+  arriveAt: number;
+  stageEndsAt: number;
+  quote?: number;
+  diagnosis?: string;
+  quality?: number;
+}
+
+interface LiveSnapshot {
+  v: number;
+  simNow: number;
+  shift: unknown;
+  club: {
+    nightEarned: number;
+    servedCount: number;
+    closingStartedAt: number;
+    closingNudged: boolean;
+    staffPresent: boolean;
+    staffArriveTotalMinutes: number;
+    lastNightUsed: boolean;
+    competitionObserveAccum: number;
+    perceptionAccum: number;
+    usageWearSeat: number;
+    usageWearServe: number;
+    staffShiftStartAt: number;
+    repairSeq: number;
+    lastSummaryPayload: Record<string, unknown> | null;
+  };
+  floorDirt: ReturnType<typeof serializeFloorDirt>;
+  inventory: unknown;
+  staffNeeds: unknown;
+  served: unknown;
+  lateOpen: unknown;
+  staffHours: unknown;
+  arrivals: unknown;
+  trash: unknown;
+  nightStats: unknown;
+  demand: unknown;
+  flies: Array<{ id: string; dirtySince: number; active: boolean; episode: number }>;
+  staff: Array<{ id: string; col: number; row: number; energy: number; mood: number; skill: number; awayMs: number | null }>;
+  patrons: LivePatron[];
+  repairs: LiveRepair[];
 }
 
 /** Single fixed orientation for every piece (Ultima Online style: fixed camera, no rotation).
@@ -680,7 +790,6 @@ const FIXED_FACING: IsoFacing = 'sw';
 /** Backdrop beyond the floor: deep warm charcoal-brown (medieval tavern), no neon. */
 const BG_COLOR = '#1a1411';
 
-const LAYOUT_KEY = 'night-club-layout-v1';
 const TAP_THRESH = 10;
 const HUD_TOP = 56;
 /** Pinch / wheel zoom clamps (initial narrow-viewport zoom still applied in setupCamera). */
@@ -838,6 +947,8 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private bootstrapClub(): void {
+    // Pause-aware sim clock: scene.time.now only advances while this scene simulates.
+    installSimClock(this);
     this.scenario = this.cache.json.get('scenario') as Scenario;
     this.chars = this.cache.json.get('characters') as CharactersFile;
     if (!this.scenario) throw new Error('Falta JSON scenario');
@@ -971,6 +1082,7 @@ export class ClubScene extends Phaser.Scene {
     this.emitStaffRoster();
     this.emitShopCatalog();
     this.scale.on('resize', this.onClubResize, this);
+    this.initSaveSlots();
   }
 
   private onClubResize = (): void => {
@@ -1250,7 +1362,17 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private persistLayout(): void {
-    const payload: SavedLayout = {
+    const payload = this.buildLayoutPayload();
+    try {
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
+    } catch {
+      // private mode / quota
+    }
+  }
+
+  /** The autosave payload (also the `layout` half of a manual save slot). */
+  private buildLayoutPayload(): SavedLayout {
+    return {
       furniture: this.scenario.furniture.map((f) => ({
         id: f.id,
         tile: [...f.tile] as [number, number],
@@ -1292,11 +1414,6 @@ export class ClubScene extends Phaser.Scene {
       clubReputation: serializeClubReputation(),
       bankruptcy: serializeBankruptcy(),
     };
-    try {
-      localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
-    } catch {
-      // private mode / quota
-    }
   }
 
   /** Normal character depth vs furniture — respect day-start hide until staff arrive. */
@@ -4032,7 +4149,7 @@ export class ClubScene extends Phaser.Scene {
     this.persistLayout();
     const payroll = takeLastPayroll();
     const utilities = takeLastUtilities();
-    this.game.events.emit('night-summary', {
+    this.emitNightSummary({
       ...this.getHudState(),
       nightNumber: endedNight,
       nightEarned: this.nightEarned,
@@ -7246,19 +7363,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.emit('stats-updated', this.getHudState());
     this.uiToast(`Llegó ${job.tech.name}. Consulta: −$${job.tech.consultFee}`);
     const door = { col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] };
-    const sprite = new Patron(this, 'patron', door, this.iso, this.pathfinder, {
-      id: `tech_${job.id}`,
-      name: job.tech.name,
-      sprite: 'patron',
-      preferredDrink: 'agua',
-      tipChance: 0,
-      patience: 999,
-    });
-    sprite.reapplyDisplaySize();
-    sprite.sprite.setTint(0x9fd4ff);
-    sprite.statusLabel?.setText('Técnico').setColor('#9fd4ff').setVisible(true);
-    sprite.sprite.disableInteractive();
-    job.sprite = sprite;
+    const sprite = this.makeTechnicianSprite(job, door);
     job.stage = 'walking';
     const dest = this.visitorTileNear(def) ?? door;
     const startInspect = () => {
@@ -7423,12 +7528,8 @@ export class ClubScene extends Phaser.Scene {
   }
 
   private onCmdNewGame = (): void => {
-    try {
-      localStorage.removeItem(LAYOUT_KEY);
-    } catch {
-      /* ignore */
-    }
-    window.location.reload();
+    // Same reset as before (drop the autosave + reload = exact starting conditions); slots are kept.
+    bootNewGame();
   };
 
   /** Seat slots (all, free or not) on usable seating furniture. */
@@ -9060,5 +9161,493 @@ export class ClubScene extends Phaser.Scene {
   private onCmdDeselectFurniture = (): void => {
     this.closeFurnitureInspect();
   };
-}
 
+  // ─── Pause menu: manual save slots (exact live state) ───────────────────────────────────
+  // Layout half = the existing autosave payload (buildLayoutPayload). Live half = the night in
+  // progress, produced by the same modules' own exporters. Loading reloads the page (full teardown)
+  // and applyLiveSnapshot() re-applies the live half on top of the normal autosave boot.
+
+  private lastSummaryPayload: Record<string, unknown> | null = null;
+  /** Key fields right after a slot was restored (before any tick) — test hook. */
+  private lastRestoreCheck: Record<string, unknown> | null = null;
+  private restoredFromSlot = false;
+
+  private emitNightSummary(payload: Record<string, unknown>): void {
+    this.lastSummaryPayload = payload;
+    this.game.events.emit('night-summary', payload);
+  }
+
+  private initSaveSlots(): void {
+    const onSave = (p: { slot: number }) => {
+      const ok = this.saveToSlot(p?.slot);
+      this.game.events.emit('save-result', { slot: p?.slot, ok });
+    };
+    const onLoad = (p: { slot: number | 'auto' }) => this.loadFromSlot(p?.slot);
+    const onAutosaveNow = () => this.persistLayout();
+    this.game.events.on('cmd-save-slot', onSave);
+    this.game.events.on('cmd-load-slot', onLoad);
+    this.game.events.on('cmd-autosave-now', onAutosaveNow);
+    this.events.once('shutdown', () => {
+      this.game.events.off('cmd-save-slot', onSave);
+      this.game.events.off('cmd-load-slot', onLoad);
+      this.game.events.off('cmd-autosave-now', onAutosaveNow);
+    });
+    // Tweens measure wall time between steps (lag-clamped): re-base so a long pause adds nothing.
+    const rebase = () => {
+      (this.tweens as unknown as { prevTime: number }).prevTime = Date.now();
+    };
+    this.events.on('resume', rebase);
+    this.events.on('wake', rebase);
+    const pending = takePendingLive();
+    if (pending) {
+      try {
+        this.applyLiveSnapshot(pending as LiveSnapshot);
+      } catch (err) {
+        console.error('[ClubScene] live restore failed', err);
+      }
+    }
+  }
+
+  private phaseLabelForSave(): string {
+    const st = getShiftState();
+    if (st === 'open') return 'abierto';
+    if (st === 'closing') return 'cerrando';
+    if (st === 'summary') return 'resumen de la noche';
+    return 'preparación';
+  }
+
+  buildSaveSlotData(): SaveSlotData {
+    const snap = getShiftSnapshot();
+    return {
+      v: SAVE_FORMAT_VERSION,
+      savedAt: Date.now(),
+      meta: {
+        day: snap.currentDay,
+        clock: formatGameClock(snap.gameHour, snap.gameMinute),
+        money: this.money,
+        phaseLabel: this.phaseLabelForSave(),
+      },
+      layout: this.buildLayoutPayload(),
+      live: this.captureLiveSnapshot(),
+    };
+  }
+
+  saveToSlot(slot: number): boolean {
+    const n = Math.floor(Number(slot));
+    if (!(n >= 1 && n <= SLOT_COUNT)) return false;
+    // The autosave is refreshed too (same data), so it never lags behind a manual save.
+    this.persistLayout();
+    return writeSlot(n, this.buildSaveSlotData());
+  }
+
+  loadFromSlot(slot: number | 'auto'): boolean {
+    if (slot === 'auto') {
+      bootIntoAutosave();
+      return true;
+    }
+    const data = readSlot(Math.floor(Number(slot)));
+    if (!data) return false;
+    bootIntoSave(data);
+    return true;
+  }
+
+  private captureLiveSnapshot(): LiveSnapshot {
+    const now = getSimNow(this);
+    return {
+      v: SAVE_FORMAT_VERSION,
+      simNow: now,
+      shift: exportShiftLive(),
+      club: {
+        nightEarned: this.nightEarned,
+        servedCount: this.servedCount,
+        closingStartedAt: this.closingStartedAt,
+        closingNudged: this.closingNudged,
+        staffPresent: this.staffPresent,
+        staffArriveTotalMinutes: this.staffArriveTotalMinutes,
+        lastNightUsed: this.lastNightUsed,
+        competitionObserveAccum: this.competitionObserveAccum,
+        perceptionAccum: this.perceptionAccum,
+        usageWearSeat: this.usageWearSeat,
+        usageWearServe: this.usageWearServe,
+        staffShiftStartAt: this.staffShiftStartAt,
+        repairSeq: this.repairSeq,
+        lastSummaryPayload: getShiftState() === 'summary' ? this.lastSummaryPayload : null,
+      },
+      floorDirt: serializeFloorDirt(),
+      inventory: exportInventoryLive(),
+      staffNeeds: exportStaffNeedsLive(),
+      served: exportServedLive(),
+      lateOpen: exportLateOpenLive(),
+      staffHours: exportStaffHoursLive(),
+      arrivals: exportArrivalsLive(),
+      trash: exportTrashLive(),
+      nightStats: exportNightStatsLive(),
+      demand: exportDemandLive(),
+      flies: [...this.flyZones.entries()].map(([id, z]) => ({ id, dirtySince: z.dirtySince, active: z.active, episode: z.episode })),
+      staff: this.allStaff().map((s) => {
+        const away = this.staffAway.get(s.profile.id);
+        return {
+          id: s.profile.id,
+          col: s.grid.col,
+          row: s.grid.row,
+          energy: s.profile.energy,
+          mood: s.profile.mood,
+          skill: s.profile.skill,
+          awayMs: away ? Math.max(0, away.getRemaining()) : null,
+        };
+      }),
+      patrons: this.patrons.filter((p) => p.active).map((p) => this.capturePatron(p)),
+      repairs: this.repairJobs.map((j) => ({
+        id: j.id,
+        furnitureId: j.furnitureId,
+        techId: j.tech.id,
+        stage: j.stage,
+        arriveAt: j.arriveAt,
+        stageEndsAt: j.stageEndsAt,
+        quote: j.quote,
+        diagnosis: j.diagnosis,
+        quality: j.quality,
+      })),
+    };
+  }
+
+  private capturePatron(p: Patron): LivePatron {
+    return {
+      profile: { ...p.profile },
+      col: p.grid.col,
+      row: p.grid.row,
+      goal: p.goal,
+      waiting: p.waiting,
+      served: p.served,
+      seated: p.seated,
+      seatedFurnitureId: p.seatedFurnitureId,
+      angry: p.angry,
+      impatient: p.impatient,
+      patienceRemaining: p.patienceRemaining,
+      patienceMax: p.patienceMax,
+      preferredDrinkName: p.preferredDrinkName,
+      wantedDrinkId: p.wantedDrinkId,
+      servedDrinkId: p.servedDrinkId,
+      wasOutOfStock: p.wasOutOfStock,
+      beerServicePref: p.beerServicePref,
+      servedAtBeerTap: p.servedAtBeerTap,
+      ateSnack: p.ateSnack,
+      servedByStaffId: p.servedByStaffId,
+      waitSince: p.waitSince,
+      recurrent: p.recurrent,
+      rememberedFavStaffId: p.rememberedFavStaffId,
+      pendingPriceThought: p.pendingPriceThought,
+      alcoholTolerance: p.alcoholTolerance,
+      alcoholIntake: p.alcoholIntake,
+      lastAlcoholAt: p.lastAlcoholAt,
+      spawnAt: this.patronSpawnAt.get(p) ?? null,
+      wasImpatient: this.patronWasImpatient.has(p),
+      decor: [...(this.patronDecorRolled.get(p) ?? [])],
+      spark: [...(this.patronSparkRolled.get(p) ?? [])],
+      experience: exportExperience(p),
+      thoughts: exportThoughts(p),
+    };
+  }
+
+  /**
+   * Re-apply a saved night on top of the normal boot (which already restored the autosave half:
+   * furniture, money, inventory, orders, goods, trash, reputation, calendar…). Never re-runs past
+   * events: no charges, no payroll, no night end — only state is written back.
+   */
+  private applyLiveSnapshot(live: LiveSnapshot): void {
+    if (!live || typeof live !== 'object' || typeof live.simNow !== 'number') return;
+    if ((live.v ?? 1) > SAVE_FORMAT_VERSION) return;
+    this.restoredFromSlot = true;
+    setSimNow(this, live.simNow);
+    if (importShiftLive(live.shift)) {
+      syncShiftDay(this.nightNumber);
+      this.phase = legacyPhaseFromShift();
+    }
+    const st = getShiftState();
+    const c = live.club ?? ({} as LiveSnapshot['club']);
+    const num = (x: unknown, d: number) => (typeof x === 'number' && Number.isFinite(x) ? x : d);
+    this.nightEarned = num(c.nightEarned, 0);
+    this.servedCount = num(c.servedCount, 0);
+    this.closingStartedAt = num(c.closingStartedAt, 0);
+    this.closingNudged = !!c.closingNudged;
+    this.lastNightUsed = !!c.lastNightUsed;
+    this.competitionObserveAccum = num(c.competitionObserveAccum, 0);
+    this.perceptionAccum = num(c.perceptionAccum, 0);
+    this.usageWearSeat = num(c.usageWearSeat, 0);
+    this.usageWearServe = num(c.usageWearServe, 0);
+    this.staffShiftStartAt = num(c.staffShiftStartAt, 0);
+    this.repairSeq = num(c.repairSeq, this.repairSeq);
+    this.lastSummaryPayload = c.lastSummaryPayload && typeof c.lastSummaryPayload === 'object' ? c.lastSummaryPayload : null;
+    this.nightTimer = st === 'open' || st === 'closing' ? Number.POSITIVE_INFINITY : 0;
+
+    loadFloorDirt(live.floorDirt);
+    this.refreshFloorDirtVisuals();
+    importInventoryLive(live.inventory);
+    importStaffNeedsLive(live.staffNeeds);
+    importServedLive(live.served);
+    importLateOpenLive(live.lateOpen);
+    importStaffHoursLive(live.staffHours);
+    importArrivalsLive(live.arrivals);
+    importTrashLive(live.trash);
+    importNightStatsLive(live.nightStats);
+    importDemandLive(live.demand);
+
+    // Staff: position + needs; current task restarts from idle (in-flight callbacks are not saved).
+    this.staffArriveTotalMinutes = num(c.staffArriveTotalMinutes, this.staffArriveTotalMinutes);
+    this.staffPresent = !!c.staffPresent;
+    for (const ss of live.staff ?? []) {
+      const s = this.findStaffById(ss.id);
+      if (!s) continue;
+      this.interruptStaff(s);
+      s.profile.energy = num(ss.energy, s.profile.energy);
+      s.profile.mood = num(ss.mood, s.profile.mood);
+      s.profile.skill = num(ss.skill, s.profile.skill);
+      const { cols, rows } = this.scenario.map;
+      s.snapTo({ col: Phaser.Math.Clamp(Math.floor(ss.col), 0, cols - 1), row: Phaser.Math.Clamp(Math.floor(ss.row), 0, rows - 1) });
+      s.clearServeLabel();
+      s.state = 'idle';
+      s.aiNextThinkAt = getSimNow(this) + 400;
+      if (!this.staffPresent) {
+        s.setVisible(false);
+        s.stopBob();
+        continue;
+      }
+      if (typeof ss.awayMs === 'number') {
+        // Outside with the trash bag: comes back after the time she still had left.
+        s.setVisible(false);
+        s.stopBob();
+        s.state = 'busy';
+        const timer = this.time.delayedCall(Math.max(50, ss.awayMs), () => this.trashOutReturn(s));
+        this.staffAway.set(s.profile.id, timer);
+        continue;
+      }
+      s.setVisible(true);
+      s.setAlpha(1);
+      s.startBob();
+    }
+    this.syncBartenderBarDepth();
+    this.applyClubLighting(st === 'open' || st === 'closing' ? 'open' : 'closed', false);
+
+    // Flies (timers are sim-clock timestamps; visuals rebuilt).
+    this.clearAllFlies();
+    for (const f of live.flies ?? []) {
+      const z: FlyZoneState = { dirtySince: num(f.dirtySince, getSimNow(this)), active: false, episode: num(f.episode, 0) };
+      this.flyZones.set(f.id, z);
+      if (f.active) {
+        z.active = true;
+        this.spawnFlies(f.id, z);
+      }
+    }
+    this.refreshServedVisuals();
+    this.refreshGoodsVisuals();
+    this.refreshTrashVisuals();
+
+    // Customers: same identity, satisfaction, thought log, order state; they re-plan from a safe spot.
+    if (st === 'open' || st === 'closing') {
+      for (const lp of live.patrons ?? []) {
+        try {
+          this.restorePatron(lp);
+        } catch (err) {
+          console.warn('[ClubScene] patron restore skipped', err);
+        }
+      }
+    }
+
+    // Technicians: same stage and remaining time (consultation already paid is not charged again).
+    for (const j of live.repairs ?? []) this.restoreRepairJob(j);
+
+    this.lastRestoreCheck = this.debugKeyState();
+    this.persistLayout();
+    const syncUi = () => this.syncUiAfterRestore();
+    const ui = this.scene.get('UIScene') as (Phaser.Scene & { uiReady?: boolean }) | null;
+    if (ui && ui.uiReady) syncUi();
+    else this.game.events.once('ui-ready', syncUi);
+  }
+
+  private restorePatron(lp: LivePatron): void {
+    if (!lp?.profile || typeof lp.profile.id !== 'string') return;
+    const { cols, rows } = this.scenario.map;
+    const tile = {
+      col: Phaser.Math.Clamp(Math.floor(lp.col), 0, cols - 1),
+      row: Phaser.Math.Clamp(Math.floor(lp.row), 0, rows - 1),
+    };
+    const pdata = { ...lp.profile } as PatronData;
+    const patron = new Patron(
+      this,
+      pdata.sprite,
+      tile,
+      this.iso,
+      this.pathfinder,
+      pdata,
+      lp.preferredDrinkName || this.drinkDisplayName(pdata.preferredDrink)
+    );
+    patron.reapplyDisplaySize();
+    this.wirePatronClick(patron);
+    this.patrons.push(patron);
+    patron.served = !!lp.served;
+    patron.angry = !!lp.angry;
+    patron.impatient = !!lp.impatient;
+    if (typeof lp.patienceMax === 'number') patron.patienceMax = lp.patienceMax;
+    if (typeof lp.patienceRemaining === 'number') patron.patienceRemaining = lp.patienceRemaining;
+    patron.wantedDrinkId = lp.wantedDrinkId ?? null;
+    patron.servedDrinkId = lp.servedDrinkId ?? null;
+    patron.wasOutOfStock = !!lp.wasOutOfStock;
+    patron.beerServicePref = lp.beerServicePref ?? 'indifferent';
+    patron.servedAtBeerTap = !!lp.servedAtBeerTap;
+    patron.ateSnack = !!lp.ateSnack;
+    patron.servedByStaffId = lp.servedByStaffId ?? null;
+    patron.waitSince = 0;
+    patron.recurrent = !!lp.recurrent;
+    patron.rememberedFavStaffId = lp.rememberedFavStaffId ?? null;
+    patron.pendingPriceThought = lp.pendingPriceThought ?? null;
+    if (typeof lp.alcoholTolerance === 'number') patron.alcoholTolerance = lp.alcoholTolerance;
+    if (typeof lp.alcoholIntake === 'number') patron.alcoholIntake = lp.alcoholIntake;
+    if (typeof lp.lastAlcoholAt === 'number') patron.lastAlcoholAt = lp.lastAlcoholAt;
+    if (lp.experience) importExperience(patron, lp.experience);
+    else createExperience(patron);
+    importThoughts(patron, lp.thoughts);
+    this.patronSpawnAt.set(patron, typeof lp.spawnAt === 'number' ? lp.spawnAt : getSimNow(this));
+    if (lp.wasImpatient) this.patronWasImpatient.add(patron);
+    if (lp.decor?.length) this.patronDecorRolled.set(patron, new Set(lp.decor));
+    if (lp.spark?.length) this.patronSparkRolled.set(patron, new Set(lp.spark));
+    patron.refreshStatusLabel();
+    // Re-plan from a safe state (mid-walk / mid-service callbacks are not serialisable).
+    if (lp.goal === 'leave' || lp.angry) {
+      patron.goal = 'leave'; // already said goodbye: no second goodbye thought
+      this.sendPatronHome(patron);
+      return;
+    }
+    if (lp.seated && lp.seatedFurnitureId && this.getFurnitureDef(lp.seatedFurnitureId)) {
+      const seat = { col: tile.col, row: tile.row, furnitureId: lp.seatedFurnitureId };
+      if (this.claimPatronSlot(patron, seat)) {
+        this.sendPatronToSeat(patron, seat);
+        return;
+      }
+    }
+    if (lp.served) {
+      this.sendPatronWandering(patron);
+      return;
+    }
+    this.chooseMainPatronGoal(patron);
+  }
+
+  private makeTechnicianSprite(job: RepairJob, at: { col: number; row: number }): Patron {
+    const sprite = new Patron(this, 'patron', at, this.iso, this.pathfinder, {
+      id: `tech_${job.id}`,
+      name: job.tech.name,
+      sprite: 'patron',
+      preferredDrink: 'agua',
+      tipChance: 0,
+      patience: 999,
+    });
+    sprite.reapplyDisplaySize();
+    sprite.sprite.setTint(0x9fd4ff);
+    sprite.statusLabel?.setText('Técnico').setColor('#9fd4ff').setVisible(true);
+    sprite.sprite.disableInteractive();
+    job.sprite = sprite;
+    return sprite;
+  }
+
+  private restoreRepairJob(j: LiveRepair): void {
+    const tech = TECHNICIANS.find((t) => t.id === j?.techId);
+    const def = j ? this.getFurnitureDef(j.furnitureId) : null;
+    if (!tech || !def || this.repairJobFor(def.id)) return;
+    const job: RepairJob = {
+      id: j.id,
+      furnitureId: def.id,
+      tech,
+      stage: j.stage,
+      arriveAt: j.arriveAt,
+      stageEndsAt: j.stageEndsAt,
+      quote: j.quote,
+      diagnosis: j.diagnosis,
+      quality: j.quality,
+    };
+    if (job.stage === 'walking') {
+      // Was walking to the piece (consultation paid): he is there now and starts inspecting.
+      job.stage = 'inspecting';
+      job.stageEndsAt = getSimNow(this) + this.randBetween(REPAIR_TIMING.inspectMs);
+    }
+    this.repairJobs.push(job);
+    if (job.stage !== 'en_route') {
+      const door = { col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] };
+      const sprite = this.makeTechnicianSprite(job, this.visitorTileNear(def) ?? door);
+      sprite.faceToward({ col: def.tile[0], row: def.tile[1] });
+      const label = job.stage === 'inspecting' ? 'Inspeccionando…' : job.stage === 'verdict' ? 'Esperando decisión' : 'Reparando…';
+      sprite.statusLabel?.setText(label).setVisible(true);
+    }
+  }
+
+  /** UI is ready: show the restored phase (open / closing / summary + Dormir) and any verdict. */
+  private syncUiAfterRestore(): void {
+    const st = getShiftState();
+    this.game.events.emit('stats-updated', this.getHudState());
+    if (st === 'open') this.game.events.emit('night-started', this.getHudState());
+    else if (st === 'closing') this.game.events.emit('night-closing', this.getHudState());
+    else if (st === 'summary') {
+      const base = this.lastSummaryPayload ?? { nightNumber: Math.max(1, this.nightNumber - 1), nightEarned: this.nightEarned, servedCount: this.servedCount };
+      this.emitNightSummary({ ...this.getHudState(), ...base, phase: 'summary', money: this.money });
+    }
+    for (const job of this.repairJobs) {
+      if (job.stage !== 'verdict') continue;
+      const def = this.getFurnitureDef(job.furnitureId);
+      if (!def) continue;
+      this.game.events.emit('repair-verdict', {
+        jobId: job.id,
+        techName: job.tech.name,
+        furnitureName: this.furnitureDisplayName(def),
+        diagnosis: job.diagnosis,
+        cost: job.quote,
+        money: this.money,
+        canAfford: this.money >= (job.quote ?? 0),
+      } as RepairVerdictPayload);
+    }
+    this.emitStaffRoster();
+    this.emitShopCatalog();
+    this.game.events.emit('inventory-updated');
+  }
+
+  /** Test hook: the fields a save must restore exactly. */
+  debugKeyState(): Record<string, unknown> {
+    const snap = getShiftSnapshot();
+    const inv = serializeInventory();
+    return {
+      day: snap.currentDay,
+      hour: snap.gameHour,
+      minute: snap.gameMinute,
+      shiftState: snap.shiftState,
+      nightNumber: this.nightNumber,
+      money: this.money,
+      nightEarned: this.nightEarned,
+      servedCount: this.servedCount,
+      stock: inv.stock,
+      prices: inv.prices,
+      furniture: this.scenario.furniture
+        .map((f) => ({
+          id: f.id,
+          tile: [...f.tile],
+          flipX: !!f.flipX,
+          durability: Math.round((f.durability ?? 0) * 1000) / 1000,
+          comfort: Math.round((f.comfort ?? 0) * 1000) / 1000,
+          cleanliness: Math.round((f.cleanliness ?? 0) * 1000) / 1000,
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      staff: this.allStaff()
+        .map((s) => ({ id: s.profile.id, energy: Math.round(s.profile.energy * 1000) / 1000, mood: Math.round(s.profile.mood * 1000) / 1000, wallet: getWallet(s.profile.id), col: s.grid.col, row: s.grid.row }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      patrons: this.patrons.filter((p) => p.active).map((p) => p.profile.id).sort(),
+      orders: (serializeDeliveries().orders ?? []).map((o) => ({ id: o.id, lines: o.lines })),
+      goods: (serializeDeliveries().goods ?? []).map((g) => `${g.id}:${g.productId}:${g.kind}:${g.units}`).sort(),
+      trash: serializeTrash(),
+      reputation: serializeClubReputation(),
+      bankruptcy: serializeBankruptcy(),
+      served: exportServedLive().items.map((i) => i.id).sort(),
+      repairs: this.repairJobs.map((j) => `${j.id}:${j.stage}`),
+      simNow: getSimNow(this),
+    };
+  }
+
+  getLastRestoreCheck(): Record<string, unknown> | null {
+    return this.lastRestoreCheck;
+  }
+}

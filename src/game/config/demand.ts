@@ -140,3 +140,15 @@ export const CAPACITY = {
   patronsPerStaff: 5,
   minCapacity: 2,
 } as const;
+
+// Save slots: hidden modifiers are restored exactly with a mid-night save.
+export function exportDemandLive() {
+  return { amenities: demandModifiers.amenities, reputation: demandModifiers.reputation, loyalSoftCapBonus };
+}
+export function importDemandLive(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return;
+  const o = raw as ReturnType<typeof exportDemandLive>;
+  if (typeof o.amenities === 'number') demandModifiers.amenities = o.amenities;
+  if (typeof o.reputation === 'number') demandModifiers.reputation = o.reputation;
+  if (typeof o.loyalSoftCapBonus === 'number') loyalSoftCapBonus = o.loyalSoftCapBonus;
+}

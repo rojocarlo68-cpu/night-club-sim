@@ -265,3 +265,27 @@ export function getNightStatsDebug() {
     },
   };
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportNightStatsLive() {
+  return { leaveCounts: { ...leaveCounts }, satSum, satCount, unhappyCount, turnedAwayCount, returningCount, lastSnapshot };
+}
+
+export function importNightStatsLive(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return;
+  const o = raw as ReturnType<typeof exportNightStatsLive>;
+  const num = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : 0);
+  leaveCounts = {
+    price: num(o.leaveCounts?.price),
+    oos_skip: num(o.leaveCounts?.oos_skip),
+    empty: num(o.leaveCounts?.empty),
+    total: num(o.leaveCounts?.total),
+  };
+  satSum = num(o.satSum);
+  satCount = num(o.satCount);
+  unhappyCount = num(o.unhappyCount);
+  turnedAwayCount = num(o.turnedAwayCount);
+  returningCount = num(o.returningCount);
+  lastSnapshot = o.lastSnapshot && typeof o.lastSnapshot === 'object' ? o.lastSnapshot : null;
+}

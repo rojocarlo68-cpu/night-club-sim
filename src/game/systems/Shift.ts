@@ -388,3 +388,40 @@ export function getShiftOpenCloseTimes() {
         : null,
   };
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export interface ShiftLiveSave {
+  currentDay: number;
+  gameHour: number;
+  gameMinute: number;
+  shiftState: ShiftState;
+  clockAccumSec: number;
+  openTimeHour: number | null;
+  openTimeMinute: number | null;
+  closeTimeHour: number | null;
+  closeTimeMinute: number | null;
+}
+
+export function exportShiftLive(): ShiftLiveSave {
+  return { currentDay, gameHour, gameMinute, shiftState, clockAccumSec, openTimeHour, openTimeMinute, closeTimeHour, closeTimeMinute };
+}
+
+/** Exact restore (unlike loadShift, an OPEN / CLOSING / SUMMARY state is kept as saved). */
+export function importShiftLive(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object') return false;
+  const o = raw as Partial<ShiftLiveSave>;
+  const st = o.shiftState;
+  if (st !== 'closed' && st !== 'open' && st !== 'closing' && st !== 'summary') return false;
+  currentDay = clampDay(typeof o.currentDay === 'number' ? o.currentDay : currentDay);
+  gameHour = clampHour(typeof o.gameHour === 'number' ? o.gameHour : gameHour);
+  gameMinute = clampMinute(typeof o.gameMinute === 'number' ? o.gameMinute : gameMinute);
+  shiftState = st;
+  clockAccumSec = typeof o.clockAccumSec === 'number' && Number.isFinite(o.clockAccumSec) ? Math.max(0, o.clockAccumSec) : 0;
+  const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) ? x : null);
+  openTimeHour = n(o.openTimeHour);
+  openTimeMinute = n(o.openTimeMinute);
+  closeTimeHour = n(o.closeTimeHour);
+  closeTimeMinute = n(o.closeTimeMinute);
+  return true;
+}

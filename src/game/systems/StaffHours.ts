@@ -117,3 +117,15 @@ export function getStaffHoursDebug() {
     fatigueAppliedToStats: false,
   };
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportStaffHoursLive() {
+  return { logs: logs.map((l) => ({ ...l })), lastClosedLogs: lastClosedLogs.map((l) => ({ ...l })) };
+}
+
+export function importStaffHoursLive(raw: unknown): void {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as { logs?: StaffShiftLog[]; lastClosedLogs?: StaffShiftLog[] };
+  logs = Array.isArray(o.logs) ? o.logs.map((l) => ({ ...l })) : [];
+  lastClosedLogs = Array.isArray(o.lastClosedLogs) ? o.lastClosedLogs.map((l) => ({ ...l })) : [];
+}

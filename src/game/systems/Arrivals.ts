@@ -363,3 +363,32 @@ export function simulateArrivalsCount(opts: {
     spawnAbsTimes.length = 0; spawnAbsTimes.push(...saved.times);
   }
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportArrivalsLive() {
+  return {
+    rngState, spawnedTonight, softCap, demandScale, lateOpenPenalty, nextDueAbsMin, pendingGroupExtra,
+    arrivalsActive, openAbsMin, nightIndex, arrivalLog: arrivalLog.map((a) => ({ ...a })), spawnAbsTimes: [...spawnAbsTimes],
+  };
+}
+
+export function importArrivalsLive(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return;
+  const o = raw as ReturnType<typeof exportArrivalsLive>;
+  const num = (x: unknown, d: number) => (typeof x === 'number' && Number.isFinite(x) ? x : d);
+  rngState = num(o.rngState, rngState) >>> 0 || 1;
+  spawnedTonight = num(o.spawnedTonight, 0);
+  softCap = num(o.softCap, softCap);
+  demandScale = num(o.demandScale, 1);
+  lateOpenPenalty = num(o.lateOpenPenalty, 0);
+  nextDueAbsMin = typeof o.nextDueAbsMin === 'number' ? o.nextDueAbsMin : null;
+  pendingGroupExtra = num(o.pendingGroupExtra, 0);
+  arrivalsActive = !!o.arrivalsActive;
+  openAbsMin = num(o.openAbsMin, openAbsMin);
+  nightIndex = num(o.nightIndex, nightIndex);
+  arrivalLog.length = 0;
+  if (Array.isArray(o.arrivalLog)) for (const a of o.arrivalLog) arrivalLog.push({ ...a });
+  spawnAbsTimes.length = 0;
+  if (Array.isArray(o.spawnAbsTimes)) for (const t of o.spawnAbsTimes) if (typeof t === 'number') spawnAbsTimes.push(t);
+}

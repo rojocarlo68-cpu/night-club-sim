@@ -62,3 +62,15 @@ export function getLateOpenDebug() {
     phantomWaitersImplemented: false,
   };
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportLateOpenLive() {
+  return { lateOpenActive, lateOpenAppliedCount };
+}
+
+export function importLateOpenLive(raw: unknown): void {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as { lateOpenActive?: boolean; lateOpenAppliedCount?: number };
+  lateOpenActive = !!o.lateOpenActive;
+  lateOpenAppliedCount = typeof o.lateOpenAppliedCount === 'number' ? o.lateOpenAppliedCount : 0;
+}

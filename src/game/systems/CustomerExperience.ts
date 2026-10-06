@@ -298,3 +298,24 @@ export function resetCustomerExperienceForTests(): void {
 export function getActiveExperiences(): PatronExperience[] {
   return [...active.values()];
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportExperience(patron: { profile: { name?: string; id?: string } }) {
+  const exp = getExperience(patron);
+  if (!exp) return null;
+  return { ...exp, traits: { ...exp.traits }, perceived: [...exp.perceived], events: exp.events.map((e) => ({ ...e })) };
+}
+
+/** Re-attach a saved visit (satisfaction, perceived keys, events) to a restored patron. */
+export function importExperience(patron: { profile: { name?: string; id?: string } }, raw: unknown): void {
+  const id = patron.profile?.id;
+  if (!id || !raw || typeof raw !== 'object') return;
+  const o = raw as ReturnType<typeof exportExperience> & object;
+  const base = createExperience(patron);
+  if (typeof o.satisfaction === 'number') base.satisfaction = o.satisfaction;
+  if (o.traits && typeof o.traits === 'object') base.traits = { ...base.traits, ...o.traits };
+  base.perceived = new Set(Array.isArray(o.perceived) ? o.perceived : []);
+  base.events = Array.isArray(o.events) ? o.events.map((e) => ({ ...e })) : [];
+  active.set(id, base);
+}

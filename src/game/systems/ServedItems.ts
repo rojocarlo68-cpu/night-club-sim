@@ -119,3 +119,19 @@ export function clearServed(): ServedItem[] {
 export function getServedDebug(now: number) {
   return items.map((i) => ({ ...i, state: stateOf(i, now), ageMs: Math.round(now - i.createdAt) }));
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportServedLive(): { seq: number; items: ServedItem[] } {
+  return { seq, items: items.map((i) => ({ ...i })) };
+}
+
+export function importServedLive(raw: unknown): void {
+  items = [];
+  if (!raw || typeof raw !== 'object') return;
+  const o = raw as { seq?: number; items?: ServedItem[] };
+  if (typeof o.seq === 'number') seq = Math.max(seq, Math.floor(o.seq));
+  if (Array.isArray(o.items)) {
+    for (const i of o.items) if (i && typeof i.id === 'string' && typeof i.productId === 'string') items.push({ ...i });
+  }
+}

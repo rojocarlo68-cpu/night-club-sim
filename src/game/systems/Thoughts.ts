@@ -121,3 +121,21 @@ export function thoughtLog(patron: object): ThoughtLogEntry[] {
 export function getThoughtsDebug() {
   return { totalLogged, totalEmotes, recent: [...recent] };
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportThoughts(patron: object) {
+  const v = stateOf(patron);
+  return { lastEmoteAt: v.lastEmoteAt, emoteCount: v.emoteCount, keys: [...v.keys], log: v.log.map((l) => ({ ...l })) };
+}
+
+export function importThoughts(patron: object, raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return;
+  const o = raw as ReturnType<typeof exportThoughts>;
+  visits.set(patron, {
+    lastEmoteAt: typeof o.lastEmoteAt === 'number' ? o.lastEmoteAt : -1e9,
+    emoteCount: typeof o.emoteCount === 'number' ? o.emoteCount : 0,
+    keys: new Set(Array.isArray(o.keys) ? o.keys : []),
+    log: Array.isArray(o.log) ? o.log.map((l) => ({ ...l })) : [],
+  });
+}

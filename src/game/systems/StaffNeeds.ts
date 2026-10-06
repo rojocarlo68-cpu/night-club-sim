@@ -276,3 +276,24 @@ export function debugSetIntox(id: string, v: number): void {
 export function debugSetWallet(id: string, v: number): void {
   ensure(id).wallet = Math.max(0, Math.floor(v));
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportStaffNeedsLive(): Record<string, NeedState> {
+  const out: Record<string, NeedState> = {};
+  for (const [id, s] of byStaff) out[id] = { ...s };
+  return out;
+}
+
+/** Wallet, alcohol, café buff/crash timers (scene-clock ms; the sim clock is restored too). */
+export function importStaffNeedsLive(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return;
+  for (const [id, v] of Object.entries(raw as Record<string, Partial<NeedState>>)) {
+    if (!v || typeof v !== 'object') continue;
+    const s = ensure(id);
+    for (const k of Object.keys(s) as (keyof NeedState)[]) {
+      const x = v[k];
+      if (typeof x === 'number' && Number.isFinite(x)) s[k] = x;
+    }
+  }
+}

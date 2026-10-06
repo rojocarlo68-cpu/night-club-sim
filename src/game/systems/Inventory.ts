@@ -360,3 +360,45 @@ export function productExists(id: string): boolean {
 }
 
 void productKind;
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+function replaceRecord(dst: Record<string, number>, src: unknown): void {
+  for (const k of Object.keys(dst)) delete dst[k];
+  if (!src || typeof src !== 'object') return;
+  for (const [k, v] of Object.entries(src as Record<string, unknown>)) {
+    if (typeof v === 'number' && Number.isFinite(v)) dst[k] = v;
+  }
+}
+
+export function exportInventoryLive() {
+  ensureAll();
+  const tonight: Record<string, { soldTonight: number; revenueTonight: number }> = {};
+  for (const [id, s] of Object.entries(state)) tonight[id] = { soldTonight: s.soldTonight, revenueTonight: s.revenueTonight };
+  return {
+    tonight,
+    stockoutFirstMs: { ...stockoutFirstMs },
+    wasteTonight: { ...wasteTonight },
+    wasteCostTonight: { ...wasteCostTonight },
+    staffUseTonight: { ...staffUseTonight },
+    staffRevenueTonight: { ...staffRevenueTonight },
+  };
+}
+
+/** Tonight's counters only (stock / prices come from serializeInventory via loadInventory). */
+export function importInventoryLive(raw: unknown): void {
+  ensureAll();
+  if (!raw || typeof raw !== 'object') return;
+  const o = raw as Record<string, unknown>;
+  const tonight = (o.tonight && typeof o.tonight === 'object' ? o.tonight : {}) as Record<string, { soldTonight?: number; revenueTonight?: number }>;
+  for (const [id, s] of Object.entries(state)) {
+    const t = tonight[id];
+    s.soldTonight = typeof t?.soldTonight === 'number' ? t.soldTonight : 0;
+    s.revenueTonight = typeof t?.revenueTonight === 'number' ? t.revenueTonight : 0;
+  }
+  replaceRecord(stockoutFirstMs, o.stockoutFirstMs);
+  replaceRecord(wasteTonight, o.wasteTonight);
+  replaceRecord(wasteCostTonight, o.wasteCostTonight);
+  replaceRecord(staffUseTonight, o.staffUseTonight);
+  replaceRecord(staffRevenueTonight, o.staffRevenueTonight);
+}

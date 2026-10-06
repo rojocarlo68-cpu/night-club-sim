@@ -2,6 +2,7 @@ import Phaser from 'phaser';
 import { BootScene } from './game/scenes/BootScene';
 import { ClubScene } from './game/scenes/ClubScene';
 import { UIScene } from './game/scenes/UIScene';
+import { TitleScene } from './game/scenes/TitleScene';
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -13,7 +14,7 @@ const config: Phaser.Types.Core.GameConfig = {
     width: 960,
     height: 640,
   },
-  scene: [BootScene, ClubScene, UIScene],
+  scene: [BootScene, ClubScene, UIScene, TitleScene],
   render: {
     antialias: true,
     pixelArt: false,

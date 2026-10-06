@@ -234,3 +234,20 @@ export function getTrashDebug() {
     capacityLog: [...capacityLog],
   };
 }
+
+// ─── Save slots (pause menu): exact live state of this module (versioned by SaveSlots). ───
+
+export function exportTrashLive() {
+  return { night: { ...night }, outBy, bagInTransitBy, capacityLog: capacityLog.map((c) => ({ ...c })) };
+}
+
+/** Tonight's counters + who is outside with a bag (call after loadTrash). */
+export function importTrashLive(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return;
+  const o = raw as ReturnType<typeof exportTrashLive>;
+  if (o.night) for (const k of Object.keys(night) as (keyof typeof night)[]) night[k] = typeof o.night[k] === 'number' ? o.night[k] : 0;
+  outBy = typeof o.outBy === 'string' ? o.outBy : null;
+  bagInTransitBy = null;
+  capacityLog.length = 0;
+  if (Array.isArray(o.capacityLog)) for (const c of o.capacityLog) capacityLog.push({ ...c });
+}

@@ -19,6 +19,7 @@ import {
 import { getShiftSnapshot, getShiftState } from '../systems/Shift';
 import { PACKAGING } from '../config/logistics';
 import { ContextMenuPayload, RepairVerdictPayload, TechListPayload } from '../types/Intervention';
+import { formatSavedAt, listSlots, readAutosaveSummary, readSlot, SlotSummary } from '../systems/SaveSlots';
 
 interface HudBartender {
   name: string;
@@ -131,6 +132,9 @@ const PANEL_W = 260;
 const PANEL_H = 400;
 /** Gap above bottom edge (clears Construir/Staff row ~48px). */
 const PANEL_BOTTOM_MARGIN = 60;
+/** PAUSA button x = width − this (left of Abrir/Cerrar noche at width − 150). */
+const PAUSE_BTN_RIGHT = 218;
+type PauseView = 'main' | 'save' | 'overwrite' | 'load' | 'loading' | 'confirmNew' | 'options' | 'confirmTitle';
 /** Max finger/mouse travel (px) for a tap outside a window to count as "close". */
 const OUTSIDE_TAP_SLOP = 16;
 
@@ -502,10 +506,27 @@ export class UIScene extends Phaser.Scene {
     const kb = this.input.keyboard;
     if (kb) {
       kb.on('keydown-ESC', () => {
-        if (this.gameOverVisible) return;
+        // Pause menu is the topmost layer: ESC = back (subpanel) or CONTINUAR (main panel).
+        if (this.pauseOpen) {
+          if (this.pauseView === 'loading') return;
+          if (this.pauseView === 'main') this.closePause();
+          else if (this.pauseView === 'overwrite') this.renderPauseView('save');
+          else this.renderPauseView('main');
+          return;
+        }
+        if (!this.scene.isActive('ClubScene')) return;
+        if (this.gameOverVisible) {
+          this.openPause();
+          return;
+        }
         // Same stacking as outside/right-click: topmost window first.
         if (this.dismissTopmost()) return;
-        if (this.buildMode) this.game.events.emit('cmd-set-build-mode', false);
+        if (this.buildMode) {
+          this.game.events.emit('cmd-set-build-mode', false);
+          return;
+        }
+        // Nothing open: ESC opens the pause menu.
+        this.openPause();
       });
     }
 
@@ -589,7 +610,10 @@ export class UIScene extends Phaser.Scene {
 
     this.scale.on('resize', this.onResize, this);
     this.refreshBuildButtons();
+    this.createPauseUi();
     this.game.events.emit('cmd-request-staff-roster');
+    this.uiReady = true;
+    this.game.events.emit('ui-ready');
   }
 
   private makeButton(
@@ -1064,6 +1088,7 @@ export class UIScene extends Phaser.Scene {
 
     this.input.on('pointerdown', (p: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]) => {
       this.outsidePress = null;
+      if (this.pauseOpen) return; // paused: windows underneath are inert (no right-click/outside close)
       if (this.gameOverVisible) return; // game over: nothing closes it except Nueva partida
       if (this.isRightClick(p)) {
         if (this.handleRightClickDismiss(over)) this.lastRightDismissDownTime = p.downTime;
@@ -1080,6 +1105,7 @@ export class UIScene extends Phaser.Scene {
     this.input.on('pointerup', (p: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]) => {
       const press = this.outsidePress;
       this.outsidePress = null;
+      if (this.pauseOpen) return;
       if (!press || press.id !== p.id || press.downTime !== p.downTime) return;
       if (!over.every((o) => this.isOutsideSurface(o))) return;
       if (p.getDistance() > OUTSIDE_TAP_SLOP) return; // drag, not a tap
@@ -1350,8 +1376,287 @@ export class UIScene extends Phaser.Scene {
     this.panel.setPosition(w - 20, h - PANEL_BOTTOM_MARGIN - PANEL_H);
   }
 
+  // ---------------------------------------------------------------------------
+  // PAUSA: real simulation pause (ClubScene paused → its clock, update loop, timers, tweens and
+  // input all stop) + classic pause menu. One layer, subpanels replace its content.
+  // ---------------------------------------------------------------------------
+
+  private pauseBtn!: Phaser.GameObjects.Container;
+  private pauseLayer?: Phaser.GameObjects.Container;
+  private pausePanel?: Phaser.GameObjects.Container;
+  /** True while the pause menu is open (simulation frozen). */
+  pauseOpen = false;
+  private pauseView: PauseView = 'main';
+  private pauseViewArg: number | null = null;
+  private pauseStatus = '';
+  private pauseButtons: { label: string; x: number; y: number; w: number; h: number; enabled: boolean }[] = [];
+  /** downTime of the last press that hit the pause UI (ClubScene must never treat it as a world tap). */
+  lastPauseUiDownTime = -1;
+  uiReady = false;
+
+  private createPauseUi(): void {
+    const cam = this.cameras.main;
+    this.pauseBtn = this.makeButton(cam.width - PAUSE_BTN_RIGHT, 8, 62, 36, 'PAUSA', () => this.openPause());
+    this.pauseBtn.setDepth(25000).setName('pauseBtn');
+    (this.pauseBtn.getByName('label') as Phaser.GameObjects.Text | null)?.setFontSize(13);
+    this.pauseBtn.list.forEach((o) => {
+      if (o instanceof Phaser.GameObjects.Rectangle) o.on('pointerdown', (p: Phaser.Input.Pointer) => (this.lastPauseUiDownTime = p.downTime));
+    });
+
+    const layer = this.add.container(0, 0).setScrollFactor(0).setDepth(30000).setVisible(false).setName('pauseLayer');
+    const dim = this.add.rectangle(0, 0, 8000, 8000, 0x000000, 0.45).setOrigin(0).setName('pauseDim');
+    dim.setInteractive();
+    // Outside the panel does nothing (never unpauses by accident); it only swallows the press.
+    dim.on('pointerdown', (p: Phaser.Input.Pointer) => (this.lastPauseUiDownTime = p.downTime));
+    const panel = this.add.container(0, 0);
+    layer.add([dim, panel]);
+    this.pauseLayer = layer;
+    this.pausePanel = panel;
+    this.game.events.on('save-result', this.onSaveResult, this);
+    this.events.once('shutdown', () => this.game.events.off('save-result', this.onSaveResult, this));
+  }
+
+  openPause(): void {
+    if (this.pauseOpen || !this.pauseLayer) return; // single instance: never stack
+    this.pauseOpen = true;
+    this.outsidePress = null;
+    if (this.winDrag) this.winDrag = null;
+    if (this.scene.isActive('ClubScene')) this.scene.pause('ClubScene');
+    this.pauseLayer.setVisible(true);
+    this.pauseBtn.setVisible(false);
+    this.renderPauseView('main');
+  }
+
+  /** CONTINUAR: close the menu and resume the simulation from the exact same instant. */
+  closePause(): void {
+    if (!this.pauseOpen) return;
+    this.pauseOpen = false;
+    this.pauseLayer?.setVisible(false);
+    this.pauseBtn.setVisible(true);
+    this.pauseStatus = '';
+    if (this.scene.isPaused('ClubScene')) this.scene.resume('ClubScene');
+  }
+
+  private onSaveResult = (r: { slot?: number; ok?: boolean }): void => {
+    this.pauseStatus = r?.ok ? `Partida guardada en Ranura ${r.slot}.` : 'No se pudo guardar la partida.';
+    if (this.pauseOpen && (this.pauseView === 'save' || this.pauseView === 'overwrite')) this.renderPauseView('save');
+  };
+
+  private pauseButton(
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    label: string,
+    cb: () => void,
+    opts: { enabled?: boolean; fontSize?: number; color?: number; align?: 'center' | 'left' } = {}
+  ): Phaser.GameObjects.Container {
+    const enabled = opts.enabled !== false;
+    const base = opts.color ?? 0xb43282;
+    const c = this.add.container(x, y);
+    const bg = this.add.rectangle(0, 0, w, h, enabled ? base : 0x3a2a44, 1).setOrigin(0);
+    bg.setStrokeStyle(1, enabled ? 0xff7ac8 : 0x5a4a66);
+    const t = this.add
+      .text(opts.align === 'left' ? 12 : w / 2, h / 2, label, {
+        fontSize: `${opts.fontSize ?? 15}px`,
+        color: enabled ? '#ffffff' : '#9a8aa8',
+        fontStyle: 'bold',
+        align: opts.align === 'left' ? 'left' : 'center',
+        lineSpacing: 2,
+      })
+      .setOrigin(opts.align === 'left' ? 0 : 0.5, 0.5);
+    c.add([bg, t]);
+    bg.setInteractive({ useHandCursor: enabled });
+    // Fire on release of a press that STARTED on this button (never the opener's tail).
+    let pressed = -1;
+    bg.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      this.lastPauseUiDownTime = p.downTime;
+      if (!this.isPrimaryPress(p)) return;
+      pressed = p.downTime;
+    });
+    bg.on('pointerout', () => {
+      if (enabled) bg.setFillStyle(base);
+    });
+    bg.on('pointerover', () => {
+      if (enabled) bg.setFillStyle(0xd44a9a);
+    });
+    bg.on('pointerup', (p: Phaser.Input.Pointer) => {
+      if (!enabled || pressed < 0 || p.downTime !== pressed) return;
+      pressed = -1;
+      cb();
+    });
+    return c;
+  }
+
+  private renderPauseView(view: PauseView, arg: number | null = null): void {
+    const panel = this.pausePanel;
+    if (!panel) return;
+    if (view !== 'save' && view !== 'overwrite') this.pauseStatus = '';
+    this.pauseView = view;
+    this.pauseViewArg = arg;
+    panel.removeAll(true);
+    this.pauseButtons = [];
+    const cam = this.cameras.main;
+    const W = Math.min(400, cam.width - 24);
+    const bw = Math.min(280, W - 40);
+    const items: Phaser.GameObjects.GameObject[] = [];
+    let y = 0;
+    const text = (s: string, size: number, color: string, bold = false) => {
+      const t = this.add
+        .text(0, y, s, { fontSize: `${size}px`, color, fontStyle: bold ? 'bold' : 'normal', align: 'center', wordWrap: { width: W - 36 } })
+        .setOrigin(0.5, 0);
+      items.push(t);
+      y += t.height + 10;
+      return t;
+    };
+    const btn = (label: string, cb: () => void, o: { enabled?: boolean; h?: number; w?: number; fontSize?: number; color?: number; align?: 'center' | 'left' } = {}) => {
+      const w = o.w ?? bw;
+      const h = o.h ?? 40;
+      const b = this.pauseButton(-w / 2, y, w, h, label, cb, o);
+      items.push(b);
+      this.pauseButtons.push({ label, x: -w / 2, y, w, h, enabled: o.enabled !== false });
+      y += h + 10;
+      return b;
+    };
+    const slotLine = (s: SlotSummary) =>
+      s.empty || !s.meta
+        ? `${s.label} — Vacía`
+        : `${s.label} — Día ${s.meta.day} · ${s.meta.clock} · ${formatMoney(s.meta.money)}\n${s.meta.phaseLabel} · ${formatSavedAt(s.savedAt)}`;
+
+    y = 18;
+    if (view === 'main') {
+      text('PAUSA', 26, '#ff3ca0', true);
+      text('El juego está detenido.', 13, '#c9b4dc');
+      btn('CONTINUAR', () => this.closePause());
+      btn('GUARDAR PARTIDA', () => this.renderPauseView('save'));
+      btn('CARGAR PARTIDA', () => this.renderPauseView('load'));
+      btn('NUEVA PARTIDA', () => this.renderPauseView('confirmNew'));
+      btn('OPCIONES', () => this.renderPauseView('options'));
+      btn('VOLVER AL TÍTULO', () => this.renderPauseView('confirmTitle'));
+    } else if (view === 'save') {
+      text('GUARDAR PARTIDA', 22, '#ff3ca0', true);
+      text('Elige una ranura.', 13, '#c9b4dc');
+      for (const s of listSlots()) {
+        const n = Number(s.id);
+        btn(slotLine(s), () => (s.empty ? this.game.events.emit('cmd-save-slot', { slot: n }) : this.renderPauseView('overwrite', n)), {
+          h: 52,
+          w: Math.min(340, W - 30),
+          fontSize: 13,
+          align: 'left',
+          color: s.empty ? 0x5a2a6e : 0xb43282,
+        });
+      }
+      const auto = readAutosaveSummary();
+      if (auto?.meta) text(`Autoguardado (inicio de día): Día ${auto.meta.day} · ${formatMoney(auto.meta.money)}`, 12, '#9a80b0');
+      if (this.pauseStatus) text(this.pauseStatus, 14, '#7dffb0', true);
+      btn('VOLVER', () => this.renderPauseView('main'));
+    } else if (view === 'overwrite') {
+      const n = arg ?? 1;
+      const s = listSlots()[n - 1];
+      text(`¿SOBRESCRIBIR RANURA ${n}?`, 20, '#ff3ca0', true);
+      text(s && !s.empty && s.meta ? `Se reemplazará: Día ${s.meta.day} · ${s.meta.clock} · ${formatMoney(s.meta.money)}` : '', 13, '#f0e0ff');
+      btn('SÍ, SOBRESCRIBIR', () => this.game.events.emit('cmd-save-slot', { slot: n }));
+      btn('CANCELAR', () => this.renderPauseView('save'));
+    } else if (view === 'load') {
+      text('CARGAR PARTIDA', 22, '#ff3ca0', true);
+      const slots = listSlots().filter((s) => !s.empty);
+      if (!slots.length) {
+        y += 6;
+        text('NO HAY PARTIDAS GUARDADAS', 17, '#ffd6e0', true);
+        y += 6;
+      } else {
+        text('Elige la partida que quieres cargar.', 13, '#c9b4dc');
+        for (const s of slots) {
+          btn(slotLine(s), () => this.loadSlotFromMenu(Number(s.id)), { h: 52, w: Math.min(340, W - 30), fontSize: 13, align: 'left' });
+        }
+      }
+      btn('VOLVER', () => this.renderPauseView('main'));
+    } else if (view === 'loading') {
+      text('Cargando partida…', 20, '#ff3ca0', true);
+    } else if (view === 'confirmNew') {
+      text('¿COMENZAR UNA NUEVA PARTIDA?', 19, '#ff3ca0', true);
+      text('Se perderá el progreso de la partida actual si no está guardado.', 14, '#f0e0ff');
+      btn('SÍ, NUEVA PARTIDA', () => {
+        this.renderPauseView('loading');
+        this.game.events.emit('cmd-new-game');
+      });
+      btn('CANCELAR', () => this.renderPauseView('main'));
+    } else if (view === 'options') {
+      text('OPCIONES', 22, '#ff3ca0', true);
+      text('Todavía no hay opciones configurables.\nAquí aparecerán cuando el juego las tenga.', 14, '#f0e0ff');
+      btn('VOLVER', () => this.renderPauseView('main'));
+    } else if (view === 'confirmTitle') {
+      text('¿VOLVER AL TÍTULO?', 20, '#ff3ca0', true);
+      text('Asegúrate de guardar tu partida antes de salir.', 14, '#f0e0ff');
+      btn('SÍ, VOLVER AL TÍTULO', () => this.goToTitle());
+      btn('CANCELAR', () => this.renderPauseView('main'));
+    }
+    const H = y + 8;
+    const bg = this.add.rectangle(0, 0, W, H, 0x140a22, 0.97).setOrigin(0.5, 0).setStrokeStyle(2, 0xff3ca0);
+    bg.setInteractive(); // panel body swallows presses (never reaches the club)
+    bg.on('pointerdown', (p: Phaser.Input.Pointer) => (this.lastPauseUiDownTime = p.downTime));
+    panel.add([bg, ...items]);
+    this.layoutPause();
+  }
+
+  private layoutPause(): void {
+    if (!this.pausePanel) return;
+    const cam = this.cameras.main;
+    const bg = this.pausePanel.list[0] as Phaser.GameObjects.Rectangle | undefined;
+    const H = bg ? bg.height : 300;
+    this.pausePanel.setPosition(cam.width / 2, Math.max(8, Math.round((cam.height - H) / 2)));
+  }
+
+  private loadSlotFromMenu(n: number): void {
+    if (!readSlot(n)) {
+      this.renderPauseView('load');
+      return;
+    }
+    this.renderPauseView('loading');
+    this.game.events.emit('cmd-load-slot', { slot: n });
+  }
+
+  /** VOLVER AL TÍTULO: autosave, freeze the club (sleep keeps it intact) and show the title. */
+  private goToTitle(): void {
+    this.game.events.emit('cmd-autosave-now');
+    this.pauseOpen = false;
+    this.pauseLayer?.setVisible(false);
+    this.pauseBtn.setVisible(true);
+    // Sleeping requires a running scene: resume + sleep in the same queued step (no tick between).
+    if (this.scene.isPaused('ClubScene')) this.scene.resume('ClubScene');
+    this.scene.sleep('ClubScene');
+    this.scene.run('TitleScene');
+    this.scene.sleep();
+  }
+
+  /** Test hook: pause menu state (button rects in UI coords). */
+  getPauseDebug() {
+    const texts: string[] = [];
+    const walk = (o: Phaser.GameObjects.GameObject) => {
+      if (o instanceof Phaser.GameObjects.Text) texts.push(o.text);
+      if (o instanceof Phaser.GameObjects.Container) o.list.forEach(walk);
+    };
+    if (this.pausePanel) walk(this.pausePanel);
+    const px = this.pausePanel?.x ?? 0;
+    const py = this.pausePanel?.y ?? 0;
+    const layers = this.children.list.filter((o) => o.name === 'pauseLayer').length;
+    return {
+      open: this.pauseOpen,
+      visible: !!this.pauseLayer?.visible,
+      view: this.pauseView,
+      arg: this.pauseViewArg,
+      layers,
+      texts,
+      buttons: this.pauseButtons.map((b) => ({ ...b, x: b.x + px, y: b.y + py })),
+      pauseBtn: { x: this.pauseBtn.x, y: this.pauseBtn.y, w: 62, h: 36, visible: this.pauseBtn.visible },
+    };
+  }
+
   isPointerOnUi(p: Phaser.Input.Pointer): boolean {
     const h = this.cameras.main.height;
+    // Pause menu owns every gesture (and the PAUSA tap itself never reaches the club).
+    if (this.pauseOpen) return true;
+    if (p.downTime === this.lastPauseUiDownTime && p.downTime > 0) return true;
     // A window drag owns the gesture from press to release (never a world tap / pan / zoom).
     if (this.winDrag) return true;
     if (p.downTime === this.lastWinDragDownTime && p.downTime > 0) return true;
@@ -2040,6 +2345,8 @@ export class UIScene extends Phaser.Scene {
     this.staffPanel.setPosition(w / 2, h / 2);
     if (this.shopPanel) this.shopPanel.setPosition(w / 2, h / 2);
     this.layoutDeleteConfirm(w, h);
+    if (this.pauseBtn) this.pauseBtn.setPosition(w - PAUSE_BTN_RIGHT, 8);
+    if (this.pauseOpen) this.renderPauseView(this.pauseView, this.pauseViewArg);
     for (const dw of this.dragWins) {
       if (dw.key === 'techList' || dw.key === 'repairVerdict') {
         this.clampWin(dw);
