@@ -43,6 +43,19 @@
       "blurb": "Punto de servicio de cerveza. Los clientes piden cerveza aquí (usa el inventario de cerveza)."
     },
     {
+      "id": "contenedor_basura",
+      "name": "Contenedor de basura",
+      "price": 25,
+      "category": "funcional",
+      "function": "trash_bin",
+      "sprite": "furn_contenedor_basura",
+      "footprint": [1, 1],
+      "displaySize": [38, 48],
+      "yBias": -4,
+      "placeholderColor": 4020797,
+      "blurb": "Infraestructura: casi toda la basura de los clientes cae aquí y no al piso. Las bolsas aguantan más."
+    },
+    {
       "id": "mesa_pequena",
       "name": "Mesa pequeña",
       "price": 35,
