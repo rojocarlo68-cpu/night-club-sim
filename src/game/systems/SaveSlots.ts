@@ -17,6 +17,46 @@ const SLOT_PREFIX = 'night-club-save-slot-';
 export const PENDING_LIVE_KEY = 'night-club-pending-live';
 /** sessionStorage: exact snapshot taken when going to the title screen (CONTINUAR). */
 
+// ─── Two tabs, one autosave ────────────────────────────────────────────────────────────────
+// Every tab autosaves the WHOLE game to the same localStorage key, so two open tabs overwrite each
+// other's progress (whichever wrote last wins → a reload can bring back the other tab's older
+// night). The last tab the player actually used owns the autosave; the others stop writing it.
+// Only a separate small key is added — the save format itself is unchanged.
+const AUTOSAVE_OWNER_KEY = 'night-club-autosave-owner';
+const TAB_ID = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+let ownershipInstalled = false;
+
+export function claimAutosave(): void {
+  try {
+    if (localStorage.getItem(AUTOSAVE_OWNER_KEY) !== TAB_ID) localStorage.setItem(AUTOSAVE_OWNER_KEY, TAB_ID);
+  } catch {
+    /* private mode: single-writer assumption */
+  }
+}
+
+/** True when this tab may write the autosave (no owner yet, or it is us). */
+export function ownsAutosave(): boolean {
+  try {
+    const o = localStorage.getItem(AUTOSAVE_OWNER_KEY);
+    return !o || o === TAB_ID;
+  } catch {
+    return true;
+  }
+}
+
+/** Called once at boot: this tab takes over, and again whenever the player comes back to it. */
+export function installAutosaveOwnership(): void {
+  claimAutosave();
+  if (ownershipInstalled || typeof window === 'undefined') return;
+  ownershipInstalled = true;
+  window.addEventListener('focus', claimAutosave);
+  window.addEventListener('pointerdown', claimAutosave, { capture: true });
+  window.addEventListener('keydown', claimAutosave, { capture: true });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && document.hasFocus()) claimAutosave();
+  });
+}
+
 export interface SaveMeta {
   day: number;
   clock: string;
@@ -101,6 +141,7 @@ export function hasAnySave(): boolean {
 
 /** Make `data` the current game and reload (full teardown). */
 export function bootIntoSave(data: { layout: unknown; live: unknown }): void {
+  claimAutosave();
   try {
     localStorage.setItem(LAYOUT_KEY, JSON.stringify(data.layout));
     if (data.live) sessionStorage.setItem(PENDING_LIVE_KEY, JSON.stringify(data.live));

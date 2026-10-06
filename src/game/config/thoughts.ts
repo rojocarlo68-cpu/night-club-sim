@@ -58,6 +58,7 @@ export const THOUGHTS: Record<string, ThoughtDef> = {
   price_steep_tolerant: { texts: ['Bueno… supongo que vale la pena.'], emoji: '😐', tone: 'neutral', priority: 1 },
   price_steep_generous: { texts: ['Está caro, pero me atendieron muy bien.'], emoji: '🙂', tone: 'pos', priority: 2 },
   price_cheap: { texts: ['¡Qué buen precio!', 'Aquí sí está barato.'], emoji: '🙂', tone: 'pos', priority: 1 },
+  bar_broken: { texts: ['La barra está rota… no puedo pedir nada.', 'Con la barra así no me pueden servir.'], emoji: '😕', tone: 'neg', priority: 3, emote: '😕' },
   broken_furniture: { texts: ['¿Por qué tienen esto así?', 'Esto está roto…'], emoji: '😕', tone: 'neg', priority: 2 },
   uncomfortable: { texts: ['Qué incómodo es esto.'], emoji: '😣', tone: 'neg', priority: 1 },
   long_wait: {

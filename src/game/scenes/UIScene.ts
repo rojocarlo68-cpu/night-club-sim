@@ -622,6 +622,18 @@ export class UIScene extends Phaser.Scene {
     this.refreshBuildButtons();
     this.createPauseUi();
     this.game.events.emit('cmd-request-staff-roster');
+    // Paint the real HUD now: the money text starts as a "$40" placeholder and was only replaced
+    // at the next game-minute stats event (a loaded $31 save looked like "$40 → $31" while closed).
+    {
+      const club = this.scene.get('ClubScene') as (Phaser.Scene & { getHudState?: () => HudState }) | null;
+      if (club && typeof club.getHudState === 'function' && club.sys.isActive()) {
+        try {
+          this.onStats(club.getHudState());
+        } catch {
+          /* club not fully built yet — the first stats event will paint it */
+        }
+      }
+    }
     this.uiReady = true;
     this.game.events.emit('ui-ready');
   }
@@ -1403,6 +1415,12 @@ export class UIScene extends Phaser.Scene {
   /** downTime of the last press that hit the pause UI (ClubScene must never treat it as a world tap). */
   lastPauseUiDownTime = -1;
   uiReady = false;
+  /** Personal window: live-updatable parts of each row (by staff / candidate id). */
+  private staffRowRefs = new Map<
+    string,
+    { info: Phaser.GameObjects.Text; rest?: Phaser.GameObjects.Container; hire?: Phaser.GameObjects.Container }
+  >();
+  private staffRowsSig = '';
 
   private createPauseUi(): void {
     const cam = this.cameras.main;
@@ -1784,6 +1802,10 @@ export class UIScene extends Phaser.Scene {
       skill: typeof b.skill === 'number' ? b.skill : b.profile?.skill ?? 0,
       state: b.state ?? 'idle',
     };
+    // ClubScene sends the full card ('select-npc') right before this legacy event for Luna: don't
+    // overwrite it with this stripped one (summary/prep showed only Rol/Estado/Habilidad/Propinas
+    // until the next stats tick, which never comes while the summary is open).
+    if (this.panelVisible && this.selectedNpc && this.selectedNpc.id === npc.id) return;
     this.onSelectNpc(npc);
   };
 
@@ -1939,6 +1961,8 @@ export class UIScene extends Phaser.Scene {
     this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
     // Prompt B Phase B2: one visible time source = game clock (hide 75s countdown).
     this.applyClockHud(s);
+    // Personal window open: refresh energy / mood / estado live (in place, see onStaffRoster).
+    if (this.staffPanelVisible && this.uiReady) this.game.events.emit('cmd-request-staff-roster');
     const card = this.freshStaffCard(s);
     if (this.panelVisible && s.selectedNpc) {
       this.selectedNpc = s.selectedNpc;
@@ -2969,8 +2993,40 @@ export class UIScene extends Phaser.Scene {
 
   private onStaffRoster = (payload: StaffRosterPayload): void => {
     this.staffRoster = payload;
-    if (this.staffPanelVisible) this.rebuildStaffPanel();
+    if (!this.staffPanelVisible) return;
+    // Same people listed → update texts / button visibility in place. A rebuild creates new buttons
+    // that only become clickable a frame later (lost clicks), so it only happens when rows change.
+    if (this.staffRowsSig === this.staffRosterSig(payload) && this.staffRowRefs.size) {
+      this.updateStaffRowsInPlace(payload);
+    } else {
+      this.rebuildStaffPanel();
+    }
   };
+
+  /** Row structure of the Personal window (who is listed) — not their live numbers. */
+  private staffRosterSig(r: StaffRosterPayload | null): string {
+    if (!r) return '';
+    return `${r.current.map((e) => e.id).join(',')}|${r.hireable.map((e) => e.id).join(',')}`;
+  }
+
+  private staffCurrentInfoText(e: StaffRosterEntry): string {
+    const estado = STATE_ES[e.state] || e.state;
+    return `${e.name}  ·  ${e.roleLabel}\nEnergía ${e.energy}  ·  Ánimo ${e.mood}  ·  Hab. ${e.skill}\nEstado: ${estado}`;
+  }
+
+  private updateStaffRowsInPlace(r: StaffRosterPayload): void {
+    for (const e of r.current) {
+      const ref = this.staffRowRefs.get(e.id);
+      if (!ref) continue;
+      const txt = this.staffCurrentInfoText(e);
+      if (ref.info.text !== txt) ref.info.setText(txt);
+      if (ref.rest) ref.rest.setVisible(!!e.canRest);
+    }
+    for (const e of r.hireable) {
+      const ref = this.staffRowRefs.get(e.id);
+      if (ref?.hire) ref.hire.setAlpha(r.money >= (e.cost ?? 0) ? 1 : 0.4);
+    }
+  }
 
   private onHireFailed = (info: { id: string; reason: string }): void => {
     if (info.reason === 'money') {
@@ -2995,7 +3051,9 @@ export class UIScene extends Phaser.Scene {
   private rebuildStaffPanel(): void {
     if (!this.staffPanel) return;
     this.clearStaffRows();
+    this.staffRowRefs.clear();
     const roster = this.staffRoster;
+    this.staffRowsSig = this.staffRosterSig(roster);
     if (!roster) {
       const wait = this.add
         .text(0, 0, 'Cargando…', { fontSize: '14px', color: '#c8a0e0' })
@@ -3058,14 +3116,8 @@ export class UIScene extends Phaser.Scene {
       this.staffRows.push(ph);
     }
 
-    const estado = STATE_ES[e.state] || e.state;
     const info = this.add
-      .text(
-        -120,
-        y + 8,
-        `${e.name}  ·  ${e.roleLabel}\nEnergía ${e.energy}  ·  Ánimo ${e.mood}  ·  Hab. ${e.skill}\nEstado: ${estado}`,
-        { fontSize: '12px', color: '#e8d0ff', lineSpacing: 4 }
-      )
+      .text(-120, y + 8, this.staffCurrentInfoText(e), { fontSize: '12px', color: '#e8d0ff', lineSpacing: 4 })
       .setOrigin(0, 0);
     this.staffPanel.add(info);
     this.staffRows.push(info);
@@ -3078,14 +3130,15 @@ export class UIScene extends Phaser.Scene {
     this.staffPanel.add(sel);
     this.staffRows.push(sel);
 
-    if (e.canRest) {
-      const rest = this.makeLocalButton(178, y + 48, 90, 28, 'Descansar', () => {
-        this.game.events.emit('cmd-rest-staff', e.id);
-        this.game.events.emit('cmd-request-staff-roster');
-      });
-      this.staffPanel.add(rest);
-      this.staffRows.push(rest);
-    }
+    // Always built (hidden when she can't rest) so live updates only toggle it — no rebuild.
+    const rest = this.makeLocalButton(178, y + 48, 90, 28, 'Descansar', () => {
+      this.game.events.emit('cmd-rest-staff', e.id);
+      this.game.events.emit('cmd-request-staff-roster');
+    });
+    rest.setVisible(!!e.canRest);
+    this.staffPanel.add(rest);
+    this.staffRows.push(rest);
+    this.staffRowRefs.set(e.id, { info, rest });
 
     return y + rowH;
   }
@@ -3121,6 +3174,7 @@ export class UIScene extends Phaser.Scene {
       this.game.events.emit('cmd-hire-staff', e.id);
     });
     hire.setAlpha(can ? 1 : 0.4);
+    this.staffRowRefs.set(e.id, { info, hire });
     this.staffPanel.add(hire);
     this.staffRows.push(hire);
 

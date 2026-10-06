@@ -480,6 +480,8 @@ import {
 import { installSimClock, getSimNow, setSimNow } from '../systems/SimClock';
 import {
   LAYOUT_KEY,
+  ownsAutosave,
+  installAutosaveOwnership,
   SAVE_FORMAT_VERSION,
   SLOT_COUNT,
   SaveSlotData,
@@ -809,6 +811,9 @@ export type NightPhase = 'prep' | 'open' | 'summary';
 /** Furniture instance id (the starter sofa is 'sofa'). */
 type SelectedFurniture = string | null;
 
+/** A player-ordered "Descansar" keeps resting until energy reaches this (%), unless re-ordered. */
+const PLAYER_REST_UNTIL_ENERGY = 75;
+
 export class ClubScene extends Phaser.Scene {
   iso!: IsoConfig;
   pathfinder!: Pathfinder;
@@ -998,6 +1003,7 @@ export class ClubScene extends Phaser.Scene {
     loadBankruptcy(null);
     // Saved layout first: it drops pieces that no longer exist (bar, DJ, pinball, neon placeholders)
     // and keeps the sofa (and its wear / tile) when present.
+    installAutosaveOwnership();
     this.applySavedLayout();
 
     if (!this.cache.json.get('floor')) throw new Error('Falta JSON floor');
@@ -1014,6 +1020,7 @@ export class ClubScene extends Phaser.Scene {
     this.drawRoom(cols, rows);
     this.placeFurniture();
     this.ensureAllFurnitureInsideFloor();
+    this.repairGhostFurniture();
     if (this.layoutMigrated) {
       this.persistLayout();
       this.layoutMigrated = false;
@@ -1240,6 +1247,7 @@ export class ClubScene extends Phaser.Scene {
     });
     patron.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
       if (!p.wasTouch && p.button === 2) return;
+      if (!this.ownsGesture(p)) return;
       if (this.panDragging || this.furnDragging || this.skipNextTap) return;
       if (p.getDistance() > TAP_THRESH) return;
       if (this.buildMode) return;
@@ -1376,7 +1384,18 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
+  private autosaveYieldNoted = false;
+
   private persistLayout(): void {
+    // Another tab of this game is the one being played: don't overwrite its autosave.
+    if (!ownsAutosave()) {
+      if (!this.autosaveYieldNoted) {
+        this.autosaveYieldNoted = true;
+        this.uiToast('El juego está abierto en otra pestaña: esta pestaña no guardará hasta que vuelvas a jugar aquí.');
+      }
+      return;
+    }
+    this.autosaveYieldNoted = false;
     const payload = this.buildLayoutPayload();
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -1574,6 +1593,36 @@ export class ClubScene extends Phaser.Scene {
       def.tile = found;
       this.layoutMigrated = true;
       this.repositionFurnitureVisual(def.id);
+    }
+    this.rebuildPathfinder();
+  }
+
+  /**
+   * Saved pieces the player can't actually see ("En club: 1" but no contenedor on the floor):
+   * - a piece with no image gets one (or is dropped if it can't be drawn at all);
+   * - a piece almost entirely hidden behind a bigger one (older builds could drop a bought bin
+   *   right behind the bar / sofa) is moved to the nearest tile where it is visible.
+   */
+  private repairGhostFurniture(): void {
+    for (const def of [...this.scenario.furniture]) {
+      let img = this.shopImages.get(def.id);
+      if (!img) {
+        this.ensureShopFlags(def);
+        if (def.fromShop || def.catalogId) this.spawnShopFurnitureVisual(def);
+        img = this.shopImages.get(def.id);
+        if (!img) {
+          this.scenario.furniture = this.scenario.furniture.filter((f) => f !== def);
+          this.layoutMigrated = true;
+          continue;
+        }
+        this.layoutMigrated = true;
+      }
+      if (!this.shopTileOccluded(def, img, def.tile[0], def.tile[1], 0.6)) continue;
+      const vis = this.findVisibleShopTile(def, img, def.tile);
+      if (!vis) continue;
+      def.tile = vis;
+      this.repositionFurnitureVisual(def.id);
+      this.layoutMigrated = true;
     }
     this.rebuildPathfinder();
   }
@@ -1884,8 +1933,21 @@ export class ClubScene extends Phaser.Scene {
     this.pinchMidY = midY;
   }
 
+  /**
+   * downTime of the last press this scene actually received. A press captured by UIScene (a dialog
+   * button such as CONFIRMAR that closes its window on pointerdown) never reaches ClubScene, but its
+   * release would land on whatever is under it (e.g. Nova → staff panel switched). Releases are only
+   * honoured for presses that started here.
+   */
+  private lastClubDownTime = -1;
+
+  private ownsGesture(p: Phaser.Input.Pointer): boolean {
+    return p.downTime === this.lastClubDownTime && !this.isPointerOverHud(p);
+  }
+
   private setupPointerPan(): void {
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      this.lastClubDownTime = p.downTime;
       if (p.rightButtonDown()) return;
       if (this.isPointerOverHud(p)) return;
       // Mobile: long-press with a staff selected opens the context menu (= PC right-click).
@@ -1963,7 +2025,7 @@ export class ClubScene extends Phaser.Scene {
         !this.npcTapHandled &&
         !this.buildMode &&
         p.getDistance() <= TAP_THRESH &&
-        !this.isPointerOverHud(p)
+        this.ownsGesture(p)
       ) {
         this.handleWorldTap(p);
       } else if (!wasPanDrag && !this.npcTapHandled) {
@@ -2340,6 +2402,7 @@ export class ClubScene extends Phaser.Scene {
     this.nightEarned = 0;
     this.servedCount = 0;
     this.resetNightLedger();
+    this.warnIfBarUnusable();
     resetNightTips();
     resetNightInventory();
     resetNightAccumulators();
@@ -2647,6 +2710,10 @@ export class ClubScene extends Phaser.Scene {
 
   private chooseMainPatronGoal(patron: Patron): void {
     if (!patron.active || this.phase !== 'open') return;
+    // A bar is there but unusable: the customer notices (customer window thought, no numbers).
+    if (!this.activeBar() && this.scenario.furniture.some((f) => this.isBarDef(f))) {
+      this.patronThink(patron, 'bar_broken');
+    }
     // Beer + functional tap → specialized service point; other drinks → bar.
     if (this.shouldRoutePatronToBeerTap(patron)) {
       this.sendPatronToBeerTap(patron);
@@ -3562,6 +3629,7 @@ export class ClubScene extends Phaser.Scene {
     });
     npc.sprite.on('pointerup', (p: Phaser.Input.Pointer) => {
       if (!p.wasTouch && p.button === 2) return;
+      if (!this.ownsGesture(p)) return;
       if (this.panDragging || this.furnDragging || this.skipNextTap) return;
       if (p.getDistance() > TAP_THRESH) return;
       if (this.buildMode) return;
@@ -3800,8 +3868,13 @@ export class ClubScene extends Phaser.Scene {
     return tile.col >= 0 && tile.row >= 0 && tile.col < cols && tile.row < rows;
   }
 
+  /** Resting because the player ordered it: a new player order may end that rest. */
+  private isPlayerRest(staff: Bartender): boolean {
+    return staff.playerCommanded && staff.aiJob === 'rest';
+  }
+
   private moveSelectedStaffToPointer(p: Phaser.Input.Pointer, staff: Bartender): void {
-    if (staff.state === 'resting') return;
+    if (staff.state === 'resting' && !this.isPlayerRest(staff)) return;
     // Exhausted / fed-up / very drunk staff may not obey (probabilistic, never at normal levels).
     const comp = rollCompliance(staff.profile.id, staff.profile.energy, staff.profile.mood);
     if (comp === 'refuse') {
@@ -3829,7 +3902,8 @@ export class ClubScene extends Phaser.Scene {
 
   /** "Caminar aquí" order (compliance already rolled by issuePlayerOrder). Snaps to the nearest reachable tile. */
   private walkStaffToTile(staff: Bartender, tile: { col: number; row: number }): boolean {
-    if (staff.state === 'resting') return false;
+    if (staff.state === 'resting' && !this.isPlayerRest(staff)) return false;
+    if (this.isPlayerRest(staff)) this.interruptStaff(staff);
     let goal = tile;
     if (!this.pathfinder.isWalkable(tile.col, tile.row)) {
       const path = this.pathfinder.findPath(staff.grid, tile);
@@ -4536,6 +4610,7 @@ export class ClubScene extends Phaser.Scene {
     this.nightEarned = 0;
     this.servedCount = 0;
     this.resetNightLedger();
+    this.warnIfBarUnusable();
     resetNightTips();
     resetNightInventory();
     resetNightAccumulators();
@@ -4917,6 +4992,8 @@ export class ClubScene extends Phaser.Scene {
     }
 
     const spot = atTap ? tapSpots!.staffSpot : barSpots!.staffSpot;
+    // Unique token per serve job, so a stale callback of an earlier serve can never touch this one.
+    staff.jobToken++;
     staff.aiJob = 'serve';
     staff.playerCommanded = false;
     staff.state = 'busy';
@@ -4928,11 +5005,23 @@ export class ClubScene extends Phaser.Scene {
 
     // The job is still ours (a player order or a night change releases the claim / bumps the token).
     const tok = staff.jobToken;
-    const mine = () =>
-      staff.jobToken === tok && this.serveClaim.get(patron.profile.id) === staff.profile.id;
+    let released = false;
+    // Still our job? If the customer's claim was dropped elsewhere (left angry, bar broke, took a
+    // pre-poured beer, closing nudge) while the token is still ours, free the employee here —
+    // before, every callback just bailed and she stayed "serve" forever: nobody got served again.
+    const mine = () => {
+      if (staff.jobToken !== tok || released) return false;
+      if (this.serveClaim.get(patron.profile.id) === staff.profile.id) return true;
+      release();
+      return false;
+    };
     let spilledOnce = false;
     const release = () => {
-      if (mine()) this.serveClaim.delete(patron.profile.id);
+      if (released) return;
+      released = true;
+      if (staff.jobToken === tok && this.serveClaim.get(patron.profile.id) === staff.profile.id) {
+        this.serveClaim.delete(patron.profile.id);
+      }
       staff.servingDrinkId = null;
       staff.clearServeLabel();
       this.releaseStaffTileClaims(staff);
@@ -5463,14 +5552,22 @@ export class ClubScene extends Phaser.Scene {
       const dur = npc.profile.restDurationMs;
       this.game.events.emit('stats-updated', this.getHudState());
       this.emitStaffRoster();
-      this.time.delayedCall(dur, () => {
+      const restCycle = () => {
         if (npc.jobToken !== restTok) return;
         npc.applyRest();
+        // A player's "Descansar" holds until she has actually recovered (or the player gives
+        // another order, which bumps the job token). The AI's own short rest stays one cycle.
+        if (asPlayer && npc.profile.energy < PLAYER_REST_UNTIL_ENERGY) {
+          this.game.events.emit('stats-updated', this.getHudState());
+          this.emitStaffRoster();
+          this.time.delayedCall(dur, restCycle);
+          return;
+        }
         npc.clearServeLabel();
         npc.state = 'idle';
         this.releaseStaffTileClaims(npc);
-        if (asPlayer) npc.clearPlayerCommand();
-        else npc.clearAiJob();
+        // clearPlayerCommand() only resets aiJob 'player' and left a player rest stuck as 'rest'.
+        npc.clearAiJob();
         npc.startBob();
         const home = this.findFloorStaffSpawnTile();
         const homeGoal = this.findFreeStaffGoal(npc, home) ?? home;
@@ -5482,7 +5579,8 @@ export class ClubScene extends Phaser.Scene {
           this.game.events.emit('stats-updated', this.getHudState());
           this.emitStaffRoster();
         });
-      });
+      };
+      this.time.delayedCall(dur, restCycle);
     });
   }
 
@@ -5556,6 +5654,23 @@ export class ClubScene extends Phaser.Scene {
         if (!pre) break;
         this.interruptStaff(pre);
         this.tryAssignServeAi(patron);
+      }
+    }
+
+    // Safety net: a serve job whose customer claim is gone and that isn't walking anymore is stale.
+    for (const staff of this.allStaff()) {
+      if (staff.aiJob !== 'serve' || staff.playerCommanded || staff.state === 'walking' || this.staffAway.has(staff.profile.id)) continue;
+      const hasClaim = [...this.serveClaim.values()].includes(staff.profile.id);
+      if (hasClaim) {
+        staff.serveStaleSince = 0;
+      } else if (!staff.serveStaleSince) {
+        staff.serveStaleSince = now;
+      } else if (now - staff.serveStaleSince > 1500) {
+        staff.serveStaleSince = 0;
+        this.interruptStaff(staff);
+        staff.state = 'idle';
+        staff.startBob();
+        this.emitStaffRoster();
       }
     }
 
@@ -5983,6 +6098,7 @@ export class ClubScene extends Phaser.Scene {
     });
     img.on('pointerup', (p: Phaser.Input.Pointer) => {
       if (this.deleteConfirmOpen) return;
+      if (!this.ownsGesture(p)) return;
       if (this.panDragging || this.skipNextTap) return;
       if (!this.buildMode) return;
       if (p.getDistance() > TAP_THRESH && !this.furnDragging) return;
@@ -5997,7 +6113,13 @@ export class ClubScene extends Phaser.Scene {
    * True when a piece standing at (col,row) would be mostly hidden behind furniture drawn in
    * front of it (higher depth) — e.g. a small bin right behind the sofa.
    */
-  private shopTileOccluded(def: FurnitureDef, img: Phaser.GameObjects.Image, col: number, row: number): boolean {
+  private shopTileOccluded(
+    def: FurnitureDef,
+    img: Phaser.GameObjects.Image,
+    col: number,
+    row: number,
+    maxHidden = 0.35
+  ): boolean {
     const pos = this.furnitureWorldPos(def.type, col, row, def);
     const w = img.displayWidth;
     const h = img.displayHeight;
@@ -6013,7 +6135,7 @@ export class ClubScene extends Phaser.Scene {
       const b = o.getBounds();
       const ix = Math.max(0, Math.min(x0 + w, b.right) - Math.max(x0, b.left));
       const iy = Math.max(0, Math.min(y0 + h, b.bottom) - Math.max(y0, b.top));
-      if ((ix * iy) / area > 0.35) return true;
+      if ((ix * iy) / area > maxHidden) return true;
     }
     return false;
   }
@@ -6199,6 +6321,7 @@ export class ClubScene extends Phaser.Scene {
       // Dirt snowballs: already-dirty pieces decay faster (stains escalate)
       const boost =
         before < DIRT_VISUAL_THRESHOLD ? AI_TUNABLES.dirtyDecayBoost : before < 75 ? 1.2 : 1;
+      const condBefore = conditionFromDurability(st.durability, st.maxDurability);
       applyDecay(st, dtSec * boost, this.furniturePrice(f));
       const occ = occupants.get(f.id) ?? 0;
       if (occ > 0) {
@@ -6208,6 +6331,7 @@ export class ClubScene extends Phaser.Scene {
       }
       this.writeStatsToDef(f, st);
       if (f.repairCount) this.applyRepairAftereffects(f, durBefore, dtSec);
+      this.noteConditionDrop(f, condBefore);
       const crossed =
         (before >= DIRT_VISUAL_THRESHOLD) !== (st.cleanliness >= DIRT_VISUAL_THRESHOLD) ||
         Math.floor(before / 8) !== Math.floor(st.cleanliness / 8);
@@ -7983,9 +8107,40 @@ export class ClubScene extends Phaser.Scene {
     if (!def) return;
     const st = this.statsOf(def);
     const d0 = st.durability;
+    const condBefore = conditionFromDurability(st.durability, st.maxDurability);
     applyUsageWear(st, this.furniturePrice(def), { serves: 1 });
     this.usageWearServe += d0 - st.durability;
     this.writeStatsToDef(def, st);
+    this.noteConditionDrop(def, condBefore);
+  }
+
+  /**
+   * A piece just broke ("Se rompió") or became unusable ("Inservible"): tell the player once,
+   * in words (no numbers). An unusable bar means nobody can order drinks.
+   */
+  private noteConditionDrop(def: FurnitureDef, before: string): void {
+    const st = this.statsOf(def);
+    const now = conditionFromDurability(st.durability, st.maxDurability);
+    if (now === before || (now !== 'Se rompió' && now !== 'Inservible')) return;
+    const name = this.furnitureDisplayName(def);
+    const isBar = this.isBarDef(def) || this.isBeerTapDef(def);
+    const msg =
+      now === 'Inservible'
+        ? isBar
+          ? `¡${name} quedó inservible! Ya nadie puede pedir ahí. Repárala (Acciones → Reparar) o compra otra.`
+          : `¡${name} quedó inservible! Ya no se puede usar.`
+        : `¡${name} se rompió! Así ya no sirve bien.`;
+    const img = this.shopImages.get(def.id);
+    this.showStatusFloat(msg.split('!')[0] + '!', img ?? undefined);
+    this.uiToast(msg);
+    this.reemitFurnitureInspectIf(def.id);
+  }
+
+  /** Opening with a bar that exists but is unusable: say why nobody will be able to order. */
+  private warnIfBarUnusable(): void {
+    const bars = this.scenario.furniture.filter((f) => this.isBarDef(f));
+    if (!bars.length || this.activeBar()) return;
+    this.uiToast(`${this.furnitureDisplayName(bars[0])} está inservible: los clientes no podrán pedir bebidas. Repárala (Acciones → Reparar) o compra otra.`);
   }
 
   /** "Está caro, pero me atendieron muy bien." only once the service actually was good. */

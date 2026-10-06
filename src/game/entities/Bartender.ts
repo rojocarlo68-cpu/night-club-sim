@@ -73,6 +73,9 @@ export class Bartender extends Character {
   private serveLabel?: Phaser.GameObjects.Text;
 
   /** Staff never stand or path outside the floor diamond (defensive clamp onto the grid). */
+  /** Scene AI bookkeeping: when a 'serve' job first had no customer claim (0 = fine). */
+  serveStaleSince = 0;
+
   override snapTo(grid: GridPos): void {
     super.snapTo(this.pathfinder ? this.pathfinder.clampToGrid(grid) : grid);
   }
@@ -270,7 +273,11 @@ export class Bartender extends Character {
       this.clearServeLabel();
       return;
     }
-    const y = -(this.sheetDisplayH || LUNA_DISPLAY_H) - 10;
+    // Just above the visible head: the 158px sheet frame has big transparent padding (visible body
+    // ≈ 417/784 of it, feet at y≈+6), so "-frame height" left the label ~90px above her head and
+    // it read as a floating label with nobody under it.
+    const visibleBody = (this.sheetDisplayH || LUNA_DISPLAY_H) * (417 / 784);
+    const y = 6 - visibleBody - 10;
     if (!this.serveLabel) {
       this.serveLabel = this.scene.add
         .text(0, y, text, {
