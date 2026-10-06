@@ -13,10 +13,20 @@ export const PACKAGING = {
 } as const;
 
 export const DELIVERY_TIMING = {
-  /** Ordered during the working day (prep / open): arrives this many game minutes later. */
-  workingDayMinutes: [8, 12] as [number, number],
-  /** Ordered after closing for the night: next day, this many game minutes after 17:00. */
-  nextDayMinutesAfterStart: [10, 30] as [number, number],
+  /**
+   * Ordered before midnight (game clock 17:00–23:59) while the shift is still running
+   * (prep / open / closing): arrives this many game minutes later (rolled per order; tripled
+   * from the old 8–12). May pass midnight — that is fine.
+   */
+  sameNightMinutes: [24, 36] as [number, number],
+  /**
+   * The supplier NEVER shows up while the club is closed. Next-day orders (placed at/after 00:00,
+   * or after the night ended) and same-night orders whose time elapsed before Abrir noche are
+   * scheduled only once the club OPENS, this many game minutes after opening (never instant).
+   */
+  afterOpenMinutes: [3, 10] as [number, number],
+  /** Game hours >= this (and < 24) count as "before midnight" for the same-night rule. */
+  sameNightFromHour: 17,
 } as const;
 
 /** Drop zone next to the entrance (packages are not obstacles; visual + logistic only). */

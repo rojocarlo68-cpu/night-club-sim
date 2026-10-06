@@ -26,8 +26,12 @@ export interface PendingOrder {
   placedClock: string;
   /** Delivered on the next day (ordered after closing, or not delivered before closing). */
   nextDay: boolean;
-  /** Absolute game minute when the supplier shows up (null while waiting for the next day). */
+  /** Absolute game minute when the supplier shows up (null while waiting for the next opening). */
   dueAbs: number | null;
+  /** Same-night lead rolled at order time (24–36 game min); null for next-day orders. */
+  leadMinutes?: number | null;
+  /** Time elapsed while the club was closed: waits for Abrir noche (+ small wait). */
+  heldUntilOpen?: boolean;
   status: 'in_transit' | 'arriving';
 }
 
@@ -136,9 +140,33 @@ export function orderCost(lines: OrderLine[]): number {
   return lines.reduce((a, l) => a + lineCost(l.productId, l.units), 0);
 }
 
-/** Working day = prep (closed, clock ticking) or open. Closing / summary = after closing. */
+/** The shift clock is still running for this day (prep / open / closing — not the summary). */
+export function isShiftRunning(state: ShiftState): boolean {
+  return state === 'closed' || state === 'open' || state === 'closing';
+}
+
+/** @deprecated kept for old callers: prep or open. */
 export function isWorkingDay(state: ShiftState): boolean {
   return state === 'closed' || state === 'open';
+}
+
+/** Game clock before midnight (17:00–23:59) — after 00:00 it is "tomorrow" for the supplier. */
+export function isBeforeMidnight(hour: number): boolean {
+  const h = ((Math.floor(hour) % 24) + 24) % 24;
+  return h >= DELIVERY_TIMING.sameNightFromHour;
+}
+
+/**
+ * Midnight rule (game clock): an order placed before 24:00 while the day is still running can
+ * arrive the same night; at/after 00:00 (or once the night ended) it is scheduled for the next day.
+ */
+export function canArriveSameNight(state: ShiftState, hour: number): boolean {
+  return isShiftRunning(state) && isBeforeMidnight(hour);
+}
+
+/** The supplier only appears while the club is open (or closing, staff still inside). */
+export function supplierMayAppear(state: ShiftState): boolean {
+  return state === 'open' || state === 'closing';
 }
 
 function pad2(n: number): string {
@@ -152,12 +180,19 @@ function clockPlus(hour: number, minute: number, add: number): string {
 
 /** Plain-language delivery estimate for the confirm window / toast. */
 export function estimateDeliveryText(state: ShiftState, hour: number, minute: number): string {
-  if (isWorkingDay(state)) {
-    const [a, b] = DELIVERY_TIMING.workingDayMinutes;
-    return `Llega hoy, aprox. entre las ${clockPlus(hour, minute, a)} y las ${clockPlus(hour, minute, b)}.`;
+  const [o1, o2] = DELIVERY_TIMING.afterOpenMinutes;
+  if (canArriveSameNight(state, hour)) {
+    const [a, b] = DELIVERY_TIMING.sameNightMinutes;
+    const win = `aprox. entre las ${clockPlus(hour, minute, a)} y las ${clockPlus(hour, minute, b)}`;
+    if (state === 'closed') {
+      return `Llega esta noche, ${win}. El repartidor solo entra con el club abierto: si aún no abres, llegará unos minutos después de abrir.`;
+    }
+    return `Llega esta noche, ${win}.`;
   }
-  const [a, b] = DELIVERY_TIMING.nextDayMinutesAfterStart;
-  return `Llega mañana por la tarde (entre las ${clockPlus(17, 0, a)} y las ${clockPlus(17, 0, b)}).`;
+  if (isShiftRunning(state)) {
+    return `Ya pasó la medianoche: llega mañana, unos minutos después de abrir el club (${o1}–${o2} min).`;
+  }
+  return `El club ya cerró: llega mañana, unos minutos después de abrir el club (${o1}–${o2} min).`;
 }
 
 function randInt(range: readonly [number, number], rng: () => number): number {
@@ -171,21 +206,24 @@ export function getAbsMinute(): number {
 /** Create a pending order (money is handled by the caller, once). */
 export function createOrder(
   lines: OrderLine[],
-  ctx: { state: ShiftState; day: number; clock: string; rng?: () => number }
+  ctx: { state: ShiftState; day: number; clock: string; hour?: number; rng?: () => number }
 ): PendingOrder {
   const rng = ctx.rng ?? Math.random;
   const clean = lines
     .map((l) => ({ productId: l.productId, units: normalizeOrderUnits(l.productId, l.units) }))
     .filter((l) => l.units > 0);
-  const working = isWorkingDay(ctx.state);
+  const hour = typeof ctx.hour === 'number' ? ctx.hour : parseInt(ctx.clock.slice(0, 2), 10) || 0;
+  const sameNight = canArriveSameNight(ctx.state, hour);
+  const lead = sameNight ? randInt(DELIVERY_TIMING.sameNightMinutes, rng) : null;
   const o: PendingOrder = {
     id: `ord_${++seq}`,
     lines: clean,
     cost: orderCost(clean),
     placedDay: ctx.day,
     placedClock: ctx.clock,
-    nextDay: !working,
-    dueAbs: working ? absMinute + randInt(DELIVERY_TIMING.workingDayMinutes, rng) : null,
+    nextDay: !sameNight,
+    dueAbs: lead != null ? absMinute + lead : null,
+    leadMinutes: lead,
     status: 'in_transit',
   };
   orders.push(o);
@@ -194,38 +232,58 @@ export function createOrder(
 
 /**
  * Advance the delivery clock by whole game minutes (only called while the shift clock ticks:
- * prep / open / closing — never in the closed night / summary). Returns orders now due.
+ * prep / open / closing — never in the summary). Returns orders whose supplier shows up NOW.
+ * While the club is CLOSED (prep) a due order is held (never appears) until scheduleOrdersAfterOpen.
  */
-export function tickDeliveryMinutes(minutes: number): PendingOrder[] {
+export function tickDeliveryMinutes(minutes: number, state: ShiftState = 'open'): PendingOrder[] {
   const n = Math.max(0, Math.floor(minutes));
   if (n <= 0) return [];
   absMinute += n;
+  return collectDueOrders(state);
+}
+
+/** Orders due at the current delivery clock; respects the closed-club rule unless forced (debug). */
+export function collectDueOrders(state: ShiftState, force = false): PendingOrder[] {
   const due: PendingOrder[] = [];
   for (const o of orders) {
     if (o.status !== 'in_transit' || o.dueAbs == null) continue;
-    if (absMinute >= o.dueAbs) {
-      o.status = 'arriving';
-      due.push(o);
+    if (absMinute < o.dueAbs) continue;
+    if (!force && !supplierMayAppear(state)) {
+      o.heldUntilOpen = true;
+      continue;
     }
+    o.status = 'arriving';
+    o.heldUntilOpen = false;
+    due.push(o);
   }
   return due;
 }
 
-/** Night is over (summary): anything not delivered yet comes tomorrow afternoon. */
+/** Night is over (summary): anything not delivered yet comes tomorrow, after opening. */
 export function deferUndeliveredToNextDay(): void {
   for (const o of orders) {
     if (o.status === 'in_transit') {
       o.nextDay = true;
       o.dueAbs = null;
+      o.heldUntilOpen = false;
     }
   }
 }
 
-/** New day at 17:00: schedule next-day orders inside the afternoon window. */
-export function scheduleNextDayOrders(rng: () => number = Math.random): void {
+/**
+ * Abrir noche: schedule every order that was waiting for the club to open (next-day orders and
+ * same-night orders whose time elapsed while closed) a small variable wait after opening.
+ * Same-night orders still in the future keep their time, but never earlier than that small wait.
+ */
+export function scheduleOrdersAfterOpen(rng: () => number = Math.random): void {
   for (const o of orders) {
-    if (o.status === 'in_transit' && o.dueAbs == null) {
-      o.dueAbs = absMinute + randInt(DELIVERY_TIMING.nextDayMinutesAfterStart, rng);
+    if (o.status !== 'in_transit') continue;
+    const wait = absMinute + randInt(DELIVERY_TIMING.afterOpenMinutes, rng);
+    if (o.dueAbs == null || o.heldUntilOpen || o.dueAbs <= absMinute) {
+      o.dueAbs = wait;
+      o.heldUntilOpen = false;
+    } else if (o.dueAbs < absMinute + DELIVERY_TIMING.afterOpenMinutes[0]) {
+      o.dueAbs = wait;
     }
   }
 }
@@ -320,6 +378,8 @@ export function loadDeliveries(raw: unknown): void {
         placedClock: typeof r.placedClock === 'string' ? r.placedClock : '',
         nextDay: !!r.nextDay,
         dueAbs: typeof r.dueAbs === 'number' ? r.dueAbs : null,
+        leadMinutes: typeof r.leadMinutes === 'number' ? r.leadMinutes : null,
+        heldUntilOpen: !!r.heldUntilOpen,
         // A supplier caught mid-walk by a reload delivers right away.
         status: 'in_transit',
       });

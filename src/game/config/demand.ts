@@ -94,13 +94,15 @@ export function earlyNightDemandScale(nightNumber: number): number {
 
 
 /**
- * B11 stub: future multipliers for amenities / reputation / marketing.
- * Arrivals multiplies BASE_DEMAND by product of these (currently all 1.0).
+ * Hidden demand multipliers. Arrivals multiplies BASE_DEMAND by their product (shorter gaps) and
+ * scales the soft cap (ceiling) by it. reputation = hidden club reputation (inertia, nightly).
+ * amenities stays 1.0: venue quality feeds the nightly reputation instead (gradual, not instant).
  */
-export const demandModifiers = {
+export const demandModifiers: { amenities: number; reputation: number } = {
   amenities: 1.0,
+  /** Hidden club reputation → arrival multiplier (systems/Reputation.ts, updated each night end). */
   reputation: 1.0,
-} as const;
+};
 
 export function getDemandModifiersProduct(): number {
   return Math.max(0.01, demandModifiers.amenities * demandModifiers.reputation);
@@ -112,3 +114,29 @@ export const LATE_OPEN_GRACE_GAME_MINUTES = 30;
 export const LATE_OPEN_SAT_FIRST_N_PATRONS = 3;
 /** Small one-shot satisfaction penalty (Prompt A sat scale). */
 export const LATE_OPEN_SAT_PENALTY = -4;
+
+/** Set a hidden demand modifier (reputation from systems/Reputation.ts; amenities reserved). */
+export function setDemandModifier(key: keyof typeof demandModifiers, value: number): void {
+  const v = Number.isFinite(value) ? Math.max(0.05, Math.min(5, value)) : 1;
+  (demandModifiers as { amenities: number; reputation: number })[key] = v;
+}
+
+/** Extra soft-cap potential from loyal (returning) customers — set at night start. */
+let loyalSoftCapBonus = 0;
+export function setLoyalSoftCapBonus(n: number): void {
+  loyalSoftCapBonus = Math.max(0, Math.floor(n) || 0);
+}
+export function getLoyalSoftCapBonus(): number {
+  return loyalSoftCapBonus;
+}
+
+/**
+ * Capacity (concurrent occupancy) — real infrastructure limits who can get in.
+ * capacity = min(seats + bar/tap standing spots + standingAllowance, staff × patronsPerStaff).
+ * Arrivals beyond capacity peek in and leave (counted only in hidden night stats).
+ */
+export const CAPACITY = {
+  standingAllowance: 2,
+  patronsPerStaff: 5,
+  minCapacity: 2,
+} as const;

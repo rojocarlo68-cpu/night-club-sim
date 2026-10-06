@@ -94,9 +94,28 @@ export class Patron extends Character {
   servedByStaffId: string | null = null;
   /** scene.time.now when they started waiting for a drink (0 = not waiting). */
   waitSince = 0;
-  /** Thought bubble (temporary, only on significant perceived events). */
-  private thoughtBox?: Phaser.GameObjects.Container;
-  private thoughtTimer?: Phaser.Time.TimerEvent;
+  /** Emote over the head (temporary, only on significant perceived events). */
+  private emoteText?: Phaser.GameObjects.Text;
+  private emoteTimer?: Phaser.Time.TimerEvent;
+  /**
+   * Returning-visitor hook: true when this visit comes from the hidden returning pool
+   * (a previous visit went well enough that they decided to come back).
+   */
+  recurrent = false;
+  /** Favourite staff remembered from the previous visit (returning visitors only). */
+  rememberedFavStaffId: string | null = null;
+  /** Price thought held until after service ("Está caro, pero me atendieron muy bien."). */
+  pendingPriceThought: string | null = null;
+  /**
+   * FUTURE INTOXICATION (architecture only — does NOT change behaviour yet).
+   * alcoholTolerance: 0.2 (lightweight) .. 1 (strong), stable per customer identity.
+   * alcoholIntake: alcohol units consumed this visit (accumulator).
+   * See systems/PatronIntoxication.ts for the computed level and the documented hook points.
+   */
+  alcoholTolerance = 0.6;
+  alcoholIntake = 0;
+  /** scene.time.now of the last alcoholic drink (for future decay). */
+  lastAlcoholAt = 0;
   label?: Phaser.GameObjects.Text;
   /** Persistent Spanish status (Esperando, Impaciente, Sentado, …). */
   statusLabel?: Phaser.GameObjects.Text;
@@ -267,53 +286,47 @@ export class Patron extends Character {
     this.ring?.setFillStyle(0x2ad6ff, v ? 0.45 : 0);
   }
 
-  /** True while a thought bubble is visible. */
+  /** True while an emote is visible over the head (thought TEXT is never drawn over heads). */
+  get emoteVisible(): boolean {
+    return !!this.emoteText && this.emoteText.visible;
+  }
+
+  /** @deprecated alias kept for older tests/debug — thoughts no longer render over heads. */
   get thoughtVisible(): boolean {
-    return !!this.thoughtBox && this.thoughtBox.visible;
+    return this.emoteVisible;
   }
 
-  /** Temporary thought bubble (text + emoji) above the head; replaces any previous one. */
-  showThought(text: string, emoji: string, ms = 3400, tone: 'pos' | 'neg' | 'neutral' = 'neutral'): void {
+  /**
+   * Significant-event emote: a single emoji pops above the head for a moment (no text).
+   * Thought texts live only in the customer window log.
+   */
+  showEmote(emoji: string, ms = 2200): void {
     if (!this.scene || !this.active) return;
-    this.clearThought();
-    const y = -PATRON_DISPLAY_H - 34;
-    const box = this.scene.add.container(0, y);
-    const txt = this.scene.add
-      .text(0, 0, text, {
-        fontSize: '10px',
-        color: '#1a0a22',
-        wordWrap: { width: 132 },
-        align: 'center',
-      })
-      .setOrigin(0.5, 1);
-    const w = Math.min(150, txt.width + 14);
-    const h = txt.height + 8;
-    const border = tone === 'neg' ? 0xff6b6b : tone === 'pos' ? 0x6bdc8a : 0xbfa8ff;
-    const bg = this.scene.add.graphics();
-    bg.fillStyle(0xfff8ee, 0.96);
-    bg.lineStyle(2, border, 1);
-    bg.fillRoundedRect(-w / 2, -h - 2, w, h, 7);
-    bg.strokeRoundedRect(-w / 2, -h - 2, w, h, 7);
-    bg.fillStyle(0xfff8ee, 0.96);
-    bg.fillCircle(-6, 3, 3);
-    bg.fillCircle(-2, 8, 2);
-    txt.setY(-6);
-    const emo = this.scene.add.text(w / 2 - 2, -h - 6, emoji, { fontSize: '18px' }).setOrigin(0.5, 0.5);
-    box.add([bg, txt, emo]);
-    this.add(box);
-    this.thoughtBox = box;
-    box.setAlpha(0);
-    this.scene.tweens.add({ targets: box, alpha: 1, y: y - 4, duration: 220 });
-    this.thoughtTimer = this.scene.time.delayedCall(ms, () => this.clearThought());
+    this.clearEmote();
+    const y = -PATRON_DISPLAY_H - 22;
+    const t = this.scene.add.text(0, y, emoji, { fontSize: '22px' }).setOrigin(0.5, 1);
+    this.add(t);
+    this.emoteText = t;
+    t.setAlpha(0).setScale(0.6);
+    this.scene.tweens.add({ targets: t, alpha: 1, scale: 1, y: y - 6, duration: 240, ease: 'Back.Out' });
+    this.emoteTimer = this.scene.time.delayedCall(ms, () => {
+      if (!this.scene || !this.emoteText) return;
+      this.scene.tweens.add({
+        targets: this.emoteText,
+        alpha: 0,
+        duration: 260,
+        onComplete: () => this.clearEmote(),
+      });
+    });
   }
 
-  clearThought(): void {
-    this.thoughtTimer?.remove(false);
-    this.thoughtTimer = undefined;
-    if (this.thoughtBox) {
-      if (this.scene) this.scene.tweens.killTweensOf(this.thoughtBox);
-      this.thoughtBox.destroy();
-      this.thoughtBox = undefined;
+  clearEmote(): void {
+    this.emoteTimer?.remove(false);
+    this.emoteTimer = undefined;
+    if (this.emoteText) {
+      if (this.scene) this.scene.tweens.killTweensOf(this.emoteText);
+      this.emoteText.destroy();
+      this.emoteText = undefined;
     }
   }
 

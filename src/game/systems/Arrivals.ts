@@ -26,6 +26,7 @@ import {
   earlyNightDemandScale,
   getDemandModifiersProduct,
   demandModifiers,
+  getLoyalSoftCapBonus,
 } from '../config/demand';
 import { formatGameClock, getShiftState, type ShiftState } from './Shift';
 import { RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE } from '../config/shift';
@@ -142,7 +143,8 @@ function computeSoftCap(nightNumber: number, openHour: number, openMinute: numbe
   latePenalty: number;
 } {
   const scale = earlyNightDemandScale(nightNumber);
-  let cap = Math.round(EARLY_NIGHT_SOFT_CAP * scale);
+  // Hidden demand (reputation) scales the CEILING; loyal returning customers add a little.
+  let cap = Math.round(EARLY_NIGHT_SOFT_CAP * scale * getDemandModifiersProduct()) + getLoyalSoftCapBonus();
   // Late-open hook: only when clock is past recommended open at Abrir.
   const openAbs = absMin(openHour, openMinute);
   const recommendedAbs = absMin(RECOMMENDED_OPEN_HOUR, RECOMMENDED_OPEN_MINUTE);
@@ -317,4 +319,47 @@ export function getArrivalsDebug() {
 
 export function getSpawnedTonight(): number {
   return spawnedTonight;
+}
+
+/**
+ * Test/debug: simulate the arrival scheduler for one virtual night (no entities, no side effects
+ * on the live scheduler state) and return how many arrivals it would produce.
+ */
+export function simulateArrivalsCount(opts: {
+  seed: number;
+  nightNumber: number;
+  openHour?: number;
+  openMinute?: number;
+  durationMinutes?: number;
+}): number {
+  const saved = {
+    rngState, spawnedTonight, softCap, demandScale, lateOpenPenalty, nextDueAbsMin,
+    pendingGroupExtra, arrivalsActive, openAbsMin, nightIndex,
+    log: arrivalLog.splice(0), times: spawnAbsTimes.splice(0),
+  };
+  try {
+    setArrivalsSeed(opts.seed);
+    const oh = opts.openHour ?? 18;
+    const om = opts.openMinute ?? 0;
+    beginArrivalsNight(oh, om, 2, opts.nightNumber);
+    let n = 0;
+    const dur = opts.durationMinutes ?? 8 * 60;
+    for (let m = 0; m <= dur; m++) {
+      const t = oh * 60 + om + m;
+      n += tickArrivals({
+        gameHour: Math.floor(t / 60) % 24,
+        gameMinute: t % 60,
+        nightTimerSec: Number.POSITIVE_INFINITY,
+        shiftState: 'open',
+      });
+    }
+    return n;
+  } finally {
+    rngState = saved.rngState; spawnedTonight = saved.spawnedTonight; softCap = saved.softCap;
+    demandScale = saved.demandScale; lateOpenPenalty = saved.lateOpenPenalty; nextDueAbsMin = saved.nextDueAbsMin;
+    pendingGroupExtra = saved.pendingGroupExtra; arrivalsActive = saved.arrivalsActive;
+    openAbsMin = saved.openAbsMin; nightIndex = saved.nightIndex;
+    arrivalLog.length = 0; arrivalLog.push(...saved.log);
+    spawnAbsTimes.length = 0; spawnAbsTimes.push(...saved.times);
+  }
 }

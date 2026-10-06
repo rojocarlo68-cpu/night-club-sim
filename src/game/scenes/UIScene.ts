@@ -1,3 +1,4 @@
+import { BANKRUPTCY_TEXT } from '../config/bankruptcy';
 import Phaser from 'phaser';
 import { NpcInfo } from '../types/Npc';
 import { StaffRosterEntry, StaffRosterPayload } from '../types/Staff';
@@ -55,6 +56,12 @@ interface HudState {
   utilities?: { total: number; lines: { label: string; amount: number }[] } | null;
   /** Phase 9: next night that triggers monthly utilities. */
   nextUtilitiesNight?: number;
+  /** Days left until the next weekly salaries / monthly services charge (existing calendar). */
+  payrollDue?: { daysLeft: number; amount: number };
+  utilitiesDue?: { daysLeft: number; amount: number };
+  /** Unpaid obligation (negative balance after a due charge) with grace days left. */
+  debt?: { amount: number; daysLeft: number; line: string } | null;
+  bankrupt?: boolean;
   /** Prompt A Phase 10: compact drink/stockout/served lines for summary. */
   nightSales?: {
     drinksSold: number;
@@ -104,6 +111,14 @@ const STATE_ES: Record<string, string> = {
 
 
 /** Display money as $N or -$N (never $-N). */
+/** "hoy" / "mañana" / "en N días" from days left on the existing night calendar. */
+function daysLabel(days: number): string {
+  const d = Math.max(0, Math.round(days));
+  if (d === 0) return 'hoy';
+  if (d === 1) return 'mañana';
+  return `en ${d} días`;
+}
+
 function formatMoney(n: number): string {
   const v = Math.floor(Number.isFinite(n) ? n : 0);
   if (v < 0) return `-$${Math.abs(v)}`;
@@ -455,6 +470,7 @@ export class UIScene extends Phaser.Scene {
     const kb = this.input.keyboard;
     if (kb) {
       kb.on('keydown-ESC', () => {
+        if (this.gameOverVisible) return;
         // Same stacking as outside/right-click: topmost window first.
         if (this.dismissTopmost()) return;
         if (this.buildMode) this.game.events.emit('cmd-set-build-mode', false);
@@ -521,6 +537,7 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('night-closing', this.onNightClosing, this);
     this.game.events.on('night-summary', this.onSummary, this);
     this.game.events.on('day-started', this.onDayStarted, this);
+    this.game.events.on('game-over', this.onGameOver, this);
     this.game.events.on('select-npc', this.onSelectNpc, this);
     // Back-compat: older emit still works
     this.game.events.on('select-bartender', this.onSelectBartenderLegacy, this);
@@ -1011,6 +1028,7 @@ export class UIScene extends Phaser.Scene {
 
     this.input.on('pointerdown', (p: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]) => {
       this.outsidePress = null;
+      if (this.gameOverVisible) return; // game over: nothing closes it except Nueva partida
       if (this.isRightClick(p)) {
         if (this.handleRightClickDismiss(over)) this.lastRightDismissDownTime = p.downTime;
         return;
@@ -1320,7 +1338,8 @@ export class UIScene extends Phaser.Scene {
       const lines = [`Estado: ${estado}`];
       if (npc.servedDrink) lines.push(`Bebe: ${npc.servedDrink}`);
       else if (npc.wantedDrink) lines.push(`Quiere: ${npc.wantedDrink}`);
-      const th = (npc.thoughts ?? []).slice(-2).reverse();
+      // Thought history (newest first). Only place where thoughts are readable — never over heads.
+      const th = (npc.thoughts ?? []).slice(-4).reverse();
       if (th.length) {
         lines.push('Piensa:');
         for (const t of th) lines.push(`${t.emoji} “${t.text}”`);
@@ -1470,8 +1489,10 @@ export class UIScene extends Phaser.Scene {
         lines.push(`  ${l.name}: $${l.amount}`);
       }
     }
-    if (typeof s.nextPayrollNight === 'number' && s.nextPayrollNight > 0) {
-      lines.push(`Próximo pago de sueldos: noche ${s.nextPayrollNight}`);
+    if (s.payrollDue) {
+      lines.push(`Próximo pago de sueldos: ${daysLabel(s.payrollDue.daysLeft)}${s.payrollDue.amount > 0 ? ` ($${s.payrollDue.amount})` : ''}`);
+    } else if (typeof s.nextPayrollNight === 'number' && s.nextPayrollNight > 0) {
+      lines.push(`Próximo pago de sueldos: ${daysLabel(s.nextPayrollNight - (s.nightNumber ?? 0))}`);
     }
     if (s.utilities && s.utilities.total > 0) {
       lines.push(`Servicios del mes: -$${s.utilities.total}`);
@@ -1479,10 +1500,14 @@ export class UIScene extends Phaser.Scene {
         lines.push(`  ${l.label}: $${l.amount}`);
       }
     }
-    if (typeof s.nextUtilitiesNight === 'number' && s.nextUtilitiesNight > 0) {
-      lines.push(`Próximo pago de servicios: noche ${s.nextUtilitiesNight}`);
+    if (s.utilitiesDue) {
+      lines.push(`Próximo pago de servicios: ${daysLabel(s.utilitiesDue.daysLeft)}${s.utilitiesDue.amount > 0 ? ` ($${s.utilitiesDue.amount})` : ''}`);
+    } else if (typeof s.nextUtilitiesNight === 'number' && s.nextUtilitiesNight > 0) {
+      lines.push(`Próximo pago de servicios: ${daysLabel(s.nextUtilitiesNight - (s.nightNumber ?? 0))}`);
     }
-    if (s.money < 0) {
+    if (s.debt) {
+      lines.push(s.debt.line);
+    } else if (s.money < 0) {
       lines.push('⚠ Dinero negativo: el club está en números rojos');
     }
 
@@ -1521,6 +1546,73 @@ export class UIScene extends Phaser.Scene {
   };
 
   private dayToast?: Phaser.GameObjects.Text;
+
+  // ── BANCARROTA / GAME OVER ──────────────────────────────────────────────────
+  private gameOver?: Phaser.GameObjects.Container;
+  gameOverVisible = false;
+
+  private onGameOver = (p: {
+    nightsPlayed: number;
+    money: number;
+    debt: number;
+    worstDebt: number;
+    servedTotal: number;
+    bestNightRevenue: number;
+  }): void => {
+    this.gameOverVisible = true;
+    this.summary.setVisible(false);
+    for (const w of this.dismissWins) if (w.isOpen() && w.key !== 'summary') w.close();
+    if (this.summaryBtn) this.summaryBtn.setVisible(false);
+    if (this.sleepHudBtn) this.sleepHudBtn.setVisible(false);
+    this.openBtn.setVisible(false);
+    this.closeBtn.setVisible(false);
+    this.gameOver?.destroy();
+    const cam = this.cameras.main;
+    const c = this.add.container(0, 0).setScrollFactor(0).setDepth(20000).setName('gameOver');
+    const dim = this.add.rectangle(0, 0, cam.width, cam.height, 0x050208, 0.88).setOrigin(0).setInteractive();
+    const w = Math.min(460, cam.width - 32);
+    const h = 330;
+    const x0 = (cam.width - w) / 2;
+    const y0 = Math.max(16, (cam.height - h) / 2);
+    const box = this.add.rectangle(x0, y0, w, h, 0x1a0710, 0.97).setOrigin(0).setStrokeStyle(2, 0xff4466).setInteractive();
+    const title = this.add
+      .text(cam.width / 2, y0 + 26, BANKRUPTCY_TEXT.title, { fontSize: '30px', color: '#ff4466', fontStyle: 'bold' })
+      .setOrigin(0.5, 0);
+    const sub = this.add
+      .text(cam.width / 2, y0 + 70, BANKRUPTCY_TEXT.subtitle, {
+        fontSize: '15px',
+        color: '#ffd6e0',
+        align: 'center',
+        wordWrap: { width: w - 40 },
+      })
+      .setOrigin(0.5, 0);
+    const stats = [
+      `Noches jugadas: ${p.nightsPlayed}`,
+      `Deuda sin cubrir: $${p.debt}`,
+      `Clientes atendidos: ${p.servedTotal}`,
+      `Mejor noche en bebidas: $${p.bestNightRevenue}`,
+    ].join('\n');
+    const body = this.add
+      .text(cam.width / 2, y0 + 112, stats, { fontSize: '15px', color: '#f0e0ff', align: 'center', lineSpacing: 6 })
+      .setOrigin(0.5, 0);
+    const btn = this.makeLocalButton(cam.width / 2 - 100, y0 + h - 62, 200, 42, 'Nueva partida', () => {
+      this.game.events.emit('cmd-new-game');
+    });
+    btn.setName('newGameBtn');
+    c.add([dim, box, title, sub, body, btn]);
+    this.gameOver = c;
+    c.setAlpha(0);
+    this.tweens.add({ targets: c, alpha: 1, duration: 500 });
+  };
+
+  /** Test hook: game-over UI state. */
+  getGameOverDebug() {
+    const texts: string[] = [];
+    this.gameOver?.each((o: Phaser.GameObjects.GameObject) => {
+      if (o instanceof Phaser.GameObjects.Text) texts.push(o.text);
+    });
+    return { visible: this.gameOverVisible && !!this.gameOver?.visible, texts, hasNewGame: !!this.gameOver?.getByName('newGameBtn') };
+  }
 
   private showDayToast(msg: string): void {
     this.dayToast?.destroy();

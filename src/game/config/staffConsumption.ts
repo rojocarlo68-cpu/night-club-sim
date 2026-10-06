@@ -4,6 +4,8 @@
  * Tuning only; behaviour lives in systems/StaffNeeds.ts + ClubScene.
  */
 
+import { drinkAlcoholUnits } from './drinks';
+
 export interface ConsumableEffect {
   /** Immediate energy change (0..100 scale). */
   energy: number;
@@ -18,16 +20,16 @@ export interface ConsumableEffect {
   verb: 'bebió' | 'comió';
 }
 
-/** Per product. Products missing here are not offered to staff. */
+/** Per product. Products missing here are not offered to staff. Alcohol units come from drinks.ts. */
 export const CONSUMABLE_EFFECTS: Record<string, ConsumableEffect> = {
   agua: { energy: 2, mood: 1, alcohol: 0, caffeine: false, phrase: 'un vaso con agua', verb: 'bebió' },
   refresco: { energy: 3, mood: 4, alcohol: 0, caffeine: false, phrase: 'un refresco', verb: 'bebió' },
   cafe: { energy: 0, mood: 2, alcohol: 0, caffeine: true, phrase: 'un shot de café', verb: 'bebió' },
-  cerveza: { energy: 0, mood: 5, alcohol: 1, caffeine: false, phrase: 'una cerveza', verb: 'bebió' },
-  shot_barato: { energy: 0, mood: 5, alcohol: 1.2, caffeine: false, phrase: 'un shot barato', verb: 'bebió' },
-  vodka: { energy: 0, mood: 6, alcohol: 1.5, caffeine: false, phrase: 'un shot de vodka', verb: 'bebió' },
-  ron: { energy: 0, mood: 6, alcohol: 1.4, caffeine: false, phrase: 'un trago de ron', verb: 'bebió' },
-  whiskey: { energy: 0, mood: 6, alcohol: 1.5, caffeine: false, phrase: 'un whiskey', verb: 'bebió' },
+  cerveza: { energy: 0, mood: 5, alcohol: drinkAlcoholUnits('cerveza'), caffeine: false, phrase: 'una cerveza', verb: 'bebió' },
+  shot_barato: { energy: 0, mood: 5, alcohol: drinkAlcoholUnits('shot_barato'), caffeine: false, phrase: 'un shot barato', verb: 'bebió' },
+  vodka: { energy: 0, mood: 6, alcohol: drinkAlcoholUnits('vodka'), caffeine: false, phrase: 'un shot de vodka', verb: 'bebió' },
+  ron: { energy: 0, mood: 6, alcohol: drinkAlcoholUnits('ron'), caffeine: false, phrase: 'un trago de ron', verb: 'bebió' },
+  whiskey: { energy: 0, mood: 6, alcohol: drinkAlcoholUnits('whiskey'), caffeine: false, phrase: 'un whiskey', verb: 'bebió' },
   botanas: { energy: 4, mood: 3, alcohol: 0, caffeine: false, phrase: 'unas botanas', verb: 'comió' },
 };
 

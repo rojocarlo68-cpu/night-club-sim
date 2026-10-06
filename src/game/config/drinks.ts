@@ -32,6 +32,11 @@ export interface DrinkProduct {
   serveTimeMs: number;
   /** Scales patron preference rolls (staff-oriented products like café/agua ≈ low). Default 1. */
   patronPrefScale?: number;
+  /**
+   * Alcohol content in "units" per serving (0 = none). Single source for both staff
+   * (config/staffConsumption.ts) and the future customer intoxication model.
+   */
+  alcoholUnits?: number;
 }
 
 /**
@@ -50,6 +55,7 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     demandWeight: 1.2,
     startStock: 20,
     serveTimeMs: 2000,
+    alcoholUnits: 1,
   },
   {
     id: 'refresco',
@@ -62,6 +68,7 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     demandWeight: 1.0,
     startStock: 20,
     serveTimeMs: 1200,
+    alcoholUnits: 0,
   },
   {
     id: 'shot_barato',
@@ -74,6 +81,7 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     demandWeight: 0.9,
     startStock: 20,
     serveTimeMs: 1000,
+    alcoholUnits: 1.2,
   },
   {
     id: 'vodka',
@@ -86,6 +94,7 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     demandWeight: 0.7,
     startStock: 20,
     serveTimeMs: 1600,
+    alcoholUnits: 1.5,
   },
   {
     id: 'whiskey',
@@ -98,6 +107,7 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     demandWeight: 0.55,
     startStock: 20,
     serveTimeMs: 1800,
+    alcoholUnits: 1.5,
   },
   {
     id: 'ron',
@@ -110,6 +120,7 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     demandWeight: 0.65,
     startStock: 20,
     serveTimeMs: 1500,
+    alcoholUnits: 1.4,
   },
   {
     id: 'cafe',
@@ -123,6 +134,7 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     startStock: 10,
     serveTimeMs: 1400,
     patronPrefScale: 0.3,
+    alcoholUnits: 0,
   },
   {
     id: 'agua',
@@ -136,6 +148,7 @@ export const DRINKS_CATALOG: readonly DrinkProduct[] = [
     startStock: 15,
     serveTimeMs: 600,
     patronPrefScale: 0.25,
+    alcoholUnits: 0,
   },
 ] as const;
 
@@ -145,6 +158,12 @@ const byId = new Map<string, DrinkProduct>(DRINKS_CATALOG.map((d) => [d.id, d]))
 
 export function getDrinkProduct(id: string): DrinkProduct | undefined {
   return byId.get(id);
+}
+
+/** Alcohol units per serving (0 for non-alcoholic / unknown products). */
+export function drinkAlcoholUnits(id: string): number {
+  const u = byId.get(id)?.alcoholUnits;
+  return typeof u === 'number' && Number.isFinite(u) && u > 0 ? u : 0;
 }
 
 export function listDrinkProducts(): DrinkProduct[] {

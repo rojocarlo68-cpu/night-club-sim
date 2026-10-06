@@ -10,6 +10,7 @@ import {
   clearStockoutFirstMs,
 } from './Inventory';
 import { getTips } from './Tips';
+import { CLUB_REPUTATION } from '../config/reputation';
 
 export type LeaveReason = 'price' | 'oos_skip' | 'empty';
 
@@ -49,6 +50,12 @@ export interface NightStatsEntry {
   leftWithoutBuy: NightLeftWithoutBuy;
   /** Internal — never shown in player summary. */
   avgSatisfaction: number | null;
+  /** Internal (demand): exits below the unhappy threshold. */
+  unhappyExits?: number;
+  /** Internal (capacity): would-be customers who peeked in, found no room and left. */
+  turnedAway?: number;
+  /** Internal (returning hook): arrivals that came from the returning pool. */
+  returningVisitors?: number;
   visitCount: number;
   atMs: number;
   /** Prompt B Phase B9 — shift clock summary (player-visible). */
@@ -63,6 +70,9 @@ export interface NightStatsEntry {
 let leaveCounts: NightLeftWithoutBuy = { price: 0, oos_skip: 0, empty: 0, total: 0 };
 let satSum = 0;
 let satCount = 0;
+let unhappyCount = 0;
+let turnedAwayCount = 0;
+let returningCount = 0;
 const history: NightStatsEntry[] = [];
 let lastSnapshot: NightStatsEntry | null = null;
 
@@ -70,6 +80,9 @@ export function resetNightAccumulators(): void {
   leaveCounts = { price: 0, oos_skip: 0, empty: 0, total: 0 };
   satSum = 0;
   satCount = 0;
+  unhappyCount = 0;
+  turnedAwayCount = 0;
+  returningCount = 0;
   clearStockoutFirstMs();
 }
 
@@ -85,6 +98,28 @@ export function noteNightVisitSatisfaction(sat: number): void {
   if (!Number.isFinite(sat)) return;
   satSum += sat;
   satCount++;
+  if (sat < CLUB_REPUTATION.unhappySatBelow) unhappyCount++;
+}
+
+/** Hidden: a would-be customer found the club full and left (capacity). */
+export function noteTurnedAway(): void {
+  turnedAwayCount++;
+}
+
+/** Hidden: an arrival came from the returning-visitor pool. */
+export function noteReturningArrival(): void {
+  returningCount++;
+}
+
+export function getNightLiveCounters() {
+  return {
+    visits: satCount,
+    avgSatisfaction: satCount > 0 ? satSum / satCount : null,
+    unhappy: unhappyCount,
+    turnedAway: turnedAwayCount,
+    returning: returningCount,
+    leftWithoutBuy: leaveCounts.total,
+  };
 }
 
 export function snapshotNightStats(opts: {
@@ -145,6 +180,9 @@ export function snapshotNightStats(opts: {
     leftWithoutBuy: { ...leaveCounts },
     avgSatisfaction,
     visitCount: satCount,
+    unhappyExits: unhappyCount,
+    turnedAway: turnedAwayCount,
+    returningVisitors: returningCount,
     atMs: Date.now(),
     openHhmm: opts.openHhmm ?? null,
     closeHhmm: opts.closeHhmm ?? null,
@@ -220,6 +258,9 @@ export function getNightStatsDebug() {
       leaveCounts: { ...leaveCounts },
       satSum,
       satCount,
+      unhappyCount,
+      turnedAwayCount,
+      returningCount,
       stockouts: getStockoutFirstMs(),
     },
   };

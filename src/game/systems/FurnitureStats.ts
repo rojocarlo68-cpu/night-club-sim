@@ -111,6 +111,30 @@ export function applyDecay(
   );
 }
 
+/**
+ * Demand stage: wear from real USE (on top of the existing time decay). More customers sitting
+ * and being served naturally wear the club faster — no artificial difficulty scaling.
+ */
+export const USAGE_WEAR = {
+  /** Each customer sitting on a piece adds this fraction of the base durability/comfort decay. */
+  occupiedExtra: 0.5,
+  /** Durability lost by the service point (bar / tap) per drink served (× price decay scale). */
+  perServe: 0.35,
+};
+
+/** Extra wear from use: `units` of base decay seconds (occupants × dt) or a flat serve hit. */
+export function applyUsageWear(
+  stats: FurnitureRuntimeStats,
+  price: number,
+  opts: { occupiedSec?: number; serves?: number }
+): void {
+  const scale = decayScaleForPrice(price);
+  const occ = Math.max(0, opts.occupiedSec ?? 0) * USAGE_WEAR.occupiedExtra * scale;
+  const hit = Math.max(0, opts.serves ?? 0) * USAGE_WEAR.perServe * scale;
+  stats.durability = clampStat(stats.durability - DECAY_PER_SEC.durability * occ - hit, stats.maxDurability);
+  stats.comfort = clampStat(stats.comfort - DECAY_PER_SEC.comfort * occ, stats.maxComfort);
+}
+
 export function applyCleanRestore(stats: FurnitureRuntimeStats): void {
   stats.cleanliness = clampStat(
     stats.cleanliness + CLEAN_RESTORE.cleanliness,

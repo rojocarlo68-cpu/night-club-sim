@@ -150,6 +150,10 @@ import {
 import {
   resetNightAccumulators,
   noteLeaveWithoutBuy,
+  noteTurnedAway,
+  noteReturningArrival,
+  getNightLiveCounters,
+  getNightStatsHistory,
   snapshotNightStats,
   serializeNightStatsHistory,
   loadNightStatsHistory,
@@ -161,7 +165,37 @@ import {
   loadReputation,
   getReputationDebug as readReputationDebug,
   getReturnChanceHint,
+  applyNightToClubReputation,
+  reputationDemandMultiplier,
+  getClubReputation,
+  debugSetClubReputation as repDebugSet,
+  noteReturnIntent,
+  expireReturnIntents,
+  takeReturningVisitor,
+  returningPoolSize,
+  serializeClubReputation,
+  loadClubReputation,
+  getClubReputationDebug,
+  computeNightQuality,
+  type NightQualityInputs,
+  type ReturnIntent,
 } from '../systems/Reputation';
+import {
+  setDemandModifier,
+  setLoyalSoftCapBonus,
+  CAPACITY,
+} from '../config/demand';
+import { RETURNING } from '../config/reputation';
+import { simulateArrivalsCount } from '../systems/Arrivals';
+import {
+  evaluateBankruptcyAtNightEnd,
+  isBankrupt,
+  getBankruptcyState,
+  serializeBankruptcy,
+  loadBankruptcy,
+} from '../systems/Bankruptcy';
+import { BANKRUPTCY_TEXT } from '../config/bankruptcy';
+import { monthlyUtilitiesTotal } from '../config/utilities';
 import { NIGHT_SUMMARY_LINES } from '../config/nightStats';
 import {
   takeLastPayroll,
@@ -287,6 +321,7 @@ import {
   DIRT_VISUAL_THRESHOLD,
   CLEAN_DURATION_MS,
   applyDecay,
+  applyUsageWear,
   applyCleanRestore,
   conditionFromDurability,
   freshStatsForPrice,
@@ -320,7 +355,7 @@ import {
   NON_BREAKABLE_IDS,
 } from '../config/technicians';
 import { FLIES } from '../config/spoilage';
-import { THOUGHT_RULES, THOUGHT_SAT, IMPRESSIVE_DECOR } from '../config/thoughts';
+import { THOUGHT_RULES, THOUGHT_SAT, IMPRESSIVE_DECOR, EMOTE_RULES } from '../config/thoughts';
 import {
   getWallet,
   creditWallet,
@@ -358,6 +393,12 @@ import {
   profileFor as spoilProfileFor,
 } from '../systems/ServedItems';
 import { decideThought, hasThought, thoughtLog, getThoughtsDebug } from '../systems/Thoughts';
+import {
+  initPatronIntoxication,
+  notePatronConsumption,
+  patronIntoxication,
+  patronIntoxicationLevel,
+} from '../systems/PatronIntoxication';
 import { addFloorDirtAt, getFloorZoneById, zoneContaining } from '../systems/FloorDirt';
 import {
   CtxTarget,
@@ -392,7 +433,8 @@ import {
   estimateDeliveryText,
   tickDeliveryMinutes,
   deferUndeliveredToNextDay,
-  scheduleNextDayOrders,
+  scheduleOrdersAfterOpen,
+  collectDueOrders,
   removeOrder,
   listOrders,
   addGoods,
@@ -560,6 +602,10 @@ interface SavedLayoutItem {
 }
 
 interface SavedLayout {
+  /** Hidden club reputation (demand with inertia) + returning-visitor pool. */
+  clubReputation?: unknown;
+  /** Unpaid obligation / grace / bankrupt flag. */
+  bankruptcy?: unknown;
   /** Pending restock orders + packages at the entrance (paid; never lost on reload). */
   deliveries?: unknown;
   /** Floor trash + club bag state. */
@@ -817,6 +863,8 @@ export class ClubScene extends Phaser.Scene {
     // Logistics state starts empty; the save (if any) restores it below.
     loadDeliveries(null);
     loadTrash(null);
+    loadClubReputation(null);
+    loadBankruptcy(null);
     // Saved layout first: it drops pieces that no longer exist (bar, DJ, pinball, neon placeholders)
     // and keeps the sofa (and its wear / tile) when present.
     this.applySavedLayout();
@@ -913,6 +961,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
     this.registerInterventionEvents();
     this.initLogistics();
+    this.initDemandLayer();
     this.emitStaffRoster();
     this.emitShopCatalog();
     this.scale.on('resize', this.onClubResize, this);
@@ -947,7 +996,7 @@ export class ClubScene extends Phaser.Scene {
       wantedDrink: p.servedDrinkId ? undefined : p.preferredDrinkName,
       servedDrink: p.servedDrinkId ? this.drinkDisplayName(p.servedDrinkId) : undefined,
       thoughts: thoughtLog(p)
-        .slice(-3)
+        .slice(-THOUGHT_RULES.panelShow)
         .map((t) => ({ text: t.text, emoji: t.emoji, tone: t.tone })),
       portrait: this.textures.exists('patron_portrait') ? 'patron_portrait' : undefined,
     };
@@ -1088,6 +1137,11 @@ export class ClubScene extends Phaser.Scene {
       loadCompetition(saved?.competition);
       loadPayrollHistory(saved?.payrollHistory);
       loadUtilitiesHistory(saved?.utilitiesHistory);
+      // Demand stage: hidden reputation + returning pool + debt/grace (+ previously unsaved-on-load logs).
+      loadReputation(saved?.reputation);
+      loadNightStatsHistory(saved?.nightStatsHistory);
+      loadClubReputation(saved?.clubReputation);
+      loadBankruptcy(saved?.bankruptcy);
       resetNightCycleState();
       if (typeof saved?.nightNumber === 'number' && Number.isFinite(saved.nightNumber)) {
         this.nightNumber = Math.max(1, Math.floor(saved.nightNumber));
@@ -1219,6 +1273,8 @@ export class ClubScene extends Phaser.Scene {
       utilitiesHistory: serializeUtilitiesHistory(),
       deliveries: serializeDeliveries(),
       trash: serializeTrash(),
+      clubReputation: serializeClubReputation(),
+      bankruptcy: serializeBankruptcy(),
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -2117,8 +2173,15 @@ export class ClubScene extends Phaser.Scene {
       this.allStaff().map((s) => ({ id: s.profile.id, name: s.displayName }))
     );
     const staffCount = working.length;
+    // Hidden demand: reputation multiplier + a little extra potential from loyal returning customers.
+    expireReturnIntents(this.nightNumber);
+    setDemandModifier('reputation', reputationDemandMultiplier());
+    setLoyalSoftCapBonus(Math.min(RETURNING.softCapBonusMax, returningPoolSize()));
     beginArrivalsNight(snap.gameHour, snap.gameMinute, staffCount, this.nightNumber);
     beginLateOpenNight(snap.gameHour, snap.gameMinute);
+    // Deliveries waiting for the club to open (next-day orders / elapsed while closed):
+    // the supplier comes a few game minutes after opening (never instantly).
+    scheduleOrdersAfterOpen();
     // Prompt B Phase B8: record who is working and shift start clock.
     recordStaffShiftStart(working, snap.gameHour, snap.gameMinute);
     this.game.events.emit('night-started', this.getHudState());
@@ -2149,10 +2212,11 @@ export class ClubScene extends Phaser.Scene {
     // no-op (kept so any stray call is harmless)
   }
 
-  private spawnPatron(): void {
+  private spawnPatron(returning: ReturnIntent | null = null): void {
     if (this.phase !== 'open') return;
     const pool = this.chars.patrons;
-    const pdata = { ...pool[Phaser.Math.Between(0, pool.length - 1)] };
+    const back = returning ? pool.find((x) => x.name === returning.name) : undefined;
+    const pdata = { ...(back ?? pool[Phaser.Math.Between(0, pool.length - 1)]) };
     pdata.id = `${pdata.id}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
     const spawn = {
       col: this.scenario.spawnTile[0],
@@ -2179,9 +2243,18 @@ export class ClubScene extends Phaser.Scene {
     getDrinkPrefs(patron);
     // Prompt A Phase 9: roll/persist action tastes (stable per profile.name).
     getActionTastes(patron);
+    // Future intoxication: stable tolerance + empty intake (computed, not used by behaviour).
+    initPatronIntoxication(patron);
     patron.beerServicePref = rollBeerServicePref();
     patron.servedAtBeerTap = false;
     patron.ateSnack = false;
+    if (back && returning) {
+      // Returning-visitor hook: same identity (traits / tastes / affinity persist per name).
+      patron.recurrent = true;
+      patron.rememberedFavStaffId = returning.favStaffId;
+      noteReturningArrival();
+      this.patronThink(patron, 'returning');
+    }
     this.chooseMainPatronGoal(patron);
   }
 
@@ -2261,6 +2334,7 @@ export class ClubScene extends Phaser.Scene {
       const row = resolveEval(drinkId);
       if (!row.ev || !traits) return 0;
       const penalty = applyPricePerception(patron, row.ev);
+      if (!row.refuse) this.notePriceThought(patron, row.ev.band, traits);
       pushPricingDebug({
         patronName: name,
         drinkId,
@@ -2428,9 +2502,7 @@ export class ClubScene extends Phaser.Scene {
       // Face the sofa (the tile behind the standing spot is the footprint's front row).
       patron.faceToward({ col: seat.col, row: seat.row - 1 });
       patron.refreshStatusLabel();
-      patron.showBubble('😌');
-      // Nearby dirt / broken furniture hurts mood while seated
-      if (this.qualityNearPatron(patron) < 0.4) patron.showBubble('¡Qué sucio!');
+      // (No text / emoji over the head here: what they think about the seat is logged as a thought.)
       // Prompt A Phase 2: perceive the seat actually used (comfort + cleanliness), once.
       this.perceiveUsedFurniture(patron, seat.furnitureId, true);
       let sitMs = Phaser.Math.Between(AI_TUNABLES.sitDurationMinMs, AI_TUNABLES.sitDurationMaxMs);
@@ -3165,7 +3237,10 @@ export class ClubScene extends Phaser.Scene {
     };
     const gone = () => {
       // Prompt A Phase 1: snapshot visit satisfaction (no behaviour change yet).
+      const exitSat = getExperience(patron)?.satisfaction ?? null;
       finalizeVisit(patron);
+      // Returning hook: hidden return intent from how the visit went (+ liked staff).
+      this.rollReturnIntent(patron, exitSat);
       if (this.selectedNpcId === patron.profile.id) {
         this.deselectNpc();
         this.game.events.emit('npc-deselected');
@@ -3631,6 +3706,10 @@ export class ClubScene extends Phaser.Scene {
    */
   sleepDay = (): void => {
     if (this.phase !== 'summary') return;
+    if (isBankrupt()) {
+      this.game.events.emit('game-over', this.gameOverPayload());
+      return;
+    }
     if (this.sleepInProgress) return;
     this.sleepInProgress = true;
     const cam = this.cameras.main;
@@ -3649,7 +3728,7 @@ export class ClubScene extends Phaser.Scene {
     // Logistics carry over: packages stay at the entrance, trash stays; tomorrow's orders get a time.
     this.finishSupplierVisits();
     this.finishTrashOutNow();
-    scheduleNextDayOrders();
+    // Pending orders are NOT scheduled at 17:00 any more: the supplier only comes after Abrir noche.
     resetTrashNight();
     onStaffSleep(this.allStaff().map((s) => s.profile.id));
     this.resetForNewNight();
@@ -3763,11 +3842,15 @@ export class ClubScene extends Phaser.Scene {
       this.game.events.emit('npc-deselected');
     }
     this.patrons.forEach((p) => {
+      const exitSat = getExperience(p)?.satisfaction ?? null;
       finalizeVisit(p);
+      this.rollReturnIntent(p, exitSat);
       this.releaseTile(p.grid);
       p.destroy();
     });
     this.patrons = [];
+    for (const pk of this.peekers) if (pk.active) pk.destroy();
+    this.peekers = [];
     this.queueTiles.clear();
     this.patronSlotClaims.clear();
     this.serveClaim.clear();
@@ -3835,6 +3918,10 @@ export class ClubScene extends Phaser.Scene {
       durationLabel,
       staffWorked,
     });
+    // Hidden demand: tonight's real outcomes nudge the club reputation (inertia, bounded).
+    this.updateDemandAtNightEnd(endedNight, nightStats);
+    // Bankruptcy: after the existing weekly/monthly charges ran (onNightEnd above).
+    const debt = evaluateBankruptcyAtNightEnd(endedNight, this.money);
     this.persistLayout();
     const payroll = takeLastPayroll();
     const utilities = takeLastUtilities();
@@ -3854,6 +3941,19 @@ export class ClubScene extends Phaser.Scene {
           }
         : null,
       nextUtilitiesNight: nextMonthEndNight(endedNight),
+      // Days left (existing night calendar: one night = one day; charge runs at that night's end).
+      payrollDue: {
+        daysLeft: nextWeekEndNight(endedNight) - endedNight,
+        amount: this.listPayrollStaff().reduce((a, st) => a + weeklySalaryFor(st.id), 0),
+      },
+      utilitiesDue: {
+        daysLeft: nextMonthEndNight(endedNight) - endedNight,
+        amount: monthlyUtilitiesTotal(),
+      },
+      debt: debt.inDebt && !debt.bankrupt
+        ? { amount: debt.debt, daysLeft: debt.daysLeft ?? 0, line: BANKRUPTCY_TEXT.pendingLine(debt.debt, debt.daysLeft ?? 0) }
+        : null,
+      bankrupt: debt.bankrupt,
       // Phase 10: small drink/stockout/served lines (no hidden sat numbers).
       nightSales: {
         drinksSold: nightStats.drinksSoldTotal,
@@ -3884,6 +3984,7 @@ export class ClubScene extends Phaser.Scene {
       },
     });
     this.emitStaffRoster();
+    if (debt.bankrupt) this.game.events.emit('game-over', this.gameOverPayload());
   }
 
   /** Phase 8: employed staff for weekly payroll (NightCycle weekly hook). */
@@ -4042,7 +4143,7 @@ export class ClubScene extends Phaser.Scene {
         ).length,
       });
       if (n <= 0) return;
-      for (let k = 0; k < n; k++) this.spawnPatron();
+      for (let k = 0; k < n; k++) this.admitArrival();
     }
   }
 
@@ -4108,6 +4209,9 @@ export class ClubScene extends Phaser.Scene {
     );
     beginArrivalsNight(snap.gameHour, snap.gameMinute, working.length, this.nightNumber);
     beginLateOpenNight(snap.gameHour, snap.gameMinute);
+    // Deliveries waiting for the club to open (next-day orders / elapsed while closed):
+    // the supplier comes a few game minutes after opening (never instantly).
+    scheduleOrdersAfterOpen();
     recordStaffShiftStart(working, snap.gameHour, snap.gameMinute);
     this.game.events.emit('night-started', this.getHudState());
     return true;
@@ -4416,7 +4520,6 @@ export class ClubScene extends Phaser.Scene {
         patron.servedDrinkId = null;
         patron.wasOutOfStock = true;
         noteLeaveWithoutBuy('empty');
-        patron.showBubble('Se acabó la cerveza');
         this.patronThink(patron, 'no_beer');
         patron.waiting = false;
         patron.served = false;
@@ -4440,9 +4543,7 @@ export class ClubScene extends Phaser.Scene {
         patron.servedDrinkId = null;
         patron.wasOutOfStock = pick.reason === 'empty' || pick.reason === 'oos_skip';
         noteLeaveWithoutBuy(pick.reason);
-        if (pick.reason === 'empty') patron.showBubble('Se acabó todo');
-        else if (pick.reason === 'price') patron.showBubble('Muy caro');
-        else patron.showBubble('Sin mi bebida');
+        // Why they leave is NOT announced over the head — it is logged as a thought (customer window).
         const wantedName = this.drinkDisplayName(patron.profile.preferredDrink).toLowerCase();
         if (pick.reason === 'empty') this.patronThink(patron, 'nothing_left');
         else if (pick.reason === 'price') this.patronThink(patron, 'too_expensive');
@@ -4507,7 +4608,7 @@ export class ClubScene extends Phaser.Scene {
       patron.wasOutOfStock = true;
       patron.servedDrinkId = null;
       noteLeaveWithoutBuy('empty');
-      patron.showBubble('Se acabó todo');
+      this.patronThink(patron, 'nothing_left');
       patron.waiting = false;
       patron.served = false;
       this.releasePatronSlot(patron);
@@ -4598,6 +4699,8 @@ export class ClubScene extends Phaser.Scene {
         this.patronThink(patron, 'affinity_served', { staff: staff.displayName });
       }
       if (patron.servedAtBeerTap && patron.beerServicePref === 'tap') this.patronThink(patron, 'tap_great');
+      this.flushPendingPriceThought(patron, payout.tipped);
+      this.noteServiceWear(patron);
       patron.showBubble(payout.tipped ? `¡Propina! +$${payout.earned}` : `+$${payout.earned}`);
       patron.served = true;
       patron.waitSince = 0;
@@ -5552,6 +5655,11 @@ export class ClubScene extends Phaser.Scene {
 
   private tickFurnitureDecay(dtSec: number): void {
     if (dtSec <= 0) return;
+    // Wear from real use: customers sitting on a piece wear it a little faster.
+    const occupants = new Map<string, number>();
+    for (const p of this.patrons) {
+      if (p.active && p.seatedFurnitureId) occupants.set(p.seatedFurnitureId, (occupants.get(p.seatedFurnitureId) ?? 0) + 1);
+    }
     for (const f of this.scenario.furniture) {
       this.ensureFurnitureStats(f);
       const before = f.cleanliness ?? 100;
@@ -5561,6 +5669,12 @@ export class ClubScene extends Phaser.Scene {
       const boost =
         before < DIRT_VISUAL_THRESHOLD ? AI_TUNABLES.dirtyDecayBoost : before < 75 ? 1.2 : 1;
       applyDecay(st, dtSec * boost, this.furniturePrice(f));
+      const occ = occupants.get(f.id) ?? 0;
+      if (occ > 0) {
+        const d0 = st.durability;
+        applyUsageWear(st, this.furniturePrice(f), { occupiedSec: dtSec * occ });
+        this.usageWearSeat += d0 - st.durability;
+      }
       this.writeStatsToDef(f, st);
       if (f.repairCount) this.applyRepairAftereffects(f, durBefore, dtSec);
       const crossed =
@@ -6012,7 +6126,7 @@ export class ClubScene extends Phaser.Scene {
         const here = listTrash().filter((t) => zoneContaining(t.col, t.row)?.id === z.id);
         if (here.length) {
           const why = pickupBlockedReason();
-          add(`pick_trash:${here[0].id}`, `Limpiar basura (${here.length})`, !why, why ?? undefined);
+          add(`pick_trash:${here[0].id}`, 'Limpiar basura', !why, why ?? undefined);
         }
       }
       if (!actions.length) add('noop', 'Barrer', false, 'El piso está limpio');
@@ -6549,6 +6663,8 @@ export class ClubScene extends Phaser.Scene {
       noteTip(pourer.profile.id, payout.tipAmount);
     }
     if (patron.servedAtBeerTap && patron.beerServicePref === 'tap') this.patronThink(patron, 'tap_great');
+    this.flushPendingPriceThought(patron, payout.tipped);
+    this.noteServiceWear(patron);
     patron.showBubble(payout.tipped ? `¡Propina! +$${payout.earned}` : `+$${payout.earned}`);
     patron.served = true;
     patron.waiting = false;
@@ -7051,15 +7167,311 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
+  // ─── Demand / capacity / returning visitors / bankruptcy (hidden internals) ─────────────
+  // Extends Arrivals (organic scheduler), Reputation (hook), NightStats and the existing economy.
+  // Nothing here is shown to the player as a number.
+
+  private initDemandLayer(): void {
+    setDemandModifier('reputation', reputationDemandMultiplier());
+    this.game.events.on('cmd-new-game', this.onCmdNewGame, this);
+    this.events.once('shutdown', () => this.game.events.off('cmd-new-game', this.onCmdNewGame, this));
+    if (isBankrupt()) {
+      // A bankrupt save stays over: show the game-over screen again.
+      this.time.delayedCall(400, () => this.game.events.emit('game-over', this.gameOverPayload()));
+    }
+  }
+
+  private onCmdNewGame = (): void => {
+    try {
+      localStorage.removeItem(LAYOUT_KEY);
+    } catch {
+      /* ignore */
+    }
+    window.location.reload();
+  };
+
+  /** Seat slots (all, free or not) on usable seating furniture. */
+  private countSeatSlots(): number {
+    let n = 0;
+    for (const f of this.scenario.furniture) {
+      const type = (f.type || '').toLowerCase();
+      const catalog = (f.catalogId || '').toLowerCase();
+      if (!SEATABLE_TYPES.has(type) && !SEATABLE_TYPES.has(catalog)) continue;
+      n += this.seatSlotsForFurniture(f).length;
+    }
+    return n;
+  }
+
+  /**
+   * Concurrent capacity from REAL infrastructure: seats + standing spots at the bar / tap (+ a small
+   * standing allowance), limited by service capacity (staff on shift).
+   */
+  private clubCapacity(): { capacity: number; seats: number; standing: number; service: number } {
+    const seats = this.countSeatSlots();
+    let standing = CAPACITY.standingAllowance;
+    if (this.barUsable()) standing += AI_TUNABLES.barQueueMaxSlots;
+    if (this.activeBeerTap()) standing += AI_TUNABLES.barQueueMaxSlots;
+    // Staff on tonight's shift (one stepping out with the trash for ~20 s does not shrink the club).
+    const staffOn = this.allStaff().length;
+    const service = Math.max(1, staffOn) * CAPACITY.patronsPerStaff;
+    const capacity = Math.max(CAPACITY.minCapacity, Math.min(seats + standing, service));
+    return { capacity, seats, standing, service };
+  }
+
+  /** Customers currently inside (leaving ones no longer take room). */
+  private occupancy(): number {
+    return this.patrons.filter((p) => p.active && p.goal !== 'leave').length;
+  }
+
+  /**
+   * One organic arrival: if the club is physically full they peek in and leave (hidden stat);
+   * otherwise maybe a returning customer, else a new one.
+   */
+  private admitArrival(): 'entered' | 'turned_away' {
+    if (this.occupancy() >= this.clubCapacity().capacity) {
+      noteTurnedAway();
+      this.peekAndLeave();
+      return 'turned_away';
+    }
+    this.spawnPatron(takeReturningVisitor());
+    return 'entered';
+  }
+
+  /** Would-be customer looks in from the entrance, sees no room and walks away (not a patron). */
+  private peekAndLeave(): void {
+    const door = { col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] };
+    const pool = this.chars.patrons;
+    const pd = pool[Phaser.Math.Between(0, pool.length - 1)];
+    let sprite: Patron | null = null;
+    try {
+      sprite = new Patron(this, pd.sprite, door, this.iso, this.pathfinder, {
+        ...pd,
+        id: `peek_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      });
+      sprite.reapplyDisplaySize();
+      sprite.sprite.disableInteractive();
+      sprite.label?.setVisible(false);
+    } catch {
+      sprite = null;
+    }
+    if (!sprite) return;
+    this.peekers.push(sprite);
+    const done = () => {
+      this.peekers = this.peekers.filter((x) => x !== sprite);
+      if (sprite && sprite.active) sprite.destroy();
+    };
+    const look = { col: door.col, row: Math.max(0, door.row - 1) };
+    const back = () => {
+      if (!sprite || !sprite.active) return;
+      this.time.delayedCall(900, () => {
+        if (!sprite || !sprite.active) return;
+        if (!sprite.walkTo(door, done)) done();
+      });
+    };
+    if (!this.pathfinder.isWalkable(look.col, look.row) || !sprite.walkTo(look, back)) back();
+  }
+
+  private peekers: Patron[] = [];
+
+  /** Visit ended: hidden return intent (never shown, never guaranteed). */
+  private rollReturnIntent(patron: Patron, exitSat: number | null): void {
+    if (exitSat == null || patron.angry) return;
+    let fav: string | null = null;
+    for (const st of this.allStaff()) {
+      if (peekAffinity(patron.profile.name, st.profile.id) === 'alta') {
+        fav = st.profile.id;
+        if (st.profile.id === patron.servedByStaffId) break;
+      }
+    }
+    noteReturnIntent(patron.profile.name, exitSat, this.nightNumber, fav);
+  }
+
+  /** 0..1 venue amenities: seats, comfort/cleanliness, decor, entertainment, drink variety. */
+  private clubAmenities(): number {
+    const seats = Math.min(1, this.countSeatSlots() / 10);
+    const venue = this.clubVenueQuality();
+    let decor = 0;
+    let fun = 0;
+    for (const f of this.scenario.furniture) {
+      const fn = this.furnitureFunction(f);
+      if (fn === 'decor' || fn === 'identity') decor++;
+      else if (fn === 'entertainment_future') fun++;
+    }
+    const decorS = 1 - Math.exp(-decor / 5);
+    const funS = 1 - Math.exp(-fun / 2);
+    const kinds = DRINKS_CATALOG.filter((d) => (d.patronPrefScale ?? 1) >= 0.5 && inventoryCanSell(d.id)).length;
+    const variety = Math.min(1, kinds / 6);
+    return Math.max(0, Math.min(1, 0.3 * seats + 0.25 * venue + 0.15 * decorS + 0.15 * funS + 0.15 * variety));
+  }
+
+  private nightQualityInputs(nightStats: { avgSatisfaction: number | null; visitCount: number; stockedOutIds: string[] }): NightQualityInputs {
+    const live = getNightLiveCounters();
+    let broken = 0;
+    for (const f of this.scenario.furniture) {
+      const st = this.statsOf(f);
+      const cond = conditionFromDurability(st.durability, st.maxDurability);
+      if (cond === 'Se rompió' || cond === 'Inservible') broken++;
+    }
+    const staff = this.allStaff();
+    const avgE = staff.length ? staff.reduce((a, s) => a + s.profile.energy, 0) / staff.length : null;
+    return {
+      visits: nightStats.visitCount,
+      avgSatisfaction: nightStats.avgSatisfaction,
+      unhappyExits: live.unhappy,
+      leftWithoutBuy: live.leftWithoutBuy,
+      stockouts: nightStats.stockedOutIds.length,
+      brokenUnrepaired: broken,
+      floorTrash: listTrash().length,
+      fullBagLying: !!getFullBag(),
+      avgStaffEnergy: avgE,
+      amenities: this.clubAmenities(),
+    };
+  }
+
+  private lastDemandUpdate: { night: number; inputs: NightQualityInputs; quality: number | null; delta: number } | null = null;
+
+  private updateDemandAtNightEnd(night: number, nightStats: { avgSatisfaction: number | null; visitCount: number; stockedOutIds: string[] }): void {
+    const inputs = this.nightQualityInputs(nightStats);
+    const delta = applyNightToClubReputation(night, inputs);
+    setDemandModifier('reputation', reputationDemandMultiplier());
+    this.lastDemandUpdate = { night, inputs, quality: computeNightQuality(inputs), delta };
+  }
+
+  private gameOverPayload() {
+    const st = getBankruptcyState();
+    const hist = getNightStatsHistory();
+    const served = hist.reduce((a, e) => a + (e.servedCount || 0), 0);
+    const best = hist.reduce((a, e) => Math.max(a, e.drinksRevenueTotal || 0), 0);
+    return {
+      nightsPlayed: Math.max(1, this.nightNumber - 1),
+      money: this.money,
+      debt: Math.max(0, -Math.floor(this.money)),
+      worstDebt: st.worstDebt,
+      servedTotal: served,
+      bestNightRevenue: Math.round(best),
+    };
+  }
+
+  // ── Test / debug hooks (demand stage) ──
+  getDemandDebug() {
+    return {
+      reputation: getClubReputationDebug(),
+      capacity: this.clubCapacity(),
+      occupancy: this.occupancy(),
+      amenities: this.clubAmenities(),
+      live: getNightLiveCounters(),
+      lastUpdate: this.lastDemandUpdate,
+      bankruptcy: getBankruptcyState(),
+      peekers: this.peekers.length,
+      usageWear: Math.round((this.usageWearSeat + this.usageWearServe) * 100) / 100,
+      usageWearServe: Math.round(this.usageWearServe * 100) / 100,
+      usageWearSeat: Math.round(this.usageWearSeat * 100) / 100,
+    };
+  }
+
+  debugSetClubReputation(v: number): void {
+    repDebugSet(v);
+    setDemandModifier('reputation', reputationDemandMultiplier());
+  }
+
+  /** Feed one synthetic night outcome into the hidden reputation (fast-forward nights in tests). */
+  debugApplyNightOutcome(i: Partial<NightQualityInputs> & { night?: number }): { before: number; after: number; quality: number | null } {
+    const before = getClubReputation();
+    const inputs: NightQualityInputs = {
+      visits: 5, avgSatisfaction: 70, unhappyExits: 0, leftWithoutBuy: 0, stockouts: 0, brokenUnrepaired: 0,
+      floorTrash: 0, fullBagLying: false, avgStaffEnergy: 60, amenities: 0.3, ...i,
+    };
+    applyNightToClubReputation(i.night ?? this.nightNumber, inputs);
+    setDemandModifier('reputation', reputationDemandMultiplier());
+    return { before, after: getClubReputation(), quality: computeNightQuality(inputs) };
+  }
+
+  /** Expected organic arrivals for a night at the current hidden demand (mean over seeds). */
+  debugSimulateArrivals(nights = 40, nightNumber = 10): number {
+    setDemandModifier('reputation', reputationDemandMultiplier());
+    let tot = 0;
+    for (let k = 0; k < nights; k++) tot += simulateArrivalsCount({ seed: 1000 + k * 7919, nightNumber });
+    return tot / nights;
+  }
+
+  /** Run N arrivals through the real admission path (capacity / returning) right now. */
+  debugArrivalBurst(n: number): { entered: number; turnedAway: number } {
+    let entered = 0;
+    let turnedAway = 0;
+    for (let k = 0; k < n; k++) {
+      if (this.admitArrival() === 'entered') entered++;
+      else turnedAway++;
+    }
+    return { entered, turnedAway };
+  }
+
+  debugPatronIntox(patronIndex: number) {
+    const p = this.patrons.filter((x) => x.active)[patronIndex];
+    if (!p) return null;
+    return {
+      name: p.profile.name,
+      alcoholTolerance: p.alcoholTolerance,
+      alcoholIntake: p.alcoholIntake,
+      intoxication: patronIntoxication(p, this.time.now),
+      level: patronIntoxicationLevel(p, this.time.now),
+      recurrent: p.recurrent,
+    };
+  }
+
   // ─── Customer thoughts (perceived events only; anti-spam in systems/Thoughts) ─────────
 
+  /**
+   * Price perceived and bought anyway: the SAME steep price reads differently per customer
+   * (sensitive / tolerant / generous). Satisfaction is already applied by applyPricePerception.
+   */
+  private notePriceThought(patron: Patron, band: string, traits: { priceSens: number; generosity: number } | null): void {
+    if (!traits) return;
+    if (band === 'cheap') {
+      if (traits.priceSens >= 0.5) this.patronThink(patron, 'price_cheap');
+      return;
+    }
+    if (band !== 'slightly_high' && band !== 'very_high' && band !== 'extreme') return;
+    if (traits.priceSens >= 0.55) this.patronThink(patron, 'price_steep_sensitive');
+    else if (traits.generosity >= 0.6) patron.pendingPriceThought = 'price_steep_generous';
+    else this.patronThink(patron, 'price_steep_tolerant');
+  }
+
+  /** Hidden (debug only): durability lost to real use since boot. */
+  private usageWearSeat = 0;
+  private usageWearServe = 0;
+
+  /** Each drink served wears the service point a little (bar or beer tap). */
+  private noteServiceWear(patron: Patron): void {
+    const def = patron.servedAtBeerTap ? this.activeBeerTap() : this.activeBar();
+    if (!def) return;
+    const st = this.statsOf(def);
+    const d0 = st.durability;
+    applyUsageWear(st, this.furniturePrice(def), { serves: 1 });
+    this.usageWearServe += d0 - st.durability;
+    this.writeStatsToDef(def, st);
+  }
+
+  /** "Está caro, pero me atendieron muy bien." only once the service actually was good. */
+  private flushPendingPriceThought(patron: Patron, tipped: boolean): void {
+    const key = patron.pendingPriceThought;
+    if (!key) return;
+    patron.pendingPriceThought = null;
+    const sat = getExperience(patron)?.satisfaction ?? 0;
+    this.patronThink(patron, tipped || sat >= 65 ? key : 'price_steep_tolerant');
+  }
+
+  /**
+   * Record a perceived thought (customer window log — every customer, selected or not).
+   * Only significant kinds may pop a rare emote over the head; text never appears there.
+   */
   private patronThink(patron: Patron, key: string, vars?: Record<string, string>): void {
     if (!patron.active) return;
-    const onScreen = this.patrons.filter((p) => p.active && p.thoughtVisible).length;
+    const emotesOnScreen = this.patrons.filter((p) => p.active && p.emoteVisible).length;
     const selected = this.selectedNpcId === patron.profile.id;
-    const d = decideThought(patron, key, this.time.now, { onScreen, selected, vars });
+    const traits = traitsOf(patron);
+    const d = decideThought(patron, key, this.time.now, { emotesOnScreen, vars, traits });
     if (!d) return;
-    if (d.show) patron.showThought(d.text, d.emoji, THOUGHT_RULES.showMs, d.tone);
+    if (d.emote) patron.showEmote(d.emote, EMOTE_RULES.showMs);
     if (selected) this.game.events.emit('stats-updated', this.getHudState());
   }
 
@@ -7300,6 +7712,7 @@ export class ClubScene extends Phaser.Scene {
       state: getShiftState(),
       day: snap.currentDay,
       clock: formatGameClock(snap.gameHour, snap.gameMinute),
+      hour: snap.gameHour,
     });
     const eta = estimateDeliveryText(getShiftState(), snap.gameHour, snap.gameMinute);
     this.persistLayout();
@@ -7311,7 +7724,8 @@ export class ClubScene extends Phaser.Scene {
 
   /** Called with whole game minutes whenever the shift clock advanced (prep / open / closing). */
   private tickDeliveriesMinutes(minutes: number): void {
-    const due = tickDeliveryMinutes(minutes);
+    // Closed club (prep): due orders are held — the supplier never appears until Abrir noche.
+    const due = tickDeliveryMinutes(minutes, getShiftState());
     for (const o of due) this.startSupplierVisit(o);
   }
 
@@ -7693,6 +8107,8 @@ export class ClubScene extends Phaser.Scene {
 
   /** A customer finished consuming something: maybe 1 piece of trash (floor or container). */
   private noteConsumptionTrash(patron: Patron, productId: string): void {
+    // Future intoxication hook #1: accumulate alcohol per consumption (no behaviour attached yet).
+    notePatronConsumption(patron, productId, this.time.now);
     const delay = this.debugForceTrash ? 250 : this.randBetween(TRASH.delayMs);
     this.time.delayedCall(delay, () => {
       if (!patron.active || this.phase !== 'open') return;
@@ -7836,8 +8252,7 @@ export class ClubScene extends Phaser.Scene {
         }
         staff.profile.energy = Math.max(0, staff.profile.energy - TRASH.pickEnergy);
         this.refreshTrashVisuals();
-        const bag = getTrashBag();
-        if (bag) this.showStatusFloat(`Basura ${bag.count}/${bag.capacity}`, { x: staff.x, y: staff.y });
+        // The bag counter / capacity are internal: the player only ever sees the physical full bag.
         if (res === 'full') {
           // The bag is full: she ties it and sets it down where it belongs.
           markBagInTransit(sid);
@@ -8115,12 +8530,12 @@ export class ClubScene extends Phaser.Scene {
     if (target.kind === 'trash') {
       const t = getTrash(target.id);
       if (!t) return null;
-      const bag = getTrashBag();
       const why = pickupBlockedReason();
       add(`pick_trash:${t.id}`, 'Limpiar basura', !why, why ?? undefined);
       return {
         title: `${name} → ${TRASH_NAMES[t.kind] ?? 'Basura'}`,
-        subtitle: bag ? `Bolsa de basura: ${bag.count}/${bag.capacity}${getFullBag() ? ' · hay una bolsa llena' : ''}` : 'Basura en el piso',
+        // Bag counter / capacity stay internal — only the physical full bag is ever mentioned.
+        subtitle: getFullBag() ? 'Basura en el piso · hay una bolsa llena' : 'Basura en el piso',
         actions,
       };
     }
@@ -8215,6 +8630,24 @@ export class ClubScene extends Phaser.Scene {
     if (p) this.noteConsumptionTrash(p, productId);
   }
 
+  /** Test hook: fill the club bag through the real pickup path and set the full bag down. */
+  debugFillTrashBag(): boolean {
+    ensureTrashBag(this.hasTrashContainer());
+    const b = this.bartender;
+    for (let i = 0; i < 40; i++) {
+      const id = this.spawnTrashAt(b.grid.col, Math.min(9, b.grid.row + 1), 'servilleta', 'debug').id;
+      const r = pickTrashIntoBag(id);
+      if (r === 'blocked') return false;
+      if (r === 'full') {
+        const spot = this.fullBagSpot(b);
+        placeFullBag(spot.col, spot.row);
+        this.refreshTrashVisuals();
+        return true;
+      }
+    }
+    return false;
+  }
+
   debugIsValidCarry(kinds: PackageKind[]): boolean {
     return isValidCarryLoad(kinds.map((k) => ({ kind: k })));
   }
@@ -8238,7 +8671,8 @@ export class ClubScene extends Phaser.Scene {
         n++;
       }
     }
-    this.tickDeliveriesMinutes(1);
+    // Test hook only: bypasses the closed-club rule so logistics tests can stage goods in prep.
+    for (const o of collectDueOrders(getShiftState(), true)) this.startSupplierVisit(o);
     return n;
   }
 
