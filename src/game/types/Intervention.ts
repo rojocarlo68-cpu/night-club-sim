@@ -1,6 +1,14 @@
 /** Payloads shared by ClubScene ↔ UIScene for the direct-intervention layer. */
 
-export type CtxTarget = { kind: 'furniture'; id: string } | { kind: 'floor'; id: string };
+export type CtxTarget =
+  | { kind: 'furniture'; id: string }
+  | { kind: 'floor'; id: string }
+  /** A package (crate / bottle / sack) waiting at the entrance. */
+  | { kind: 'goods'; id: string }
+  /** One piece of trash on the floor. */
+  | { kind: 'trash'; id: string }
+  /** The full trash bag lying in the club. */
+  | { kind: 'trash_bag'; id: string };
 
 export interface CtxAction {
   id: string;

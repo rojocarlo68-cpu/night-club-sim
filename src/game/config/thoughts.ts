@@ -31,6 +31,10 @@ export const THOUGHTS: Record<string, ThoughtDef> = {
   stale_snack: { texts: ['Estas botanas ya están aguadas…'], emoji: '😕', tone: 'neg', priority: 2 },
   spoiled_seen: { texts: ['Esa cerveza lleva horas ahí… qué asco.'], emoji: '🤢', tone: 'neg', priority: 2 },
   angry_leave: { texts: ['¡Ya me cansé de esperar!'], emoji: '😠', tone: 'neg', priority: 3 },
+  // Trash (only what this customer can see right next to them).
+  trash_seen: { texts: ['¿Por qué hay basura aquí?', 'Alguien debería recoger eso…'], emoji: '😒', tone: 'neg', priority: 2 },
+  trash_dirty: { texts: ['Ugh… este lugar está sucio.', 'Qué asco…'], emoji: '🤢', tone: 'neg', priority: 3 },
+  trash_bag: { texts: ['Esto se ve descuidado.', '¿Una bolsa de basura aquí?'], emoji: '😒', tone: 'neg', priority: 2 },
   // Hook for entertainment (only fires once entertainment exists).
   boring: { texts: ['Está bastante aburrido aquí.'], emoji: '🥱', tone: 'neg', priority: 1 },
 

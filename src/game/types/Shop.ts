@@ -15,6 +15,7 @@ export type ShopFunctionTag =
   | 'seating'
   | 'service_bar'
   | 'service_beer'
+  | 'trash_bin'
   | 'service_snack_future'
   | 'service_aux_future'
   | 'decor'

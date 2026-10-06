@@ -5,6 +5,18 @@ import { ShopCatalogPayload } from '../types/Shop';
 import { FurnitureInspectPayload } from '../systems/FurnitureStats';
 import { listInventory } from '../systems/Inventory';
 import { SNACK_LOCKED_HINT } from '../config/snacks';
+import {
+  describePackages,
+  estimateDeliveryText,
+  lineCost,
+  normalizeOrderUnits,
+  orderUnitStep,
+  packUnits,
+  unitsAtEntrance,
+  unitsInTransit,
+} from '../systems/Deliveries';
+import { getShiftSnapshot, getShiftState } from '../systems/Shift';
+import { PACKAGING } from '../config/logistics';
 import { ContextMenuPayload, RepairVerdictPayload, TechListPayload } from '../types/Intervention';
 
 interface HudBartender {
@@ -85,6 +97,9 @@ const STATE_ES: Record<string, string> = {
   mopping: 'Trapeando',
   inspecting: 'Revisando',
   consuming: 'Tomando algo',
+  hauling: 'Llevando mercancía',
+  picking_trash: 'Recogiendo basura',
+  taking_trash_out: 'Sacando la basura',
 };
 
 
@@ -159,6 +174,13 @@ export class UIScene extends Phaser.Scene {
   private inventoryPanelVisible = false;
   private inventoryRows: Phaser.GameObjects.GameObject[] = [];
   private inventoryFlash: Phaser.GameObjects.Text | null = null;
+  /** Supplier order being built in the inventory window (units per product). Nothing is paid yet. */
+  private orderDraft = new Map<string, number>();
+  private orderConfirm!: Phaser.GameObjects.Container;
+  private orderConfirmVisible = false;
+  private orderConfirmRows: Phaser.GameObjects.GameObject[] = [];
+  private orderConfirmMsg = '';
+  private lastMoney = 0;
   private inventoryBg: Phaser.GameObjects.Rectangle | null = null;
   private staffRoster: StaffRosterPayload | null = null;
   private staffRows: Phaser.GameObjects.GameObject[] = [];
@@ -510,6 +532,7 @@ export class UIScene extends Phaser.Scene {
     this.game.events.on('shop-buy-failed', this.onShopBuyFailed, this);
     this.game.events.on('inventory-updated', this.onInventoryUpdated, this);
     this.game.events.on('restock-failed', this.onRestockFailed, this);
+    this.game.events.on('order-result', this.onOrderResult, this);
     this.game.events.on('select-furniture', this.onSelectFurniture, this);
     this.game.events.on('furniture-deselected', this.onFurnitureDeselected, this);
     this.game.events.on('ui-delete-confirm', this.onDeleteConfirm, this);
@@ -963,6 +986,8 @@ export class UIScene extends Phaser.Scene {
     });
     reg({ key: 'shop', root: this.shopPanel, kind: 'modal', isOpen: () => this.shopPanelVisible, close: () => this.hideShopPanel() });
     reg({ key: 'inventory', root: this.inventoryPanel, kind: 'modal', isOpen: () => this.inventoryPanelVisible, close: () => this.hideInventoryPanel() });
+    // Order confirm sits above the inventory: dismissing it = "Cancelar" (never pays).
+    reg({ key: 'orderConfirm', root: this.orderConfirm, kind: 'modal', isOpen: () => this.orderConfirmVisible, close: () => this.hideOrderConfirm() });
     reg({ key: 'staff', root: this.staffPanel, kind: 'modal', isOpen: () => this.staffPanelVisible, close: () => this.hideStaffPanel() });
     reg({
       key: 'furniture',
@@ -1367,7 +1392,9 @@ export class UIScene extends Phaser.Scene {
   private onStats = (s: HudState): void => {
     this.phase = s.phase;
     if (typeof s.snacksUnlocked === 'boolean') this.snacksUnlocked = s.snacksUnlocked;
+    if (typeof s.money === 'number') this.lastMoney = s.money;
     if (this.inventoryPanelVisible) this.rebuildInventoryPanel();
+    if (this.orderConfirmVisible) this.rebuildOrderConfirm();
     this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
     // Prompt B Phase B2: one visible time source = game clock (hide 75s countdown).
     this.applyClockHud(s);
@@ -1751,6 +1778,7 @@ export class UIScene extends Phaser.Scene {
         padding: { x: 8, y: 4 },
       })
       .setOrigin(0.5);
+    flash.setY(this.inventoryFlashY);
     this.inventoryPanel.add(flash);
     this.inventoryFlash = flash;
     this.time.delayedCall(1400, () => {
@@ -1786,7 +1814,14 @@ export class UIScene extends Phaser.Scene {
       this.hideInventoryPanel()
     );
     this.inventoryPanel.add([bg, title, close]);
+    this.orderConfirm = this.add
+      .container(cam.width / 2, cam.height / 2)
+      .setScrollFactor(0)
+      .setVisible(false)
+      .setDepth(9650);
   }
+
+  private inventoryFlashY = 188;
 
   private toggleInventoryPanel(): void {
     if (this.inventoryPanelVisible) this.hideInventoryPanel();
@@ -1802,10 +1837,182 @@ export class UIScene extends Phaser.Scene {
     this.rebuildInventoryPanel();
   }
 
+  /** Closing the window (✕ / outside / right-click / CANCELAR) discards the unconfirmed order. */
   private hideInventoryPanel(): void {
     if (!this.inventoryPanelVisible) return;
     this.inventoryPanelVisible = false;
     this.inventoryPanel.setVisible(false);
+    this.orderDraft.clear();
+    this.hideOrderConfirm();
+  }
+
+  // ─── Supplier order (draft → confirm → paid → delivered physically later) ─────────
+
+  private draftLines(): Array<{ productId: string; units: number }> {
+    const out: Array<{ productId: string; units: number }> = [];
+    for (const [productId, units] of this.orderDraft) {
+      const n = normalizeOrderUnits(productId, units);
+      if (n > 0) out.push({ productId, units: n });
+    }
+    return out;
+  }
+
+  private draftTotal(): number {
+    return this.draftLines().reduce((a, l) => a + lineCost(l.productId, l.units), 0);
+  }
+
+  private bumpDraft(id: string, delta: number): void {
+    const cur = this.orderDraft.get(id) ?? 0;
+    const next = Math.max(0, Math.min(600, cur + delta));
+    if (next <= 0) this.orderDraft.delete(id);
+    else this.orderDraft.set(id, next);
+    if (this.inventoryPanelVisible) this.rebuildInventoryPanel();
+  }
+
+  private pressInventoryAccept(): void {
+    if (!this.draftLines().length) {
+      this.flashInventoryMsg('Agrega productos al pedido.');
+      return;
+    }
+    this.orderConfirmMsg = '';
+    this.orderConfirmVisible = true;
+    this.orderConfirm.setVisible(true);
+    this.rebuildOrderConfirm();
+  }
+
+  private pressInventoryCancel(): void {
+    this.orderDraft.clear();
+    this.hideInventoryPanel();
+  }
+
+  private hideOrderConfirm(): void {
+    if (!this.orderConfirmVisible) return;
+    this.orderConfirmVisible = false;
+    this.orderConfirm.setVisible(false);
+    this.orderConfirmMsg = '';
+  }
+
+  private pressOrderConfirm(): void {
+    const lines = this.draftLines();
+    if (!lines.length) return;
+    if (this.lastMoney < this.draftTotal()) {
+      this.orderConfirmMsg = 'No tienes suficiente dinero para realizar este pedido.';
+      this.rebuildOrderConfirm();
+      return;
+    }
+    this.game.events.emit('cmd-place-order', { lines });
+  }
+
+  private onOrderResult = (res: { ok: boolean; message?: string }): void => {
+    if (!this.orderConfirmVisible) return;
+    if (res?.ok) {
+      this.orderDraft.clear();
+      this.hideOrderConfirm();
+      this.hideInventoryPanel();
+      this.syncModalBackdrop();
+      return;
+    }
+    this.orderConfirmMsg = res?.message || 'No se pudo hacer el pedido.';
+    this.rebuildOrderConfirm();
+  };
+
+  private rebuildOrderConfirm(): void {
+    for (const g of this.orderConfirmRows) g.destroy();
+    this.orderConfirmRows = [];
+    const cam = this.cameras.main;
+    this.orderConfirm.setPosition(cam.width / 2, cam.height / 2);
+    const lines = this.draftLines();
+    const total = this.draftTotal();
+    const snap = getShiftSnapshot();
+    const eta = estimateDeliveryText(getShiftState(), snap.gameHour, snap.gameMinute);
+    const short = this.lastMoney < total;
+    const w = Math.min(380, Math.max(290, cam.width - 30));
+    const lineH = 20;
+    const h = 196 + lines.length * lineH + (short || this.orderConfirmMsg ? 22 : 0);
+    const add = (o: Phaser.GameObjects.GameObject) => {
+      this.orderConfirm.add(o);
+      this.orderConfirmRows.push(o);
+    };
+    const bg = this.add.rectangle(0, 0, w, h, 0x160a24, 1).setStrokeStyle(2, 0xffcc66);
+    bg.setInteractive();
+    add(bg);
+    const txt = (x: number, y: number, t: string, color = '#e8d0ff', size = '13px', bold = false, ox = 0.5) =>
+      add(
+        this.add
+          .text(x, y, t, { fontSize: size, color, fontStyle: bold ? 'bold' : 'normal', align: 'center', wordWrap: { width: w - 28 } })
+          .setOrigin(ox, 0)
+      );
+    let y = -h / 2 + 12;
+    txt(0, y, '¿Confirmar pedido?', '#ffcc66', '17px', true);
+    y += 26;
+    txt(0, y, 'El pedido será entregado durante la próxima ventana disponible.', '#c8b0e0', '12px');
+    y += 34;
+    for (const l of lines) {
+      const packs = describePackages(packUnits(l.productId, l.units));
+      const name = this.productLabel(l.productId);
+      txt(-w / 2 + 16, y, `${name} × ${l.units}  (${packs})`, '#e8d0ff', '12px', false, 0);
+      add(
+        this.add
+          .text(w / 2 - 16, y, this.fmtMoney(lineCost(l.productId, l.units)), { fontSize: '12px', color: '#7ad7ff', fontStyle: 'bold' })
+          .setOrigin(1, 0)
+      );
+      y += lineH;
+    }
+    y += 4;
+    txt(0, y, `Total: ${this.fmtMoney(total)}   ·   Dinero del club: ${this.fmtMoney(this.lastMoney)}`, '#ffffff', '13px', true);
+    y += 22;
+    txt(0, y, eta, '#3cff9a', '12px');
+    y += 22;
+    const msg = this.orderConfirmMsg || (short ? 'No tienes suficiente dinero para realizar este pedido.' : '');
+    if (msg) {
+      txt(0, y, msg, '#ff6688', '12px', true);
+      y += 22;
+    }
+    const bw = 116;
+    const by = h / 2 - 44;
+    const ok = this.makeInvBtn(-bw - 8, by, bw, 32, 'CONFIRMAR', () => this.pressOrderConfirm(), !short && lines.length > 0);
+    ok.setName('orderConfirmOk');
+    const no = this.makeInvBtn(8, by, bw, 32, 'CANCELAR', () => {
+      this.hideOrderConfirm();
+      this.syncModalBackdrop();
+    });
+    add(ok);
+    add(no);
+  }
+
+  private productLabel(id: string): string {
+    const line = listInventory({ snacksUnlocked: true, snackLockHint: '' }).find((l) => l.id === id);
+    return line?.name ?? id;
+  }
+
+  // Test hooks (UI-level order flow).
+  debugOrderDraft(id: string, units: number): void {
+    if (!this.inventoryPanelVisible) this.showInventoryPanel();
+    if (units <= 0) this.orderDraft.delete(id);
+    else this.orderDraft.set(id, units);
+    this.rebuildInventoryPanel();
+  }
+  debugPressInvAccept(): void {
+    this.pressInventoryAccept();
+  }
+  debugPressInvCancel(): void {
+    this.pressInventoryCancel();
+  }
+  debugPressOrderConfirm(): void {
+    this.pressOrderConfirm();
+  }
+  debugDismissTop(): boolean {
+    return this.dismissTopmost();
+  }
+  getOrderUiDebug() {
+    return {
+      inventoryOpen: this.inventoryPanelVisible,
+      confirmOpen: this.orderConfirmVisible,
+      draft: this.draftLines(),
+      total: this.draftTotal(),
+      message: this.orderConfirmMsg,
+      money: this.lastMoney,
+    };
   }
 
   private clearInventoryRows(): void {
@@ -1875,7 +2082,8 @@ export class UIScene extends Phaser.Scene {
     const half = panelW / 2 - 14;
     const font = twoRow ? '11px' : '12px';
     const rowH = twoRow ? 54 : 38;
-    const panelH = Math.min(camH - 70, 64 + 24 + lines.length * rowH + 40);
+    const footerH = 84;
+    const panelH = Math.min(camH - 70, 64 + 24 + lines.length * rowH + 40 + footerH + (this.snacksUnlocked ? 0 : 14));
     if (this.inventoryBg) this.inventoryBg.setSize(panelW, panelH);
     const title = this.inventoryPanel.getByName('invTitle') as Phaser.GameObjects.Text | null;
     if (title) title.setY(-panelH / 2 + 22);
@@ -1885,8 +2093,8 @@ export class UIScene extends Phaser.Scene {
     if (closeBtn) closeBtn.setPosition(panelW / 2 - 40, -panelH / 2 + 8);
 
     const cols = twoRow
-      ? { name: -half, stock: -half + 96, sold: -half + 142, cost: -half + 188, margin: -half + 244, price: -half + 52, rest: half - 76 }
-      : { name: -half, stock: -half + 98, sold: -half + 146, cost: -half + 194, price: -half + 250, margin: -half + 352, rest: half - 76 };
+      ? { name: -half, stock: -half + 96, sold: -half + 142, cost: -half + 188, margin: -half + 244, price: -half + 52, rest: half - 112 }
+      : { name: -half, stock: -half + 98, sold: -half + 146, cost: -half + 194, price: -half + 250, margin: -half + 348, rest: half - 132 };
 
     const headerY = -panelH / 2 + 50;
     const mkH = (x: number, label: string) => {
@@ -1900,7 +2108,7 @@ export class UIScene extends Phaser.Scene {
     mkH(cols.cost, 'Costo');
     if (!twoRow) mkH(cols.price, 'Precio');
     mkH(cols.margin, 'Margen');
-    if (!twoRow) mkH(cols.rest, 'Comprar');
+    if (!twoRow) mkH(cols.rest, 'Pedir');
 
     let y = headerY + 22;
     for (const line of lines) {
@@ -1941,29 +2149,49 @@ export class UIScene extends Phaser.Scene {
       const plus = this.makeInvBtn(cols.price + btn + priceW, rowY2, btn, btn - 2, '+', () => {
         this.game.events.emit('cmd-set-drink-price', { id: line.id, delta: step });
       }, !atMax);
-      // Restock +5 / +20 (botanas locked without a table)
+      // Pedir: [−] qty [+] (+caja). Builds the draft only; nothing is paid until CONFIRMAR.
       const snackLocked = !!(line as { locked?: boolean }).locked;
-      const b5 = this.makeInvBtn(cols.rest, rowY2, 34, btn - 2, '+5', () => {
+      const isSnack = (line as { kind?: string }).kind === 'snack';
+      const ostep = orderUnitStep(line.id);
+      const qty = this.orderDraft.get(line.id) ?? 0;
+      if (twoRow) mk(cols.rest - 34, rowY2 + 6, 'Pedir', '#a080c0');
+      const ob = 24;
+      const qW = isSnack ? 34 : 30;
+      const oMinus = this.makeInvBtn(cols.rest, rowY2, ob, btn - 2, '−', () => this.bumpDraft(line.id, -ostep), !snackLocked && qty > 0);
+      const qtyLabel = this.add
+        .text(cols.rest + ob + qW / 2, rowY2 + (btn - 2) / 2, String(qty), {
+          fontSize: font,
+          color: qty > 0 ? '#ffcc66' : '#806890',
+          fontStyle: 'bold',
+        })
+        .setOrigin(0.5);
+      const oPlus = this.makeInvBtn(cols.rest + ob + qW, rowY2, ob, btn - 2, '+', () => {
         if (snackLocked) {
           this.flashInventoryMsg((line as { lockHint?: string }).lockHint || SNACK_LOCKED_HINT);
           return;
         }
-        this.game.events.emit('cmd-restock-drink', { id: line.id, units: 5 });
+        this.bumpDraft(line.id, ostep);
       }, !snackLocked);
-      const b20 = this.makeInvBtn(cols.rest + 38, rowY2, 38, btn - 2, '+20', () => {
-        if (snackLocked) {
-          this.flashInventoryMsg((line as { lockHint?: string }).lockHint || SNACK_LOCKED_HINT);
-          return;
-        }
-        this.game.events.emit('cmd-restock-drink', { id: line.id, units: 20 });
-      }, !snackLocked);
-      for (const o of [minus, priceLabel, plus, b5, b20]) {
+      const rowObjs: Phaser.GameObjects.GameObject[] = [minus, priceLabel, plus, oMinus, qtyLabel, oPlus];
+      if (!isSnack) {
+        const boxW = twoRow ? 30 : 46;
+        const box = this.makeInvBtn(cols.rest + ob * 2 + qW + 4, rowY2, boxW, btn - 2, twoRow ? `+${PACKAGING.drinkCrateUnits}` : `+caja`, () =>
+          this.bumpDraft(line.id, PACKAGING.drinkCrateUnits)
+        );
+        rowObjs.push(box);
+      } else {
+        const sackT = this.add
+          .text(cols.rest + ob * 2 + qW + 6, rowY2 + (btn - 2) / 2, `costal`, { fontSize: '10px', color: '#a080c0' })
+          .setOrigin(0, 0.5);
+        rowObjs.push(sackT);
+      }
+      for (const o of rowObjs) {
         this.inventoryPanel.add(o);
         this.inventoryRows.push(o);
       }
       if (snackLocked) {
         const lock = this.add
-          .text(cols.rest, rowY2 + (twoRow ? -18 : 28), SNACK_LOCKED_HINT, {
+          .text(twoRow ? cols.rest - 34 : cols.rest, rowY2 + 28, SNACK_LOCKED_HINT, {
             fontSize: '10px',
             color: '#ff8866',
           })
@@ -1971,11 +2199,52 @@ export class UIScene extends Phaser.Scene {
         this.inventoryPanel.add(lock);
         this.inventoryRows.push(lock);
       }
-      y += rowH + (snackLocked && !twoRow ? 14 : 0);
+      y += rowH + (snackLocked ? 14 : 0);
+    }
+
+    // Footer: what is already coming / waiting at the door, draft total, ACEPTAR / CANCELAR.
+    {
+      const nameOf = (id: string) => lines.find((l) => l.id === id)?.name ?? id;
+      const fmt = (rec: Record<string, number>) =>
+        Object.entries(rec)
+          .filter(([, n]) => n > 0)
+          .map(([id, n]) => `${nameOf(id)} ${n}`)
+          .join(', ');
+      const coming = fmt(unitsInTransit());
+      const atDoor = fmt(unitsAtEntrance());
+      const info = [coming ? `En camino: ${coming}` : '', atDoor ? `En la entrada: ${atDoor}` : '']
+        .filter(Boolean)
+        .join('  ·  ');
+      const fy = panelH / 2 - 20 - footerH;
+      const infoT = this.add
+        .text(0, fy, info || 'Sin pedidos pendientes.', {
+          fontSize: '10px',
+          color: info ? '#ffcc66' : '#806890',
+          align: 'center',
+          wordWrap: { width: panelW - 24 },
+        })
+        .setOrigin(0.5, 0);
+      const total = this.draftTotal();
+      const nUnits = this.draftLines().reduce((a, l) => a + l.units, 0);
+      const totT = this.add
+        .text(-half, fy + 32, nUnits > 0 ? `Pedido: ${nUnits} u. · ${this.fmtMoney(total)}` : 'Pedido vacío', {
+          fontSize: font,
+          color: nUnits > 0 ? (total > this.lastMoney ? '#ff6688' : '#ffffff') : '#806890',
+          fontStyle: 'bold',
+        })
+        .setOrigin(0, 0.5);
+      const bw = twoRow ? 84 : 100;
+      const acc = this.makeInvBtn(half - bw * 2 - 8, fy + 18, bw, 30, 'ACEPTAR', () => this.pressInventoryAccept(), nUnits > 0);
+      const can = this.makeInvBtn(half - bw, fy + 18, bw, 30, 'CANCELAR', () => this.pressInventoryCancel());
+      for (const o of [infoT, totT, acc, can]) {
+        this.inventoryPanel.add(o);
+        this.inventoryRows.push(o);
+      }
+      this.inventoryFlashY = fy - 14;
     }
 
     const hint = this.add
-      .text(0, panelH / 2 - 20, '−/+ cambia el precio · +5/+20 compra al proveedor · Vendidas = esta noche', {
+      .text(0, panelH / 2 - 20, '−/+ precio · Pedir: arma el pedido (cajas de 6, botanas por costal de 100) · llega a la entrada y el personal lo lleva a la barra', {
         fontSize: '10px',
         color: '#8060a0',
         align: 'center',

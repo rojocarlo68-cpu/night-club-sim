@@ -36,7 +36,21 @@ export const NOVA_IDLE_FRAME_W = 146;
 export const NOVA_IDLE_FRAME_H = 784;
 export const NOVA_FEET_ORIGIN_Y = 610 / 784;
 
-export type StaffAiJob = 'none' | 'serve' | 'clean' | 'sweep' | 'mop' | 'rest' | 'wander' | 'player';
+export type StaffAiJob =
+  | 'none'
+  | 'serve'
+  | 'clean'
+  | 'sweep'
+  | 'mop'
+  | 'rest'
+  | 'wander'
+  | 'player'
+  /** Carrying delivered packages from the entrance to behind the bar. */
+  | 'haul'
+  /** Picking up floor trash into the club bag. */
+  | 'trash'
+  /** Taking the full bag out of the club (away ~20 s). */
+  | 'trash_out';
 
 export class Bartender extends Character {
   profile: BartenderData;
@@ -223,6 +237,12 @@ export class Bartender extends Character {
         return this.state === 'resting' ? 'resting' : 'walking';
       case 'wander':
         return 'wandering';
+      case 'haul':
+        return 'hauling';
+      case 'trash':
+        return 'picking_trash';
+      case 'trash_out':
+        return 'taking_trash_out';
       case 'player':
         return this.state === 'walking' ? 'walking' : this.state;
       default:

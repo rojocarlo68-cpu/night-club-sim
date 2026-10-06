@@ -366,6 +366,73 @@ import {
   TechListPayload,
   RepairVerdictPayload,
 } from '../types/Intervention';
+import {
+  LOGISTICS_ASSETS,
+  PRODUCT_TINT,
+  DROP_ZONE,
+  CARRY_ENERGY,
+  CARRY_SPEED_MULT,
+  HAUL_TIMING,
+  LOGISTICS_MIN_ENERGY,
+  LOGISTICS_LOW_MOOD,
+  TRASH,
+  TRASH_PERCEPTION,
+  TRASH_CONTAINER_ID,
+  TRASH_NAMES,
+  type TrashKind,
+} from '../config/logistics';
+import {
+  type OrderLine,
+  type PendingOrder,
+  type GoodsItem,
+  type PackageKind,
+  normalizeOrderUnits,
+  orderCost,
+  createOrder,
+  estimateDeliveryText,
+  tickDeliveryMinutes,
+  deferUndeliveredToNextDay,
+  scheduleNextDayOrders,
+  removeOrder,
+  listOrders,
+  addGoods,
+  listGoods,
+  getGoods,
+  goodsOnFloor,
+  isValidCarryLoad,
+  consumeStoredGoods,
+  packUnits,
+  describePackages,
+  getAbsMinute,
+  serializeDeliveries,
+  loadDeliveries,
+  getDeliveriesDebug,
+  unitsInTransit,
+} from '../systems/Deliveries';
+import {
+  type TrashItem,
+  ensureBag as ensureTrashBag,
+  getBag as getTrashBag,
+  getFullBag,
+  canPickUpTrash,
+  pickupBlockedReason,
+  rollTrashFor,
+  addTrashItem,
+  listTrash,
+  getTrash,
+  pickTrashIntoBag,
+  markBagInTransit,
+  placeFullBag,
+  claimFullBag,
+  carryFullBag,
+  dropFullBagAt,
+  bagLeftClub,
+  bagCycleRestart,
+  resetTrashNight,
+  serializeTrash,
+  loadTrash,
+  getTrashDebug,
+} from '../systems/Trash';
 
 /** Products a staff member can order at the bar (in-stock ones only are shown). */
 /** A customer waiting this long (ms) lets AI pull a staff off routine cleaning to serve. */
@@ -493,6 +560,10 @@ interface SavedLayoutItem {
 }
 
 interface SavedLayout {
+  /** Pending restock orders + packages at the entrance (paid; never lost on reload). */
+  deliveries?: unknown;
+  /** Floor trash + club bag state. */
+  trash?: unknown;
   /** Staff personal money (tips − own purchases). Old saves omit → starting pocket money. */
   staffWallets?: Record<string, number>;
   furniture: SavedLayoutItem[];
@@ -743,6 +814,9 @@ export class ClubScene extends Phaser.Scene {
     const originY = 70;
     this.iso = { tileWidth, tileHeight, originX, originY };
 
+    // Logistics state starts empty; the save (if any) restores it below.
+    loadDeliveries(null);
+    loadTrash(null);
     // Saved layout first: it drops pieces that no longer exist (bar, DJ, pinball, neon placeholders)
     // and keeps the sofa (and its wear / tile) when present.
     this.applySavedLayout();
@@ -838,6 +912,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
     this.game.events.on('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
     this.registerInterventionEvents();
+    this.initLogistics();
     this.emitStaffRoster();
     this.emitShopCatalog();
     this.scale.on('resize', this.onClubResize, this);
@@ -1006,6 +1081,8 @@ export class ClubScene extends Phaser.Scene {
       loadAffinities(saved?.affinities);
       loadCustomerTraits(saved?.customerTraits);
       loadInventory(saved?.inventory);
+      loadDeliveries(saved?.deliveries);
+      loadTrash(saved?.trash);
       loadDrinkPrefs(saved?.drinkPrefs);
       loadActionTastes(saved?.actionTastes);
       loadCompetition(saved?.competition);
@@ -1140,6 +1217,8 @@ export class ClubScene extends Phaser.Scene {
       shift: serializeShift(),
       payrollHistory: serializePayrollHistory(),
       utilitiesHistory: serializeUtilitiesHistory(),
+      deliveries: serializeDeliveries(),
+      trash: serializeTrash(),
     };
     try {
       localStorage.setItem(LAYOUT_KEY, JSON.stringify(payload));
@@ -2267,22 +2346,15 @@ export class ClubScene extends Phaser.Scene {
     };
   }
 
+  /**
+   * Restock = place a supplier ORDER (paid now, delivered physically later). Stock does NOT
+   * rise here — only when staff carry the packages behind the bar.
+   */
   restockDrink(id: string, units: number): boolean {
     const n = Math.max(0, Math.floor(units));
     if (!inventoryProductExists(id) || n <= 0) return false;
-    if (isSnackId(id) && !this.hasFunctionalTable()) {
-      this.game.events.emit('restock-failed', { id, reason: 'need_table' });
-      return false;
-    }
-    const supplier = inventorySupplierCost(id);
-    const cost = Math.max(1, Math.round(supplier * n));
-    if (this.money < cost) return false;
-    this.deductClubMoney(cost);
-    inventoryAddStock(id, n);
-    this.persistLayout();
-    this.game.events.emit('stats-updated', this.getHudState());
-    this.game.events.emit('inventory-updated');
-    return true;
+    void inventorySupplierCost;
+    return this.placeOrder([{ productId: id, units: n }]).ok;
   }
 
   /** Prompt A Phase 4 test/debug: set absolute stock for a drink. */
@@ -2403,6 +2475,7 @@ export class ClubScene extends Phaser.Scene {
     this.money += price;
     this.nightEarned += price;
     patron.ateSnack = true;
+    this.noteConsumptionTrash(patron, 'botanas');
     applyPerceivedExperience(
       patron,
       `snack:botanas:${patron.profile.id}`,
@@ -3573,6 +3646,11 @@ export class ClubScene extends Phaser.Scene {
     this.cancelAllRepairJobs();
     this.wasteAllServed();
     this.clearAllFlies();
+    // Logistics carry over: packages stay at the entrance, trash stays; tomorrow's orders get a time.
+    this.finishSupplierVisits();
+    this.finishTrashOutNow();
+    scheduleNextDayOrders();
+    resetTrashNight();
     onStaffSleep(this.allStaff().map((s) => s.profile.id));
     this.resetForNewNight();
     // Day-start: empty + dark + staff arrive ~17:05; seed floor dirt from last night.
@@ -3700,6 +3778,9 @@ export class ClubScene extends Phaser.Scene {
       s.state = 'idle';
       s.startBob();
     }
+    // A supplier still unloading finishes now; anything not delivered yet comes tomorrow.
+    this.finishSupplierVisits();
+    deferUndeliveredToNextDay();
     // Served-but-unsold mugs / plates become merma (money already spent is not recovered).
     this.wasteAllServed();
     const waste = getNightWaste();
@@ -3709,6 +3790,12 @@ export class ClubScene extends Phaser.Scene {
     const interventionLines: string[] = [];
     if (wasteUnits > 0) interventionLines.push(`Merma: ${wasteUnits} (costo $${Math.round(waste.cost)})`);
     if (staffUnits > 0) interventionLines.push(`Consumo del personal: ${staffUnits} ($${Math.round(staffUse.revenue)})`);
+    {
+      const atDoor = goodsOnFloor();
+      if (atDoor.length) interventionLines.push(`Mercancía en la entrada: ${describePackages(atDoor)}`);
+      const coming = Object.values(unitsInTransit()).reduce((a, b) => a + b, 0);
+      if (coming > 0) interventionLines.push(`Pedido por llegar mañana: ${coming} unidades`);
+    }
     this.syncBartenderBarDepth();
     // Phase 7: roll-up + weekly/monthly hooks, then bump nightNumber.
     // Tips night/jornada stay visible for the summary; resetNightTips runs on openNight.
@@ -4046,6 +4133,7 @@ export class ClubScene extends Phaser.Scene {
         const got = shiftAdvanceGameMinutes(1);
         if (got <= 0) break;
         advanced += got;
+        this.tickDeliveriesMinutes(got);
         this.checkStaffArrivalFromClock();
       }
       this.game.events.emit('stats-updated', this.getHudState());
@@ -4060,6 +4148,7 @@ export class ClubScene extends Phaser.Scene {
         const got = shiftAdvanceGameMinutes(1);
         if (got <= 0) break;
         advanced += got;
+        this.tickDeliveriesMinutes(got);
       }
       this.game.events.emit('stats-updated', this.getHudState());
       return advanced;
@@ -4072,6 +4161,7 @@ export class ClubScene extends Phaser.Scene {
       const got = shiftAdvanceGameMinutes(1);
       if (got <= 0) break;
       advanced += got;
+      this.tickDeliveriesMinutes(got);
       this.processArrivalsForAdvancedMinutes(got);
       this.game.events.emit('stats-updated', this.getHudState());
     }
@@ -4297,6 +4387,7 @@ export class ClubScene extends Phaser.Scene {
     const staff = this.allStaff().find(
       (st) =>
         !st.playerCommanded &&
+        st.visible &&
         st.aiJob === 'none' &&
         st.state === 'idle' &&
         st.profile.energy >= st.profile.energyDrainPerServe
@@ -4497,6 +4588,7 @@ export class ClubScene extends Phaser.Scene {
         noteTip(staff.profile.id, payout.tipAmount);
       }
       patron.servedByStaffId = staff.profile.id;
+      this.noteConsumptionTrash(patron, drink.id);
       // Thoughts tied to what this customer just experienced.
       if (patron.waitSince && this.time.now - patron.waitSince < THOUGHT_SAT.fastServeMs) {
         const d = applyPerceivedExperience(patron, 'fast_drink', THOUGHT_SAT.fastDrink, 'tolerance', 'Servicio rápido');
@@ -5007,7 +5099,8 @@ export class ClubScene extends Phaser.Scene {
             st.visible &&
             st.profile.energy >= st.profile.energyDrainPerServe &&
             (st.aiJob === 'wander' ||
-              (waitedMs >= URGENT_PREEMPT_MS && (st.aiJob === 'clean' || st.aiJob === 'sweep' || st.aiJob === 'mop')))
+              (waitedMs >= URGENT_PREEMPT_MS &&
+                (st.aiJob === 'clean' || st.aiJob === 'sweep' || st.aiJob === 'mop' || st.aiJob === 'haul' || st.aiJob === 'trash')))
         );
         if (!pre) break;
         this.interruptStaff(pre);
@@ -5018,6 +5111,8 @@ export class ClubScene extends Phaser.Scene {
     for (const staff of this.allStaff()) {
       // Player command ALWAYS outranks autonomous AI
       if (staff.playerCommanded) continue;
+      // Outside the club (taking the trash out) — not available.
+      if (!staff.visible || this.staffAway.has(staff.profile.id)) continue;
       if (staff.aiJob !== 'none') continue;
       if (staff.state !== 'idle') continue;
       if (now < staff.aiNextThinkAt) continue;
@@ -5034,6 +5129,9 @@ export class ClubScene extends Phaser.Scene {
         }
         continue;
       }
+
+      // 0) Logistics (maintenance #3): full trash bag out, packages to the bar, floor trash.
+      if (this.tryAutoLogistics(staff)) continue;
 
       // 1) Limpiar muebles — ANY furniture with cleanliness < threshold
       const dirty = this.findDirtiestFurniture(AI_TUNABLES.cleanThreshold);
@@ -5101,6 +5199,7 @@ export class ClubScene extends Phaser.Scene {
     if (shiftNow === 'closed' || shiftNow === 'open' || shiftNow === 'closing') {
       const minutesAdvanced = tickShiftClock(dtSec);
       if (minutesAdvanced > 0) {
+        this.tickDeliveriesMinutes(minutesAdvanced);
         this.game.events.emit('stats-updated', this.getHudState());
         if (shiftNow === 'closed') {
           this.checkStaffArrivalFromClock();
@@ -5733,6 +5832,9 @@ export class ClubScene extends Phaser.Scene {
    * Bumps jobToken so every pending callback of the old job bails out.
    */
   private interruptStaff(staff: Bartender): void {
+    // Outside the club with the trash: she comes back on her own (~20 s).
+    if (this.staffAway.has(staff.profile.id)) return;
+    this.dropCarried(staff);
     staff.jobToken++;
     this.releaseStaffAiClaims(staff);
     for (const [zid, sid] of [...this.floorClaim.entries()]) {
@@ -5768,8 +5870,17 @@ export class ClubScene extends Phaser.Scene {
     if (this.buildMode) return;
     const staff = this.selectedStaff();
     if (!staff) return;
+    if (this.staffAway.has(staff.profile.id)) {
+      this.uiToast(`${staff.displayName} salió a tirar la basura.`);
+      return;
+    }
     if (!this.staffPresent || !staff.visible) {
       this.uiToast('El personal todavía no llega.');
+      return;
+    }
+    const logi = this.logisticsTargetAtPointer(p);
+    if (logi) {
+      this.openContextMenu(staff, logi, p.x, p.y);
       return;
     }
     const furnId = this.furnitureIdAtPointer(p);
@@ -5889,11 +6000,21 @@ export class ClubScene extends Phaser.Scene {
       add(`drink:${pid}`, `${verb} ${this.productName(pid).toLowerCase()} ($${price})`, ok, ok ? undefined : 'Sin dinero');
     };
 
+    if (target.kind === 'goods' || target.kind === 'trash' || target.kind === 'trash_bag') {
+      return this.buildLogisticsActions(staff, target);
+    }
     if (target.kind === 'floor') {
       const z = getFloorZoneById(target.id);
       if (!z) return null;
       if (z.dryDirt >= 8) add(`sweep:${z.id}`, 'Barrer');
       if (z.grime >= 8) add(`mop:${z.id}`, 'Trapear');
+      {
+        const here = listTrash().filter((t) => zoneContaining(t.col, t.row)?.id === z.id);
+        if (here.length) {
+          const why = pickupBlockedReason();
+          add(`pick_trash:${here[0].id}`, `Limpiar basura (${here.length})`, !why, why ?? undefined);
+        }
+      }
       if (!actions.length) add('noop', 'Barrer', false, 'El piso está limpio');
       const flies = this.flyZones.get(z.id)?.active;
       const band = floorDirtBand(z);
@@ -6046,6 +6167,8 @@ export class ClubScene extends Phaser.Scene {
     };
     if (verb === 'clean' && def && !takeOver(this.cleanClaim, def.id, 'ya lo está limpiando.')) return false;
     if ((verb === 'sweep' || verb === 'mop') && arg && !takeOver(this.floorClaim, arg, 'ya está en esa zona.')) return false;
+    const logiVerb = verb === 'haul' || verb === 'pick_trash' || verb === 'take_out_trash';
+    if (logiVerb && !this.takeOverLogisticsClaim(staff, target, verb, arg)) return false;
     this.interruptStaff(staff);
     const tok = staff.jobToken;
     let started = false;
@@ -6095,6 +6218,11 @@ export class ClubScene extends Phaser.Scene {
         break;
       case 'collect':
         if (def) started = this.beginCollectServed(staff, def);
+        break;
+      case 'haul':
+      case 'pick_trash':
+      case 'take_out_trash':
+        started = this.executeLogisticsOrder(staff, verb, arg);
         break;
       default:
         break;
@@ -6403,6 +6531,7 @@ export class ClubScene extends Phaser.Scene {
     patron.servedDrinkId = item.productId;
     patron.wasOutOfStock = false;
     patron.servedAtBeerTap = item.spot.startsWith('tap:');
+    this.noteConsumptionTrash(patron, item.productId);
     const prof = spoilProfileFor(item.productId);
     if (prof) {
       const delta = state === 'fresh' ? prof.freshSat : prof.staleSat;
@@ -6462,6 +6591,7 @@ export class ClubScene extends Phaser.Scene {
     this.money += price;
     this.nightEarned += price;
     patron.ateSnack = true;
+    this.noteConsumptionTrash(patron, 'botanas');
     applyPerceivedExperience(patron, `snack:botanas:${patron.profile.id}`, SNACK_EXPERIENCE.satDelta, 'comfortSens', 'Botanas en la mesa');
     const prof = spoilProfileFor('botanas');
     if (prof && state === 'stale') {
@@ -7001,6 +7131,8 @@ export class ClubScene extends Phaser.Scene {
         }
       }
     }
+    // Trash / full bag right here (local only; amount × proximity × exposure).
+    this.perceiveTrash(patron);
     // Clean place (after a while inside, nothing dirty perceived nearby).
     const since = this.patronSpawnAt.get(patron) ?? now;
     if (now - since >= THOUGHT_SAT.cleanPlaceAfterMs && !hasThought(patron, 'clean_place')) {
@@ -7008,7 +7140,7 @@ export class ClubScene extends Phaser.Scene {
       const dirtyFurn = this.scenario.furniture.some(
         (f) => withinPerception(col, row, f.tile, f.footprint) && isVisiblyDirty(this.statsOf(f))
       );
-      if (!dirtyNear && !dirtyFurn && this.clubVenueQuality() >= 0.7) {
+      if (!dirtyNear && !dirtyFurn && !this.trashNear(col, row, 2) && this.clubVenueQuality() >= 0.7) {
         if (Math.random() < THOUGHT_SAT.cleanPlaceChance) {
           applyPerceivedExperience(patron, 'clean_place', THOUGHT_SAT.cleanPlace, 'cleanSens', 'Lugar limpio');
           this.patronThink(patron, 'clean_place');
@@ -7032,6 +7164,1089 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
     if (exp.satisfaction >= 72) this.patronThink(patron, 'like_place');
+  }
+
+  // ─── Logistics: restock orders → supplier → entrance → staff carry → behind the bar ─────
+  // ─── Trash: consumption → floor / container → club bag → full bag → Sacar basura ─────────
+
+  private goodsGfx = new Map<string, Phaser.GameObjects.Image>();
+  private trashGfx = new Map<string, Phaser.GameObjects.Image>();
+  private fullBagGfx: Phaser.GameObjects.Image | null = null;
+  private logiGenerated = new Set<string>();
+  /** staffId → what she is carrying (goods ids / the full bag). */
+  private carry = new Map<
+    string,
+    { kind: 'goods' | 'bag_place' | 'bag_out'; goodsIds: string[]; gfx: Phaser.GameObjects.Container; baseSpeed: number }
+  >();
+  private supplierVisits: Array<{ order: PendingOrder; sprite: Patron | null; dropped: boolean }> = [];
+  /** Staff outside the club taking the trash out → return timer. */
+  private staffAway = new Map<string, Phaser.Time.TimerEvent>();
+  private patronTrashExposure = new WeakMap<Patron, { ms: number; steps: number }>();
+  /** Every trip load ever picked up (tests: never 3 bottles / mixed). */
+  private carryLog: Array<{ staff: string; kinds: PackageKind[]; at: number }> = [];
+  /** Test hook: force a consumption to leave trash (chance 1) and shorten the delay. */
+  debugForceTrash = false;
+
+  private initLogistics(): void {
+    this.ensureLogisticsTextures();
+    ensureTrashBag(this.hasTrashContainer());
+    this.game.events.on('cmd-place-order', this.onCmdPlaceOrder, this);
+    this.events.once('shutdown', () => this.game.events.off('cmd-place-order', this.onCmdPlaceOrder, this));
+    this.refreshGoodsVisuals();
+    this.refreshTrashVisuals();
+  }
+
+  /** Procedural placeholders; skipped when real art with the same key is loaded. */
+  private ensureLogisticsTextures(): void {
+    const make = (key: string, w: number, h: number, draw: (g: Phaser.GameObjects.Graphics) => void) => {
+      if (this.textures.exists(key)) return;
+      const g = this.make.graphics({ x: 0, y: 0 }, false);
+      draw(g);
+      g.generateTexture(key, w, h);
+      g.destroy();
+      this.logiGenerated.add(key);
+    };
+    const A = LOGISTICS_ASSETS;
+    make(A.crate, 24, 20, (g) => {
+      g.fillStyle(0xb07a3e, 1).fillRect(0, 2, 24, 18);
+      g.fillStyle(0x8a5a2a, 1).fillRect(0, 2, 24, 3).fillRect(0, 10, 24, 2).fillRect(0, 17, 24, 3);
+      g.lineStyle(1, 0x5a3a1a, 1).strokeRect(0.5, 2.5, 23, 17);
+      g.fillStyle(0xffffff, 1).fillRect(4, 0, 3, 4).fillRect(10, 0, 3, 4).fillRect(16, 0, 3, 4);
+    });
+    make(A.bottle, 8, 18, (g) => {
+      g.fillStyle(0xffffff, 1).fillRect(1, 6, 6, 12).fillRect(3, 1, 2, 6);
+      g.fillStyle(0x333333, 1).fillRect(3, 0, 2, 2);
+      g.fillStyle(0xffffff, 0.6).fillRect(2, 8, 1, 7);
+    });
+    make(A.sack, 24, 24, (g) => {
+      g.fillStyle(0xc9a46a, 1).fillEllipse(12, 15, 22, 17);
+      g.fillStyle(0xb08a50, 1).fillTriangle(7, 6, 17, 6, 12, 11);
+      g.fillStyle(0x6b4a24, 1).fillRect(8, 5, 8, 2);
+      g.fillStyle(0xd84a2a, 1).fillCircle(12, 16, 3);
+    });
+    make(A.trashBagFull, 24, 26, (g) => {
+      g.fillStyle(0x1c1c22, 1).fillEllipse(12, 16, 22, 18);
+      g.fillStyle(0x2a2a33, 1).fillTriangle(8, 6, 16, 6, 12, 10);
+      g.fillStyle(0xd8c040, 1).fillRect(9, 4, 6, 2);
+      g.fillStyle(0x50505c, 1).fillEllipse(8, 13, 4, 6);
+    });
+    const T = A.trash;
+    make(T.servilleta, 10, 8, (g) => g.fillStyle(0xf4f0e8, 1).fillTriangle(0, 7, 9, 5, 4, 0));
+    make(T.envoltura, 12, 8, (g) => {
+      g.fillStyle(0xe04a8a, 1).fillRect(1, 1, 10, 6);
+      g.fillStyle(0xffe066, 1).fillRect(3, 3, 6, 2);
+    });
+    make(T.vaso_vacio, 8, 10, (g) => {
+      g.fillStyle(0xdfeaf0, 0.85).fillRect(1, 1, 6, 9);
+      g.lineStyle(1, 0x9aa8b0, 1).strokeRect(1.5, 1.5, 5, 8);
+    });
+    make(T.botella_vacia, 14, 6, (g) => {
+      g.fillStyle(0x3a8a3a, 1).fillRect(0, 1, 9, 4).fillRect(9, 2, 4, 2);
+    });
+    make(T.bolsa, 10, 9, (g) => g.fillStyle(0xd0d0d8, 1).fillEllipse(5, 5, 9, 7));
+    make(T.restos_botana, 12, 7, (g) => {
+      g.fillStyle(0xf0a030, 1).fillCircle(2, 4, 2).fillCircle(6, 3, 2).fillCircle(9, 5, 1.6);
+    });
+  }
+
+  private tintIfPlaceholder(img: Phaser.GameObjects.Image, key: string, tint?: number): void {
+    if (tint != null && this.logiGenerated.has(key)) img.setTint(tint);
+  }
+
+  private hasTrashContainer(): boolean {
+    return !!this.trashContainerDef();
+  }
+
+  private trashContainerDef(): FurnitureDef | null {
+    for (const f of this.scenario.furniture) {
+      if ((f.catalogId || f.type || '').toLowerCase() !== TRASH_CONTAINER_ID) continue;
+      const st = this.statsOf(f);
+      if (st.durability <= 0) continue;
+      return f;
+    }
+    return null;
+  }
+
+  private cheb(a: { col: number; row: number }, b: { col: number; row: number }): number {
+    return Math.max(Math.abs(a.col - b.col), Math.abs(a.row - b.row));
+  }
+
+  // ── Orders ──
+
+  private onCmdPlaceOrder = (payload: { lines?: Array<{ id?: string; productId?: string; units?: number }> }): void => {
+    const lines = (payload?.lines ?? []).map((l) => ({ productId: String(l.productId ?? l.id ?? ''), units: Number(l.units) || 0 }));
+    const res = this.placeOrder(lines);
+    this.game.events.emit('order-result', res);
+  };
+
+  /** Player confirmed an order: check funds, pay ONCE, create the pending order. */
+  placeOrder(lines: OrderLine[]): { ok: boolean; reason?: string; message?: string; orderId?: string; cost?: number; eta?: string } {
+    const clean = lines
+      .filter((l) => l && inventoryProductExists(l.productId))
+      .map((l) => ({ productId: l.productId, units: normalizeOrderUnits(l.productId, l.units) }))
+      .filter((l) => l.units > 0);
+    if (!clean.length) return { ok: false, reason: 'empty', message: 'El pedido está vacío.' };
+    if (clean.some((l) => isSnackId(l.productId)) && !this.hasFunctionalTable()) {
+      this.game.events.emit('restock-failed', { id: 'botanas', reason: 'need_table' });
+      return { ok: false, reason: 'need_table', message: SNACK_LOCKED_HINT };
+    }
+    const cost = orderCost(clean);
+    if (!(cost > 0) || this.money < cost) {
+      return { ok: false, reason: 'money', message: 'No tienes suficiente dinero para realizar este pedido.', cost };
+    }
+    this.deductClubMoney(cost); // paid ONCE, here; the delivery never charges again
+    const snap = getShiftSnapshot();
+    const order = createOrder(clean, {
+      state: getShiftState(),
+      day: snap.currentDay,
+      clock: formatGameClock(snap.gameHour, snap.gameMinute),
+    });
+    const eta = estimateDeliveryText(getShiftState(), snap.gameHour, snap.gameMinute);
+    this.persistLayout();
+    this.uiToast(`Pedido confirmado (−$${cost}). ${eta}`);
+    this.game.events.emit('stats-updated', this.getHudState());
+    this.game.events.emit('inventory-updated');
+    return { ok: true, orderId: order.id, cost, eta };
+  }
+
+  /** Called with whole game minutes whenever the shift clock advanced (prep / open / closing). */
+  private tickDeliveriesMinutes(minutes: number): void {
+    const due = tickDeliveryMinutes(minutes);
+    for (const o of due) this.startSupplierVisit(o);
+  }
+
+  /** Free drop tile next to the entrance (packages pile up, spill to neighbouring tiles). */
+  private pickDropTile(): { col: number; row: number; slot: number } {
+    const door = { col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] };
+    const { cols, rows } = this.scenario.map;
+    const cands: Array<{ col: number; row: number; d: number }> = [];
+    for (let c = 0; c < cols; c++) {
+      for (let r = 0; r < rows; r++) {
+        if (c === door.col && r === door.row) continue;
+        const d = Math.abs(c - door.col) + Math.abs(r - door.row) * 1.05;
+        if (d > DROP_ZONE.maxRadius * 2) continue;
+        if (!this.pathfinder.isWalkable(c, r)) continue;
+        cands.push({ col: c, row: r, d });
+      }
+    }
+    cands.sort((a, b) => a.d - b.d || b.row - a.row);
+    for (const t of cands) {
+      const here = goodsOnFloor().filter((g) => g.col === t.col && g.row === t.row);
+      if (here.length >= DROP_ZONE.perTile) continue;
+      const used = new Set(here.map((g) => g.slot));
+      let slot = 0;
+      while (used.has(slot)) slot++;
+      return { col: t.col, row: t.row, slot };
+    }
+    return { col: door.col, row: door.row, slot: goodsOnFloor().length };
+  }
+
+  private freeSlotAt(col: number, row: number): number {
+    const used = new Set(goodsOnFloor().filter((g) => g.col === col && g.row === row).map((g) => g.slot));
+    let slot = 0;
+    while (used.has(slot)) slot++;
+    return slot;
+  }
+
+  /** Supplier walks in from the entrance, drops the packages there and leaves (never to the bar). */
+  private startSupplierVisit(order: PendingOrder): void {
+    const visit = { order, sprite: null as Patron | null, dropped: false };
+    this.supplierVisits.push(visit);
+    const door = { col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] };
+    const drop = this.pickDropTile();
+    try {
+      const sprite = new Patron(this, LOGISTICS_ASSETS.supplierSprite, door, this.iso, this.pathfinder, {
+        id: `supplier_${order.id}`,
+        name: 'Proveedor',
+        sprite: LOGISTICS_ASSETS.supplierSprite,
+        preferredDrink: 'agua',
+        tipChance: 0,
+        patience: 999,
+      });
+      sprite.reapplyDisplaySize();
+      sprite.sprite.setTint(LOGISTICS_ASSETS.supplierTint);
+      sprite.statusLabel?.setText('Proveedor').setColor('#ffc070').setVisible(true);
+      sprite.sprite.disableInteractive();
+      visit.sprite = sprite;
+    } catch {
+      visit.sprite = null;
+    }
+    this.uiToast('Llegó el proveedor con tu pedido.');
+    const sprite = visit.sprite;
+    if (!sprite) {
+      this.dropOrderGoods(visit);
+      return;
+    }
+    const unload = () => {
+      if (!sprite.active) return;
+      sprite.statusLabel?.setText('Descargando…').setVisible(true);
+      sprite.faceToward({ col: drop.col, row: drop.row + 1 });
+      this.time.delayedCall(900, () => {
+        this.dropOrderGoods(visit);
+        if (!sprite.active) return;
+        sprite.statusLabel?.setText('Proveedor').setVisible(true);
+        const exit = { col: this.scenario.exitTile[0], row: this.scenario.exitTile[1] };
+        const leave = () => {
+          sprite.destroy();
+          this.supplierVisits = this.supplierVisits.filter((v) => v !== visit);
+        };
+        if (!sprite.walkTo(exit, leave)) leave();
+      });
+    };
+    if (!sprite.walkTo({ col: drop.col, row: drop.row }, unload)) unload();
+  }
+
+  /** Packages appear at the entrance (never in the inventory). */
+  private dropOrderGoods(visit: { order: PendingOrder; dropped: boolean }): void {
+    if (visit.dropped) return;
+    visit.dropped = true;
+    const all: Array<{ kind: PackageKind }> = [];
+    for (const line of visit.order.lines) {
+      for (const pkg of packUnits(line.productId, line.units)) {
+        const t = this.pickDropTile();
+        addGoods({ productId: line.productId, kind: pkg.kind, units: pkg.units, col: t.col, row: t.row, slot: t.slot, orderId: visit.order.id });
+        all.push(pkg);
+      }
+    }
+    removeOrder(visit.order.id);
+    this.refreshGoodsVisuals();
+    this.uiToast(`El proveedor dejó ${describePackages(all)} en la entrada.`);
+    this.persistLayout();
+    this.game.events.emit('inventory-updated');
+  }
+
+  /** End of night / Dormir: a supplier still walking finishes instantly (goods are never lost). */
+  private finishSupplierVisits(): void {
+    for (const v of [...this.supplierVisits]) {
+      this.dropOrderGoods(v);
+      if (v.sprite && v.sprite.active) v.sprite.destroy();
+    }
+    this.supplierVisits = [];
+  }
+
+  private goodsWorldPos(g: { col: number; row: number; slot: number }): { x: number; y: number } {
+    const s = tileToScreen(g.col, g.row, this.iso);
+    const offs: Array<[number, number]> = [[-11, 2], [11, 2], [0, 8], [0, -4], [-11, -10], [11, -10], [0, -16], [-6, -22]];
+    const o = offs[g.slot % offs.length];
+    const lift = Math.floor(g.slot / offs.length) * 14;
+    return { x: s.x + o[0], y: s.y + o[1] - lift };
+  }
+
+  private goodsTexture(kind: PackageKind): string {
+    return kind === 'crate' ? LOGISTICS_ASSETS.crate : kind === 'sack' ? LOGISTICS_ASSETS.sack : LOGISTICS_ASSETS.bottle;
+  }
+
+  private refreshGoodsVisuals(): void {
+    const live = new Set<string>();
+    for (const g of goodsOnFloor()) {
+      live.add(g.id);
+      let img = this.goodsGfx.get(g.id);
+      const key = this.goodsTexture(g.kind);
+      if (!img) {
+        img = this.add.image(0, 0, key).setOrigin(0.5, 1);
+        this.tintIfPlaceholder(img, key, PRODUCT_TINT[g.productId]);
+        this.goodsGfx.set(g.id, img);
+      }
+      const p = this.goodsWorldPos(g);
+      img.setPosition(p.x, p.y);
+      img.setDepth(depthForCharacter(g.col, g.row) - 0.4 + g.slot * 0.01);
+    }
+    for (const [id, img] of [...this.goodsGfx.entries()]) {
+      if (!live.has(id)) {
+        img.destroy();
+        this.goodsGfx.delete(id);
+      }
+    }
+  }
+
+  /** Bar to store goods behind (any bar, even a damaged one: it is still a counter). */
+  private storageBarDef(): FurnitureDef | null {
+    return this.scenario.furniture.find((f) => this.isBarDef(f)) ?? null;
+  }
+
+  /** "Detrás de la barra": back row first, then the sides, then the staff front tile. */
+  private storageTileFor(staff: Bartender): { col: number; row: number } | null {
+    const bar = this.storageBarDef();
+    if (!bar) return null;
+    const fw = Math.max(1, bar.footprint[0]);
+    const fh = Math.max(1, bar.footprint[1]);
+    const c0 = bar.tile[0];
+    const r0 = bar.tile[1];
+    const cands: Array<{ col: number; row: number }> = [];
+    for (let c = c0; c < c0 + fw; c++) cands.push({ col: c, row: r0 - 1 });
+    cands.push({ col: c0 - 1, row: r0 - 1 }, { col: c0 + fw, row: r0 - 1 });
+    for (let r = r0; r < r0 + fh; r++) cands.push({ col: c0 + fw, row: r }, { col: c0 - 1, row: r });
+    const front = this.frontTiles(bar);
+    if (front[1]) cands.push(front[1]);
+    if (front[0]) cands.push(front[0]);
+    for (const t of cands) {
+      if (!this.pathfinder.isWalkable(t.col, t.row)) continue;
+      if (this.isStaffTileBlocked(t, staff)) continue;
+      if (!(t.col === staff.grid.col && t.row === staff.grid.row) && this.pathfinder.findPath(staff.grid, t).length < 2) continue;
+      return t;
+    }
+    return null;
+  }
+
+  /** Walkable tile on/next to a floor object for this staff member. */
+  private tileNearForStaff(staff: Bartender, at: { col: number; row: number }): { col: number; row: number } {
+    const cands = [at, ...[[0, 1], [1, 0], [-1, 0], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]].map(([dc, dr]) => ({ col: at.col + dc, row: at.row + dr }))];
+    for (const t of cands) {
+      if (!this.pathfinder.isWalkable(t.col, t.row)) continue;
+      if (this.isStaffTileBlocked(t, staff)) continue;
+      return t;
+    }
+    return { col: staff.grid.col, row: staff.grid.row };
+  }
+
+  private attachCarry(staff: Bartender, kind: 'goods' | 'bag_place' | 'bag_out', goodsIds: string[]): void {
+    const prev = this.carry.get(staff.profile.id);
+    if (prev) prev.gfx.destroy(true);
+    const gfx = this.add.container(0, -64);
+    const items = goodsIds.map((id) => getGoods(id)).filter((g): g is GoodsItem => !!g);
+    let mult = 1;
+    if (kind === 'goods') {
+      items.forEach((g, i) => {
+        const key = this.goodsTexture(g.kind);
+        const img = this.add.image(items.length === 2 ? (i === 0 ? -5 : 5) : 0, 0, key).setOrigin(0.5, 0.5);
+        this.tintIfPlaceholder(img, key, PRODUCT_TINT[g.productId]);
+        gfx.add(img);
+        mult = Math.min(mult, CARRY_SPEED_MULT[g.kind]);
+      });
+    } else {
+      gfx.add(this.add.image(0, 4, LOGISTICS_ASSETS.trashBagFull).setOrigin(0.5, 0.5));
+      mult = 0.9;
+    }
+    staff.add(gfx);
+    const baseSpeed = prev?.baseSpeed ?? staff.moveSpeed;
+    staff.moveSpeed = baseSpeed * mult;
+    this.carry.set(staff.profile.id, { kind, goodsIds, gfx, baseSpeed });
+  }
+
+  private clearCarry(staff: Bartender): void {
+    const c = this.carry.get(staff.profile.id);
+    if (!c) return;
+    c.gfx.destroy(true);
+    staff.moveSpeed = c.baseSpeed;
+    this.carry.delete(staff.profile.id);
+  }
+
+  /** Interrupted (order, urgent work, night end): whatever she carries lands where she stands. */
+  private dropCarried(staff: Bartender): void {
+    const id = staff.profile.id;
+    const c = this.carry.get(id);
+    const at = { col: staff.grid.col, row: staff.grid.row };
+    if (c) {
+      if (c.kind === 'goods') {
+        for (const gid of c.goodsIds) {
+          const g = getGoods(gid);
+          if (!g) continue;
+          g.carriedBy = null;
+          g.claimedBy = null;
+          g.col = at.col;
+          g.row = at.row;
+          g.slot = this.freeSlotAt(at.col, at.row);
+        }
+      } else if (c.kind === 'bag_place') {
+        placeFullBag(at.col, at.row);
+      } else if (c.kind === 'bag_out') {
+        dropFullBagAt(at.col, at.row);
+      }
+      this.clearCarry(staff);
+    }
+    for (const g of listGoods()) if (g.claimedBy === id && !g.carriedBy) g.claimedBy = null;
+    for (const t of listTrash()) if (t.claimedBy === id) t.claimedBy = null;
+    const fb = getFullBag();
+    if (fb && fb.claimedBy === id && !fb.carriedBy) claimFullBag(null);
+    if (c) {
+      this.refreshGoodsVisuals();
+      this.refreshTrashVisuals();
+    }
+  }
+
+  /** Nearest load for an autonomous trip: 1 crate / 1 sack, or up to 2 loose bottles. */
+  private pickHaulLoad(staff: Bartender, first?: GoodsItem): GoodsItem[] | null {
+    const free = goodsOnFloor().filter((g) => !g.claimedBy);
+    if (!first) {
+      free.sort((a, b) => this.cheb(a, staff.grid) - this.cheb(b, staff.grid) || a.row - b.row);
+      first = free[0];
+    }
+    if (!first) return null;
+    if (first.kind !== 'bottle') return [first];
+    const f = first;
+    const second = free
+      .filter((g) => g !== f && g.kind === 'bottle' && this.cheb(g, f) <= 1)
+      .sort((a, b) => this.cheb(a, f) - this.cheb(b, f) || Number(b.productId === f.productId) - Number(a.productId === f.productId))[0];
+    return second ? [f, second] : [f];
+  }
+
+  /** One trip: walk to the package(s), pick up, carry behind the bar, store → stock rises there. */
+  private beginHaul(staff: Bartender, load: GoodsItem[], asPlayer: boolean): boolean {
+    if (!load.length || !isValidCarryLoad(load)) return false;
+    if (load.some((g) => g.carriedBy || (g.claimedBy && g.claimedBy !== staff.profile.id))) return false;
+    if (!this.storageTileFor(staff)) {
+      if (asPlayer) this.staffSay(staff, this.storageBarDef() ? 'No puedo llegar a la barra.' : 'No hay barra donde guardarlo.');
+      return false;
+    }
+    const sid = staff.profile.id;
+    for (const g of load) g.claimedBy = sid;
+    const tok = staff.jobToken;
+    staff.aiJob = 'haul';
+    staff.playerCommanded = asPlayer;
+    staff.state = 'busy';
+    staff.setServeLabel('Recogiendo mercancía');
+    const picked: string[] = [];
+    const release = (delayMs = 400) => {
+      this.clearCarry(staff);
+      for (const g of load) if (!g.carriedBy && g.claimedBy === sid) g.claimedBy = null;
+      this.releaseStaffTileClaims(staff);
+      staff.clearAiJob();
+      staff.state = 'idle';
+      staff.startBob();
+      staff.aiNextThinkAt = this.time.now + delayMs;
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.emitStaffRoster();
+    };
+    const goStore = () => {
+      if (staff.jobToken !== tok) return;
+      if (!picked.length) {
+        release();
+        return;
+      }
+      const st = this.storageTileFor(staff);
+      if (!st) {
+        this.dropCarried(staff);
+        this.staffSay(staff, 'No puedo llegar a la barra.', false);
+        release(1500);
+        return;
+      }
+      this.claimStaffTile(staff, st);
+      staff.setServeLabel('Llevando a la barra');
+      const arrive = () => {
+        if (staff.jobToken !== tok) return;
+        const bar = this.storageBarDef();
+        staff.stopBob();
+        if (bar) staff.faceToward({ col: bar.tile[0], row: bar.tile[1] });
+        this.time.delayedCall(HAUL_TIMING.storeMs, () => {
+          if (staff.jobToken !== tok) return;
+          const added: string[] = [];
+          for (const gid of picked) {
+            const g = consumeStoredGoods(gid, sid, this.time.now);
+            if (!g) continue;
+            // The ONLY place a delivery raises the stock number: goods physically behind the bar.
+            inventoryAddStock(g.productId, g.units);
+            added.push(`+${g.units} ${this.productName(g.productId).toLowerCase()}`);
+          }
+          if (added.length) this.showStatusFloat(added.join(' · '), { x: staff.x, y: staff.y });
+          this.persistLayout();
+          this.game.events.emit('inventory-updated');
+          release(350);
+        });
+      };
+      if (!staff.walkTo(st, arrive)) arrive();
+    };
+    const pickNext = (idx: number) => {
+      if (staff.jobToken !== tok) return;
+      if (idx >= load.length) {
+        goStore();
+        return;
+      }
+      const g = load[idx];
+      if (!getGoods(g.id) || g.carriedBy) {
+        pickNext(idx + 1);
+        return;
+      }
+      const goal = this.tileNearForStaff(staff, g);
+      this.claimStaffTile(staff, goal);
+      const act = () => {
+        if (staff.jobToken !== tok) return;
+        staff.stopBob();
+        staff.faceToward({ col: g.col, row: g.row });
+        this.time.delayedCall(HAUL_TIMING.pickMs, () => {
+          if (staff.jobToken !== tok) return;
+          if (!getGoods(g.id) || g.carriedBy) {
+            pickNext(idx + 1);
+            return;
+          }
+          g.carriedBy = sid;
+          g.claimedBy = sid;
+          picked.push(g.id);
+          this.attachCarry(staff, 'goods', [...picked]);
+          // Hard rule check on the actual load in hand.
+          const inHand = picked.map((id) => getGoods(id)).filter((x): x is GoodsItem => !!x);
+          this.carryLog.push({ staff: sid, kinds: inHand.map((x) => x.kind), at: Math.round(this.time.now) });
+          if (this.carryLog.length > 200) this.carryLog.shift();
+          staff.profile.energy = Math.max(0, staff.profile.energy - CARRY_ENERGY[g.kind]);
+          this.refreshGoodsVisuals();
+          staff.startBob();
+          pickNext(idx + 1);
+        });
+      };
+      if (!staff.walkTo(goal, act)) act();
+    };
+    pickNext(0);
+    this.emitStaffRoster();
+    return true;
+  }
+
+  // ── Trash ──
+
+  /** A customer finished consuming something: maybe 1 piece of trash (floor or container). */
+  private noteConsumptionTrash(patron: Patron, productId: string): void {
+    const delay = this.debugForceTrash ? 250 : this.randBetween(TRASH.delayMs);
+    this.time.delayedCall(delay, () => {
+      if (!patron.active || this.phase !== 'open') return;
+      const hasC = this.hasTrashContainer();
+      const r = rollTrashFor(productId, hasC, Math.random, this.debugForceTrash ? 1 : undefined);
+      if (!r || r.dest === 'container') return;
+      this.spawnTrashAt(patron.grid.col, patron.grid.row, r.kind, productId);
+    });
+  }
+
+  private spawnTrashAt(col: number, row: number, kind: TrashKind, productId = ''): TrashItem {
+    const t = addTrashItem({
+      kind,
+      col,
+      row,
+      ox: Math.round((Math.random() - 0.5) * 22),
+      oy: Math.round((Math.random() - 0.5) * 8) + 4,
+      productId,
+      createdAt: this.time.now,
+    });
+    this.refreshTrashVisuals();
+    return t;
+  }
+
+  private trashWorldPos(t: { col: number; row: number; ox: number; oy: number }): { x: number; y: number } {
+    const s = tileToScreen(t.col, t.row, this.iso);
+    return { x: s.x + t.ox, y: s.y + t.oy };
+  }
+
+  private fullBagWorldPos(fb: { col: number; row: number }): { x: number; y: number } {
+    const s = tileToScreen(fb.col, fb.row, this.iso);
+    return { x: s.x + 6, y: s.y + 6 };
+  }
+
+  private refreshTrashVisuals(): void {
+    const live = new Set<string>();
+    for (const t of listTrash()) {
+      live.add(t.id);
+      let img = this.trashGfx.get(t.id);
+      if (!img) {
+        img = this.add.image(0, 0, LOGISTICS_ASSETS.trash[t.kind] ?? LOGISTICS_ASSETS.trash.servilleta).setOrigin(0.5, 0.7);
+        // Placeholders are tiny; real art (same key) keeps its own size.
+        if (this.logiGenerated.has(img.texture.key)) img.setScale(1.5);
+        this.trashGfx.set(t.id, img);
+      }
+      const p = this.trashWorldPos(t);
+      img.setPosition(p.x, p.y);
+      img.setDepth(FLOOR_VISUAL.depth + 0.5);
+    }
+    for (const [id, img] of [...this.trashGfx.entries()]) {
+      if (!live.has(id)) {
+        img.destroy();
+        this.trashGfx.delete(id);
+      }
+    }
+    const fb = getFullBag();
+    if (fb && !fb.carriedBy) {
+      if (!this.fullBagGfx) {
+        this.fullBagGfx = this.add.image(0, 0, LOGISTICS_ASSETS.trashBagFull).setOrigin(0.5, 1);
+        if (this.logiGenerated.has(LOGISTICS_ASSETS.trashBagFull)) this.fullBagGfx.setScale(1.25);
+      }
+      const p = this.fullBagWorldPos(fb);
+      this.fullBagGfx.setPosition(p.x, p.y).setVisible(true);
+      this.fullBagGfx.setDepth(depthForCharacter(fb.col, fb.row) - 0.3);
+    } else if (this.fullBagGfx) {
+      this.fullBagGfx.destroy();
+      this.fullBagGfx = null;
+    }
+  }
+
+  /** Where a full bag rests: next to the container, else the upper/central floor with room. */
+  private fullBagSpot(staff: Bartender): { col: number; row: number } {
+    const blocked = new Set<string>();
+    for (const f of this.scenario.furniture) for (const t of this.frontTiles(f)) blocked.add(this.tileKey(t));
+    blocked.add(this.tileKey({ col: this.scenario.spawnTile[0], row: this.scenario.spawnTile[1] }));
+    const ok = (t: { col: number; row: number }) =>
+      this.pathfinder.isWalkable(t.col, t.row) &&
+      !blocked.has(this.tileKey(t)) &&
+      !goodsOnFloor().some((g) => g.col === t.col && g.row === t.row) &&
+      (this.pathfinder.findPath(staff.grid, t).length >= 2 || (t.col === staff.grid.col && t.row === staff.grid.row));
+    const bin = this.trashContainerDef();
+    if (bin) {
+      const fw = Math.max(1, bin.footprint[0]);
+      const fh = Math.max(1, bin.footprint[1]);
+      const cands: Array<{ col: number; row: number }> = [];
+      for (let c = bin.tile[0] - 1; c <= bin.tile[0] + fw; c++) {
+        for (let r = bin.tile[1] - 1; r <= bin.tile[1] + fh; r++) {
+          const inside = c >= bin.tile[0] && c < bin.tile[0] + fw && r >= bin.tile[1] && r < bin.tile[1] + fh;
+          if (!inside) cands.push({ col: c, row: r });
+        }
+      }
+      cands.sort((a, b) => b.row - a.row || a.col - b.col);
+      const t = cands.find((x) => this.pathfinder.isWalkable(x.col, x.row) && !goodsOnFloor().some((g) => g.col === x.col && g.row === x.row));
+      if (t) return t;
+    }
+    const { cols, rows } = this.scenario.map;
+    const target = { col: Math.floor(cols / 2) - 1, row: Math.max(2, Math.floor(rows * 0.28)) };
+    const all: Array<{ col: number; row: number }> = [];
+    for (let c = 0; c < cols; c++) for (let r = 0; r < rows; r++) all.push({ col: c, row: r });
+    all.sort((a, b) => Math.abs(a.col - target.col) + Math.abs(a.row - target.row) - (Math.abs(b.col - target.col) + Math.abs(b.row - target.row)));
+    return all.find(ok) ?? { col: staff.grid.col, row: staff.grid.row };
+  }
+
+  private beginPickTrash(staff: Bartender, t: TrashItem, asPlayer: boolean): boolean {
+    if (!canPickUpTrash()) {
+      if (asPlayer) this.staffSay(staff, pickupBlockedReason() === 'Están sacando la basura' ? 'Primero que regresen con la bolsa.' : 'La bolsa está llena. Hay que sacar la basura.');
+      return false;
+    }
+    if (t.claimedBy && t.claimedBy !== staff.profile.id) return false;
+    const sid = staff.profile.id;
+    t.claimedBy = sid;
+    const tok = staff.jobToken;
+    staff.aiJob = 'trash';
+    staff.playerCommanded = asPlayer;
+    staff.state = 'busy';
+    staff.setServeLabel('Recogiendo basura');
+    const release = (delayMs = 500) => {
+      if (t.claimedBy === sid) t.claimedBy = null;
+      this.clearCarry(staff);
+      this.releaseStaffTileClaims(staff);
+      staff.clearAiJob();
+      staff.state = 'idle';
+      staff.startBob();
+      staff.aiNextThinkAt = this.time.now + delayMs;
+      this.game.events.emit('stats-updated', this.getHudState());
+      this.emitStaffRoster();
+    };
+    const goal = this.tileNearForStaff(staff, t);
+    this.claimStaffTile(staff, goal);
+    const act = () => {
+      if (staff.jobToken !== tok) return;
+      staff.stopBob();
+      staff.faceToward({ col: t.col, row: t.row });
+      this.time.delayedCall(TRASH.pickMs, () => {
+        if (staff.jobToken !== tok) return;
+        const res = pickTrashIntoBag(t.id);
+        if (res === 'blocked') {
+          if (asPlayer) this.staffSay(staff, 'La bolsa está llena.', false);
+          release(1500);
+          return;
+        }
+        staff.profile.energy = Math.max(0, staff.profile.energy - TRASH.pickEnergy);
+        this.refreshTrashVisuals();
+        const bag = getTrashBag();
+        if (bag) this.showStatusFloat(`Basura ${bag.count}/${bag.capacity}`, { x: staff.x, y: staff.y });
+        if (res === 'full') {
+          // The bag is full: she ties it and sets it down where it belongs.
+          markBagInTransit(sid);
+          this.attachCarry(staff, 'bag_place', []);
+          const spot = this.fullBagSpot(staff);
+          this.claimStaffTile(staff, spot);
+          staff.setServeLabel('Bolsa llena');
+          const place = () => {
+            if (staff.jobToken !== tok) return;
+            staff.stopBob();
+            this.time.delayedCall(TRASH.placeBagMs, () => {
+              if (staff.jobToken !== tok) return;
+              this.clearCarry(staff);
+              placeFullBag(spot.col, spot.row);
+              this.refreshTrashVisuals();
+              this.showStatusFloat('Bolsa de basura llena', { x: staff.x, y: staff.y });
+              this.persistLayout();
+              release(600);
+            });
+          };
+          if (!staff.walkTo(spot, place)) place();
+          return;
+        }
+        this.persistLayout();
+        release(350);
+      });
+    };
+    if (!staff.walkTo(goal, act)) act();
+    this.emitStaffRoster();
+    return true;
+  }
+
+  /** Sacar basura: take the full bag, walk out of the club, ~20 s away, come back without it. */
+  private beginTakeOutTrash(staff: Bartender, asPlayer: boolean): boolean {
+    const fb = getFullBag();
+    if (!fb || fb.carriedBy) return false;
+    if (fb.claimedBy && fb.claimedBy !== staff.profile.id) return false;
+    const sid = staff.profile.id;
+    claimFullBag(sid);
+    const tok = staff.jobToken;
+    staff.aiJob = 'trash_out';
+    staff.playerCommanded = asPlayer;
+    staff.state = 'busy';
+    staff.setServeLabel('Sacando la basura');
+    const goal = this.tileNearForStaff(staff, fb);
+    this.claimStaffTile(staff, goal);
+    const fail = () => {
+      claimFullBag(null);
+      this.clearCarry(staff);
+      this.releaseStaffTileClaims(staff);
+      staff.clearAiJob();
+      staff.state = 'idle';
+      staff.startBob();
+      staff.aiNextThinkAt = this.time.now + 1500;
+      this.emitStaffRoster();
+    };
+    const take = () => {
+      if (staff.jobToken !== tok) return;
+      staff.stopBob();
+      staff.faceToward({ col: fb.col, row: fb.row });
+      this.time.delayedCall(TRASH.pickMs, () => {
+        if (staff.jobToken !== tok) return;
+        const cur = getFullBag();
+        if (!cur || cur.carriedBy) {
+          fail();
+          return;
+        }
+        carryFullBag(sid);
+        this.attachCarry(staff, 'bag_out', []);
+        this.refreshTrashVisuals();
+        staff.profile.energy = Math.max(0, staff.profile.energy - TRASH.takeOutEnergy);
+        staff.startBob();
+        const exit = { col: this.scenario.exitTile[0], row: this.scenario.exitTile[1] };
+        this.releaseStaffTileClaims(staff);
+        const out = () => {
+          if (staff.jobToken !== tok) return;
+          // Out of the club: the bag is gone; she is away (not available) for ~20 s.
+          bagLeftClub(sid);
+          this.clearCarry(staff);
+          this.refreshTrashVisuals();
+          staff.cancelWalk();
+          staff.stopBob();
+          staff.setVisible(false);
+          staff.clearServeLabel();
+          staff.state = 'busy';
+          const ms = this.randBetween(TRASH.takeOutAwayMs);
+          const timer = this.time.delayedCall(ms, () => this.trashOutReturn(staff));
+          this.staffAway.set(sid, timer);
+          this.trashOutLog.push({ staff: sid, outAt: Math.round(this.time.now), awayMs: Math.round(ms), backAt: null });
+          if (this.selectedNpcId === sid) {
+            this.deselectNpc();
+            this.game.events.emit('npc-deselected');
+          }
+          this.persistLayout();
+          this.emitStaffRoster();
+        };
+        if (!staff.walkTo(exit, out)) out();
+      });
+    };
+    if (!staff.walkTo(goal, take)) take();
+    this.emitStaffRoster();
+    return true;
+  }
+
+  private trashOutLog: Array<{ staff: string; outAt: number; awayMs: number; backAt: number | null }> = [];
+
+  /** Back inside without the bag: a new bag cycle begins (capacity rolled once). */
+  private trashOutReturn(staff: Bartender): void {
+    const sid = staff.profile.id;
+    this.staffAway.get(sid)?.remove(false);
+    this.staffAway.delete(sid);
+    bagCycleRestart(this.hasTrashContainer());
+    const log = [...this.trashOutLog].reverse().find((l) => l.staff === sid && l.backAt == null);
+    if (log) log.backAt = Math.round(this.time.now);
+    staff.clearAiJob();
+    staff.state = 'idle';
+    if (!this.staffPresent || !staff.active) return;
+    const exit = { col: this.scenario.exitTile[0], row: this.scenario.exitTile[1] };
+    staff.snapTo(exit);
+    staff.setVisible(true);
+    staff.setAlpha(1);
+    staff.startBob();
+    const inside = this.findFreeStaffGoal(staff, { col: exit.col, row: Math.max(0, exit.row - 2) });
+    if (inside) {
+      this.claimStaffTile(staff, inside);
+      staff.walkTo(inside, () => {
+        this.releaseStaffTileClaims(staff);
+        if (staff === this.bartender) this.syncBartenderBarDepth();
+      });
+    }
+    staff.aiNextThinkAt = this.time.now + 800;
+    this.showStatusFloat(`${staff.displayName} volvió`, { x: staff.x, y: staff.y });
+    this.persistLayout();
+    this.emitStaffRoster();
+    this.game.events.emit('stats-updated', this.getHudState());
+  }
+
+  /** Dormir: anyone still outside is done with the bag (new cycle); staff reappear with the shift. */
+  private finishTrashOutNow(): void {
+    for (const [sid, timer] of [...this.staffAway.entries()]) {
+      timer.remove(false);
+      this.staffAway.delete(sid);
+      bagCycleRestart(this.hasTrashContainer());
+      const s = this.findStaffById(sid);
+      if (s) {
+        s.clearAiJob();
+        s.state = 'idle';
+      }
+    }
+  }
+
+  /** Autonomous maintenance (#3): full bag out → carry goods to the bar → pick floor trash. */
+  private tryAutoLogistics(staff: Bartender): boolean {
+    if (staff.profile.energy < LOGISTICS_MIN_ENERGY) return false;
+    if (staff.profile.mood < LOGISTICS_LOW_MOOD && Math.random() < 0.5) return false;
+    const fb = getFullBag();
+    if (fb && !fb.claimedBy && !fb.carriedBy && this.staffAway.size === 0) {
+      if (this.beginTakeOutTrash(staff, false)) return true;
+    }
+    const load = this.pickHaulLoad(staff);
+    if (load && this.beginHaul(staff, load, false)) return true;
+    if (canPickUpTrash()) {
+      const t = listTrash()
+        .filter((x) => !x.claimedBy)
+        .sort((a, b) => this.cheb(a, staff.grid) - this.cheb(b, staff.grid))[0];
+      if (t && this.beginPickTrash(staff, t, false)) return true;
+    }
+    return false;
+  }
+
+  /** Local perception: only trash/bag near THIS customer; intensity = amount × proximity × exposure. */
+  private perceiveTrash(patron: Patron): void {
+    const { col, row } = patron.grid;
+    const P = TRASH_PERCEPTION;
+    let score = 0;
+    let items = 0;
+    for (const t of listTrash()) {
+      const d = this.cheb(t, patron.grid);
+      if (d > P.itemRadius) continue;
+      score += d <= 1 ? P.nearWeight : P.farWeight;
+      items++;
+    }
+    const fb = getFullBag();
+    let bagSeen = false;
+    if (fb && !fb.carriedBy) {
+      const d = Math.max(Math.abs(fb.col - col), Math.abs(fb.row - row));
+      if (d <= P.bagRadius) {
+        score += d <= 1 ? P.bagNearWeight : P.bagFarWeight;
+        bagSeen = true;
+      }
+    }
+    if (score <= 0) return;
+    let ex = this.patronTrashExposure.get(patron);
+    if (!ex) {
+      ex = { ms: 0, steps: 0 };
+      this.patronTrashExposure.set(patron, ex);
+    }
+    ex.ms += PERCEPTION_INTERVAL_MS;
+    if (items > 0) {
+      const first = -Math.min(P.firstCap, P.firstBase + P.firstPerWeight * score);
+      const d = applyPerceivedExperience(patron, 'trash_seen', first, 'cleanSens', `Basura cerca (${items})`);
+      if (d != null) this.patronThink(patron, score >= P.strongScore ? 'trash_dirty' : 'trash_seen');
+      P.exposureSteps.forEach((thr, i) => {
+        if (ex!.ms >= thr && ex!.steps <= i) {
+          ex!.steps = i + 1;
+          const extra = -Math.min(P.exposureCap, P.exposurePerWeight * score);
+          const dd = applyPerceivedExperience(patron, `trash_linger:${i + 1}`, extra, 'cleanSens', 'Sigue viendo basura');
+          if (dd != null && i === P.exposureSteps.length - 1) this.patronThink(patron, 'trash_dirty');
+        }
+      });
+    }
+    if (bagSeen) {
+      const d = applyPerceivedExperience(patron, 'trash_bag', P.bagDelta, 'cleanSens', 'Bolsa de basura a la vista');
+      if (d != null) this.patronThink(patron, 'trash_bag');
+    }
+  }
+
+  private trashNear(col: number, row: number, radius: number): boolean {
+    if (listTrash().some((t) => Math.max(Math.abs(t.col - col), Math.abs(t.row - row)) <= radius)) return true;
+    const fb = getFullBag();
+    return !!fb && !fb.carriedBy && Math.max(Math.abs(fb.col - col), Math.abs(fb.row - row)) <= radius + 1;
+  }
+
+  /** Right-click hit test for goods / trash / full bag (before furniture). */
+  private logisticsTargetAtPointer(p: Phaser.Input.Pointer): CtxTarget | null {
+    const w = this.cameras.main.getWorldPoint(p.x, p.y);
+    const hit = (img: Phaser.GameObjects.Image, pad: number) => {
+      const b = img.getBounds();
+      return w.x >= b.x - pad && w.x <= b.right + pad && w.y >= b.y - pad && w.y <= b.bottom + pad;
+    };
+    const fb = getFullBag();
+    if (fb && this.fullBagGfx && hit(this.fullBagGfx, 6)) return { kind: 'trash_bag', id: fb.id };
+    let best: { id: string; d: number } | null = null;
+    for (const [id, img] of this.goodsGfx) {
+      if (!hit(img, 4)) continue;
+      const d = Phaser.Math.Distance.Between(w.x, w.y, img.x, img.y - img.displayHeight / 2);
+      if (!best || d < best.d) best = { id, d };
+    }
+    if (best) return { kind: 'goods', id: best.id };
+    for (const [id, img] of this.trashGfx) {
+      if (hit(img, 7)) return { kind: 'trash', id };
+    }
+    return null;
+  }
+
+  private pkgName(g: GoodsItem): string {
+    const prod = this.productName(g.productId);
+    if (g.kind === 'crate') return `Caja de ${prod.toLowerCase()} (${g.units})`;
+    if (g.kind === 'sack') return `Costal de ${prod.toLowerCase()} (${g.units})`;
+    return `Botella de ${prod.toLowerCase()}`;
+  }
+
+  /** Context actions for logistics targets (only what this object allows right now). */
+  private buildLogisticsActions(
+    staff: Bartender,
+    target: CtxTarget
+  ): { title: string; subtitle: string; actions: CtxAction[] } | null {
+    const name = staff.displayName;
+    const actions: CtxAction[] = [];
+    const add = (id: string, label: string, enabled = true, hint?: string) => actions.push({ id, label, enabled, hint });
+    if (target.kind === 'goods') {
+      const g = getGoods(target.id);
+      if (!g || g.carriedBy) return null;
+      const bar = this.storageBarDef();
+      const busy = g.claimedBy && g.claimedBy !== staff.profile.id ? this.findStaffById(g.claimedBy) : null;
+      const pair = g.kind === 'bottle' ? this.pickHaulLoad(staff, g) : null;
+      const label = pair && pair.length === 2 ? 'Llevar 2 botellas a la barra' : 'Llevar a la barra';
+      add(`haul:${g.id}`, label, !!bar && !(busy && busy.playerCommanded), !bar ? 'No hay barra' : busy && busy.playerCommanded ? `${busy.displayName} ya lo lleva` : undefined);
+      return {
+        title: `${name} → ${this.pkgName(g)}`,
+        subtitle: `En la entrada: ${describePackages(goodsOnFloor())}`,
+        actions,
+      };
+    }
+    if (target.kind === 'trash') {
+      const t = getTrash(target.id);
+      if (!t) return null;
+      const bag = getTrashBag();
+      const why = pickupBlockedReason();
+      add(`pick_trash:${t.id}`, 'Limpiar basura', !why, why ?? undefined);
+      return {
+        title: `${name} → ${TRASH_NAMES[t.kind] ?? 'Basura'}`,
+        subtitle: bag ? `Bolsa de basura: ${bag.count}/${bag.capacity}${getFullBag() ? ' · hay una bolsa llena' : ''}` : 'Basura en el piso',
+        actions,
+      };
+    }
+    if (target.kind === 'trash_bag') {
+      const fb = getFullBag();
+      if (!fb) return null;
+      const other = fb.claimedBy && fb.claimedBy !== staff.profile.id ? this.findStaffById(fb.claimedBy) : null;
+      add('take_out_trash', 'Sacar basura', !fb.carriedBy && !(other && other.playerCommanded), other && other.playerCommanded ? `${other.displayName} ya va` : undefined);
+      return { title: `${name} → Bolsa de basura llena`, subtitle: 'Bloquea la recolección hasta sacarla', actions };
+    }
+    return null;
+  }
+
+  /** Player order verbs for logistics (called from executeOrder after validation/interrupt). */
+  private executeLogisticsOrder(staff: Bartender, verb: string, arg: string | undefined): boolean {
+    if (verb === 'haul') {
+      const g = arg ? getGoods(arg) : undefined;
+      if (!g || g.carriedBy) return false;
+      const load = this.pickHaulLoad(staff, g) ?? [g];
+      return this.beginHaul(staff, load, true);
+    }
+    if (verb === 'pick_trash') {
+      const t = arg ? getTrash(arg) : undefined;
+      if (!t) return false;
+      return this.beginPickTrash(staff, t, true);
+    }
+    if (verb === 'take_out_trash') return this.beginTakeOutTrash(staff, true);
+    return false;
+  }
+
+  /** A player order outranks someone else's AUTONOMOUS claim on the same object. */
+  private takeOverLogisticsClaim(staff: Bartender, target: CtxTarget, verb: string, arg: string | undefined): boolean {
+    let claimant: string | null = null;
+    if (verb === 'haul' && arg) claimant = getGoods(arg)?.claimedBy ?? null;
+    if (verb === 'pick_trash' && arg) claimant = getTrash(arg)?.claimedBy ?? null;
+    if (verb === 'take_out_trash') claimant = getFullBag()?.claimedBy ?? null;
+    void target;
+    if (!claimant || claimant === staff.profile.id) return true;
+    const other = this.findStaffById(claimant);
+    if (other && other.playerCommanded) {
+      this.uiToast(`${other.displayName} ya se está encargando.`);
+      return false;
+    }
+    if (other) this.interruptStaff(other);
+    return true;
+  }
+
+  // ── Debug / test hooks (logistics) ──
+
+  getLogisticsDebug() {
+    const carrying: Record<string, { kind: string; goods: Array<{ id: string; kind: string; productId: string; units: number }> }> = {};
+    for (const [sid, c] of this.carry) {
+      carrying[sid] = {
+        kind: c.kind,
+        goods: c.goodsIds.map((id) => getGoods(id)).filter((g): g is GoodsItem => !!g).map((g) => ({ id: g.id, kind: g.kind, productId: g.productId, units: g.units })),
+      };
+    }
+    return {
+      deliveries: getDeliveriesDebug(),
+      trash: getTrashDebug(),
+      carrying,
+      carryLog: [...this.carryLog],
+      away: [...this.staffAway.keys()],
+      trashOutLog: [...this.trashOutLog],
+      suppliers: this.supplierVisits.map((v) => ({ order: v.order.id, dropped: v.dropped, sprite: !!v.sprite && v.sprite.active })),
+      hasContainer: this.hasTrashContainer(),
+      goodsVisuals: this.goodsGfx.size,
+      trashVisuals: this.trashGfx.size,
+      fullBagVisual: !!this.fullBagGfx,
+      staff: this.allStaff().map((s) => ({ id: s.profile.id, aiJob: s.aiJob, state: s.state, visible: s.visible, energy: Math.round(s.profile.energy * 10) / 10, col: s.grid.col, row: s.grid.row, speed: s.moveSpeed })),
+    };
+  }
+
+  debugSpawnTrash(col: number, row: number, kind: TrashKind = 'envoltura'): string {
+    return this.spawnTrashAt(col, row, kind, 'debug').id;
+  }
+
+  /** Test: simulate n consumption rolls (no delay) → counts of floor / container / none. */
+  debugRollTrash(productId: string, n: number): { floor: number; container: number; none: number } {
+    const out = { floor: 0, container: 0, none: 0 };
+    const hasC = this.hasTrashContainer();
+    for (let i = 0; i < n; i++) {
+      const r = rollTrashFor(productId, hasC);
+      if (!r) out.none++;
+      else out[r.dest]++;
+    }
+    return out;
+  }
+
+  debugConsumptionTrash(patronIndex: number, productId: string): void {
+    const p = this.patrons.filter((x) => x.active)[patronIndex];
+    if (p) this.noteConsumptionTrash(p, productId);
+  }
+
+  debugIsValidCarry(kinds: PackageKind[]): boolean {
+    return isValidCarryLoad(kinds.map((k) => ({ kind: k })));
+  }
+
+  /** Test: try to start a trip with an explicit set of goods ids (validates the carry rule). */
+  debugHaul(staffId: string, goodsIds: string[]): boolean {
+    const s = this.findStaffById(staffId);
+    if (!s) return false;
+    const load = goodsIds.map((id) => getGoods(id)).filter((g): g is GoodsItem => !!g);
+    if (load.length !== goodsIds.length) return false;
+    this.interruptStaff(s);
+    return this.beginHaul(s, load, true);
+  }
+
+  /** Test: put every in-transit order due now (only while the clock ticks). */
+  debugDeliverNow(): number {
+    let n = 0;
+    for (const o of listOrders()) {
+      if (o.status === 'in_transit' && o.dueAbs != null) {
+        o.dueAbs = getAbsMinute();
+        n++;
+      }
+    }
+    this.tickDeliveriesMinutes(1);
+    return n;
+  }
+
+  debugPatronExperience(patronIndex: number) {
+    const p = this.patrons.filter((x) => x.active)[patronIndex];
+    if (!p) return null;
+    const e = getExperience(p);
+    return e ? { name: p.profile.name, col: p.grid.col, row: p.grid.row, satisfaction: e.satisfaction, events: e.events.map((x) => ({ key: x.key, delta: x.delta })) } : null;
   }
 
   // ─── Debug / test hooks ───────────────────────────────────────────────────────────────
