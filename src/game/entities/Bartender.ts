@@ -72,6 +72,20 @@ export class Bartender extends Character {
   private ring?: Phaser.GameObjects.Ellipse;
   private serveLabel?: Phaser.GameObjects.Text;
 
+  /** Staff never stand or path outside the floor diamond (defensive clamp onto the grid). */
+  override snapTo(grid: GridPos): void {
+    super.snapTo(this.pathfinder ? this.pathfinder.clampToGrid(grid) : grid);
+  }
+
+  override walkTo(target: GridPos, onArrive?: () => void): boolean {
+    if (this.pathfinder) {
+      const here = this.pathfinder.clampToGrid(this.grid);
+      if (here.col !== this.grid.col || here.row !== this.grid.row) super.snapTo(here);
+      return super.walkTo(this.pathfinder.clampToGrid(target), onArrive);
+    }
+    return super.walkTo(target, onArrive);
+  }
+
   constructor(
     scene: Phaser.Scene,
     texture: string,

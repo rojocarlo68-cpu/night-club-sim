@@ -431,6 +431,8 @@ import {
   orderCost,
   createOrder,
   estimateDeliveryText,
+  quoteStillValid,
+  type DeliveryQuote,
   tickDeliveryMinutes,
   deferUndeliveredToNextDay,
   scheduleOrdersAfterOpen,
@@ -596,6 +598,12 @@ interface LiveSnapshot {
     staffShiftStartAt: number;
     repairSeq: number;
     lastSummaryPayload: Record<string, unknown> | null;
+    /** Added after save v1 shipped — optional; old saves load with defaults. */
+    moneyAtNightOpen?: number | null;
+    nightDrinkPay?: number;
+    nightSnackPay?: number;
+    nightSeatPay?: number;
+    lastEndedNight?: number;
   };
   floorDirt: ReturnType<typeof serializeFloorDirt>;
   inventory: unknown;
@@ -815,6 +823,13 @@ export class ClubScene extends Phaser.Scene {
   money = 0;
   nightEarned = 0;
   servedCount = 0;
+  /** Night ledger (summary only): club cash when the night opened + what customers paid, by kind. */
+  private moneyAtNightOpen: number | null = null;
+  private nightDrinkPay = 0;
+  private nightSnackPay = 0;
+  private nightSeatPay = 0;
+  /** Night that the current summary is about (nightNumber is already bumped by onNightEnd). */
+  private lastEndedNight = 0;
   phase: NightPhase = 'prep';
   /** @deprecated B7 — no longer auto-closes; kept 0 for HUD compat. */
   nightTimer = 0;
@@ -2324,6 +2339,7 @@ export class ClubScene extends Phaser.Scene {
     this.applyClubLighting('open', true);
     this.nightEarned = 0;
     this.servedCount = 0;
+    this.resetNightLedger();
     resetNightTips();
     resetNightInventory();
     resetNightAccumulators();
@@ -2362,13 +2378,14 @@ export class ClubScene extends Phaser.Scene {
     this.patrons = [];
     // Keep Luna/Nova where they are on the floor (free staff).
     this.syncBartenderBarDepth();
-    this.bartender.state = 'idle';
-    this.bartender.profile.energy = Math.min(100, this.bartender.profile.energy + 25);
-    this.bartender.startBob();
-    for (const s of this.extraStaff) {
+    // Overnight recovery applies to every employee (was Luna only).
+    for (const s of this.allStaff()) {
       s.state = 'idle';
+      s.profile.energy = Math.min(100, s.profile.energy + 25);
       s.startBob();
     }
+    // "Propinas de hoy" is per jornada: a new day starts at 0 (wallets / lifetime tips untouched).
+    resetNightTips();
   }
 
   /**
@@ -2713,6 +2730,7 @@ export class ClubScene extends Phaser.Scene {
     if (!inventoryRecordSale('botanas')) return sitMs;
     this.money += price;
     this.nightEarned += price;
+    this.nightSnackPay += price;
     patron.ateSnack = true;
     this.noteConsumptionTrash(patron, 'botanas');
     applyPerceivedExperience(
@@ -2742,6 +2760,7 @@ export class ClubScene extends Phaser.Scene {
     );
     this.money += earned;
     this.nightEarned += earned;
+    this.nightSeatPay += earned;
     this.servedCount++;
     patron.showBubble(`+$${earned}`);
     this.persistLayout();
@@ -3072,7 +3091,7 @@ export class ClubScene extends Phaser.Scene {
     tipAction: TipAction | null = null,
     staffMood?: number,
     staffId?: string
-  ): { earned: number; tipped: boolean; tipAmount: number } {
+  ): { earned: number; drinkPay: number; tipped: boolean; tipAmount: number } {
     const q = this.qualityNearPatron(patron);
     const payMult = lerp(AI_TUNABLES.payQualityMin, AI_TUNABLES.payQualityMax, q);
     let tipChance = patron.profile.tipChance * (0.55 + 0.9 * q);
@@ -3196,7 +3215,7 @@ export class ClubScene extends Phaser.Scene {
       tipAmount,
       tipped,
     });
-    return { earned: drinkPay + tipAmount, tipped, tipAmount };
+    return { earned: drinkPay + tipAmount, drinkPay, tipped, tipAmount };
   }
 
   // ─── Patron seats / queues / venue quality ───────────────────────────
@@ -3615,7 +3634,14 @@ export class ClubScene extends Phaser.Scene {
     if (!targetId) return;
     const npc = this.findStaffById(targetId);
     if (!npc) return;
-    if (npc.state === 'walking' || npc.state === 'busy' || npc.state === 'resting') return;
+    if (npc.state === 'resting' || npc.aiJob === 'rest') return;
+    if (this.staffAway.has(npc.profile.id)) return;
+    if (npc.state === 'walking' || npc.state === 'busy') {
+      // Another player order keeps running; an autonomous job (sweeping, hauling…) yields to Descansar
+      // instead of silently ignoring the button while she keeps spending energy.
+      if (npc.playerCommanded) return;
+      this.interruptStaff(npc);
+    }
     this.selectNpcStaff(npc.profile.id);
     this.beginStaffRest(npc, true);
   };
@@ -4039,6 +4065,81 @@ export class ClubScene extends Phaser.Scene {
     }
   }
 
+  /** Start-of-night ledger so the summary reconciles with the real change in club cash. */
+  private resetNightLedger(): void {
+    this.moneyAtNightOpen = this.money;
+    this.nightDrinkPay = 0;
+    this.nightSnackPay = 0;
+    this.nightSeatPay = 0;
+  }
+
+  /**
+   * Night-summary money block. Every line is a real club-cash movement since the night opened;
+   * "Otros movimientos" is whatever else touched the cash (orders, purchases, repairs, hires,
+   * refunds), so the lines always add up to the balance (= money now − money at opening).
+   */
+  private buildNightLedger(
+    staffUnits: number,
+    staffRevenue: number,
+    payrollTotal: number,
+    utilitiesTotal: number,
+    payrollDetail: string[] = [],
+    utilitiesDetail: string[] = []
+  ): Record<string, unknown> {
+    const r = (n: number) => Math.round(n);
+    const sales = r(this.nightEarned);
+    const staffIn = r(staffRevenue);
+    const tips = this.allStaff().reduce((a, st) => a + getTips(st.profile.id).tipsNight, 0);
+    const opening = this.moneyAtNightOpen;
+    const delta = opening == null ? null : r(this.money - opening);
+    const other = delta == null ? null : delta - sales - staffIn + r(payrollTotal) + r(utilitiesTotal);
+    const sgn = (n: number) => (n < 0 ? `-$${Math.abs(n)}` : `+$${n}`);
+    const lines: string[] = [];
+    lines.push(`Ganado esta noche (ventas a clientes): ${sgn(sales)}`);
+    const parts: string[] = [];
+    if (this.nightDrinkPay > 0) parts.push(`bebidas $${r(this.nightDrinkPay)}`);
+    if (this.nightSnackPay > 0) parts.push(`botanas $${r(this.nightSnackPay)}`);
+    if (this.nightSeatPay > 0) parts.push(`uso de asientos sin bebida $${r(this.nightSeatPay)}`);
+    if (this.nightSnackPay > 0 || this.nightSeatPay > 0) lines.push(`  (${parts.join(' · ')})`);
+    if (staffUnits > 0 || staffIn > 0) {
+      lines.push(`Consumo del personal: ${staffUnits} (${sgn(staffIn)} a la caja, pagado de sus propinas)`);
+    }
+    if (tips > 0) lines.push(`Propinas del personal: $${tips} (son de ellas, no entran a la caja)`);
+    if (payrollTotal > 0) {
+      lines.push(`Sueldos semanales: -$${r(payrollTotal)}`);
+      for (const d of payrollDetail) lines.push(`  ${d}`);
+    }
+    if (utilitiesTotal > 0) {
+      lines.push(`Servicios del mes: -$${r(utilitiesTotal)}`);
+      for (const d of utilitiesDetail) lines.push(`  ${d}`);
+    }
+    if (other != null && other !== 0) {
+      lines.push(
+        other < 0
+          ? `Otros gastos de la noche (pedidos, compras, reparaciones): -$${Math.abs(other)}`
+          : `Otros ingresos de la noche (ventas de muebles, etc.): +$${other}`
+      );
+    }
+    if (delta != null && opening != null) {
+      lines.push(`Balance de la noche: ${sgn(delta)} (de $${r(opening)} a $${r(this.money)})`);
+    }
+    return {
+      lines,
+      sales,
+      drinks: r(this.nightDrinkPay),
+      snacks: r(this.nightSnackPay),
+      seats: r(this.nightSeatPay),
+      staffConsumption: staffIn,
+      tips,
+      payroll: r(payrollTotal),
+      utilities: r(utilitiesTotal),
+      other,
+      opening: opening == null ? null : r(opening),
+      closing: r(this.money),
+      delta,
+    };
+  }
+
   private finishNight(): void {
     // Day-start floor seed: remember if this night had activity.
     this.lastNightUsed = this.servedCount > 0 || this.nightEarned > 0 || this.patrons.length > 0;
@@ -4096,7 +4197,7 @@ export class ClubScene extends Phaser.Scene {
     const staffUnits = Object.values(staffUse.units).reduce((a, b) => a + b, 0);
     const interventionLines: string[] = [];
     if (wasteUnits > 0) interventionLines.push(`Merma: ${wasteUnits} (costo $${Math.round(waste.cost)})`);
-    if (staffUnits > 0) interventionLines.push(`Consumo del personal: ${staffUnits} ($${Math.round(staffUse.revenue)})`);
+    // Staff consumption is listed in the money block (ledger) with its sign, not here.
     {
       const atDoor = goodsOnFloor();
       if (atDoor.length) interventionLines.push(`Mercancía en la entrada: ${describePackages(atDoor)}`);
@@ -4105,8 +4206,12 @@ export class ClubScene extends Phaser.Scene {
     }
     this.syncBartenderBarDepth();
     // Phase 7: roll-up + weekly/monthly hooks, then bump nightNumber.
-    // Tips night/jornada stay visible for the summary; resetNightTips runs on openNight.
+    // Tips night/jornada stay visible for the summary; resetNightTips runs on Dormir (new day) and openNight.
+    // Top-bar "Noche N cerrada" must name the night that just ended, even for HUD updates
+    // emitted after onNightEnd has bumped nightNumber.
+    this.lastEndedNight = Math.max(1, Math.floor(this.nightNumber) || 1);
     const endedNight = onNightEnd(this);
+    this.lastEndedNight = endedNight;
     syncShiftDay(this.nightNumber); // post night-end bump
     // Prompt A Phase 10: snapshot sales/tips/leaves/sat BEFORE openNight resets soldTonight.
     const oc = getShiftOpenCloseTimes();
@@ -4149,9 +4254,19 @@ export class ClubScene extends Phaser.Scene {
     this.persistLayout();
     const payroll = takeLastPayroll();
     const utilities = takeLastUtilities();
+    const ledger = this.buildNightLedger(
+      staffUnits,
+      staffUse.revenue,
+      payroll?.total ?? 0,
+      utilities?.total ?? 0,
+      payroll ? payroll.lines.map((l) => `${l.name}: $${l.amount}`) : [],
+      utilities ? utilities.lines.map((l) => `${l.label}: $${l.amount}`) : []
+    );
     this.emitNightSummary({
       ...this.getHudState(),
       nightNumber: endedNight,
+      closedNightNumber: endedNight,
+      ledger,
       nightEarned: this.nightEarned,
       servedCount: this.servedCount,
       payroll: payroll
@@ -4185,7 +4300,8 @@ export class ClubScene extends Phaser.Scene {
         stockedOutNames: nightStats.stockedOutNames,
         servedCount: nightStats.servedCount,
         summaryLines: [
-          NIGHT_SUMMARY_LINES.drinks(nightStats.drinksSoldTotal, nightStats.drinksRevenueTotal),
+          // Amount actually charged (price × service quality), same figure as the money block.
+          NIGHT_SUMMARY_LINES.drinks(nightStats.drinksSoldTotal, this.nightDrinkPay),
           NIGHT_SUMMARY_LINES.stockout(nightStats.stockedOutNames),
           NIGHT_SUMMARY_LINES.served(nightStats.servedCount),
           ...interventionLines,
@@ -4419,6 +4535,7 @@ export class ClubScene extends Phaser.Scene {
     this.applyClubLighting('open', true);
     this.nightEarned = 0;
     this.servedCount = 0;
+    this.resetNightLedger();
     resetNightTips();
     resetNightInventory();
     resetNightAccumulators();
@@ -4548,6 +4665,9 @@ export class ClubScene extends Phaser.Scene {
       nightTimer: 0, // B7: no countdown
       isClosing: getShiftState() === 'closing',
       nightNumber: this.nightNumber,
+      /** SUMMARY only: the night that was just closed (nightNumber already points at the next one). */
+      closedNightNumber:
+        shift.shiftState === 'summary' ? this.lastEndedNight || Math.max(1, this.nightNumber - 1) : undefined,
       shiftState: shift.shiftState,
       currentDay: shift.currentDay,
       gameHour: shift.gameHour,
@@ -4565,6 +4685,8 @@ export class ClubScene extends Phaser.Scene {
           }
         : null,
       selectedNpc: this.getSelectedNpcInfo(),
+      /** Fresh card for every employee: the staff window never falls back to Luna's / cached data. */
+      staffCards: this.allStaff().map((st) => this.staffNpcInfo(st)),
       nightEarned: this.nightEarned,
       servedCount: this.servedCount,
       buildMode: this.buildMode,
@@ -4903,12 +5025,14 @@ export class ClubScene extends Phaser.Scene {
         moodAtServe,
         staff.profile.id
       );
-      this.money += payout.earned;
-      this.nightEarned += payout.earned;
+      // Tips belong to the employee (config/salaries.ts): the club only keeps the drink price.
+      this.money += payout.drinkPay;
+      this.nightEarned += payout.drinkPay;
+      this.nightDrinkPay += payout.drinkPay;
       this.servedCount++;
       if (payout.tipAmount > 0) {
         recordTip(staff.profile.id, payout.tipAmount);
-        // Tips are the employee's own money (club payout unchanged).
+        // Tips are the employee's own money (credited to the wallet only, never to club cash).
         creditWallet(staff.profile.id, payout.tipAmount);
         noteTip(staff.profile.id, payout.tipAmount);
       }
@@ -4925,7 +5049,7 @@ export class ClubScene extends Phaser.Scene {
       if (patron.servedAtBeerTap && patron.beerServicePref === 'tap') this.patronThink(patron, 'tap_great');
       this.flushPendingPriceThought(patron, payout.tipped);
       this.noteServiceWear(patron);
-      patron.showBubble(payout.tipped ? `¡Propina! +$${payout.earned}` : `+$${payout.earned}`);
+      patron.showBubble(payout.tipped ? `+$${payout.drinkPay} · ¡Propina $${payout.tipAmount}!` : `+$${payout.drinkPay}`);
       patron.served = true;
       patron.waitSince = 0;
       patron.waiting = false;
@@ -5457,6 +5581,13 @@ export class ClubScene extends Phaser.Scene {
         continue;
       }
 
+      // Tired staff rest BEFORE taking maintenance: each job costs 4–10 energy, so working first
+      // kept draining a tired employee (~33% → ~17%) in between short rests.
+      if (staff.profile.energy < AI_TUNABLES.restEnergyThreshold) {
+        this.beginStaffRest(staff, false);
+        continue;
+      }
+
       // 0) Logistics (maintenance #3): full trash bag out, packages to the bar, floor trash.
       if (this.tryAutoLogistics(staff)) continue;
 
@@ -5862,6 +5993,48 @@ export class ClubScene extends Phaser.Scene {
     this.shopImages.set(def.id, img);
   }
 
+  /**
+   * True when a piece standing at (col,row) would be mostly hidden behind furniture drawn in
+   * front of it (higher depth) — e.g. a small bin right behind the sofa.
+   */
+  private shopTileOccluded(def: FurnitureDef, img: Phaser.GameObjects.Image, col: number, row: number): boolean {
+    const pos = this.furnitureWorldPos(def.type, col, row, def);
+    const w = img.displayWidth;
+    const h = img.displayHeight;
+    const x0 = pos.x - w * img.originX;
+    const y0 = pos.y - h * img.originY;
+    const area = Math.max(1, w * h);
+    const depth = depthForFurniture(col, row, def.footprint);
+    for (const other of this.scenario.furniture) {
+      if (other.id === def.id) continue;
+      const o = this.shopImages.get(other.id);
+      if (!o || !o.visible || o.depth <= depth) continue;
+      // Bounds at the other piece's own tile (its image is already there).
+      const b = o.getBounds();
+      const ix = Math.max(0, Math.min(x0 + w, b.right) - Math.max(x0, b.left));
+      const iy = Math.max(0, Math.min(y0 + h, b.bottom) - Math.max(y0, b.top));
+      if ((ix * iy) / area > 0.35) return true;
+    }
+    return false;
+  }
+
+  /** Nearest valid tile (from `start`) where a just-bought piece is actually visible. */
+  private findVisibleShopTile(def: FurnitureDef, img: Phaser.GameObjects.Image, start: [number, number]): [number, number] | null {
+    const { cols, rows } = this.scenario.map;
+    const [sc, sr] = start;
+    for (let rad = 0; rad < Math.max(cols, rows); rad++) {
+      for (let dc = -rad; dc <= rad; dc++) {
+        for (let dr = -rad; dr <= rad; dr++) {
+          if (rad > 0 && Math.max(Math.abs(dc), Math.abs(dr)) !== rad) continue;
+          const c = sc + dc;
+          const r = sr + dr;
+          if (this.poseAllowed(def, c, r) && !this.shopTileOccluded(def, img, c, r)) return [c, r];
+        }
+      }
+    }
+    return null;
+  }
+
   private findFreeShopTile(def: FurnitureDef): [number, number] | null {
     const found = this.findNearestValidTile(def);
     if (found) return found;
@@ -5921,6 +6094,17 @@ export class ClubScene extends Phaser.Scene {
     this.money -= cat.price;
     this.scenario.furniture.push(def);
     this.spawnShopFurnitureVisual(def);
+    {
+      // A bought piece hidden behind another one (bin behind the sofa) looked like it never arrived.
+      const img = this.shopImages.get(def.id);
+      if (img && this.shopTileOccluded(def, img, tile[0], tile[1])) {
+        const vis = this.findVisibleShopTile(def, img, tile);
+        if (vis) {
+          def.tile = vis;
+          this.repositionFurnitureVisual(def.id);
+        }
+      }
+    }
     this.rebuildPathfinder();
     this.persistLayout();
     this.syncFurnitureInteractive();
@@ -6380,8 +6564,16 @@ export class ClubScene extends Phaser.Scene {
       this.uiToast('El personal todavía no llega.');
       return;
     }
+    // Anchor the menu at THIS piece on screen (was the screen centre → looked like another piece's menu).
     const cam = this.cameras.main;
-    this.openContextMenu(staff, { kind: 'furniture', id: payload.furnitureId }, cam.width / 2, cam.height / 2);
+    const img = this.getFurnitureImage(payload.furnitureId);
+    let sx = cam.width / 2;
+    let sy = cam.height / 2;
+    if (img) {
+      sx = cam.x + (img.x - cam.worldView.x) * cam.zoom;
+      sy = cam.y + (img.y - cam.worldView.y) * cam.zoom;
+    }
+    this.openContextMenu(staff, { kind: 'furniture', id: payload.furnitureId }, sx, sy);
   };
 
   private onCmdContextMenuStaff = (payload: { staffId: string }): void => {
@@ -7011,8 +7203,10 @@ export class ClubScene extends Phaser.Scene {
     this.patronThink(patron, state === 'fresh' ? 'ready_beer' : 'stale_beer');
     const pourer = this.findStaffById(item.pouredBy);
     const payout = this.computeServePayout(patron, drink, null, pourer?.profile.mood, pourer?.profile.id);
-    this.money += payout.earned;
-    this.nightEarned += payout.earned;
+    // Club keeps the drink price only; the tip goes to the pourer's wallet.
+    this.money += payout.drinkPay;
+    this.nightEarned += payout.drinkPay;
+    this.nightDrinkPay += payout.drinkPay;
     this.servedCount++;
     if (payout.tipAmount > 0 && pourer) {
       recordTip(pourer.profile.id, payout.tipAmount);
@@ -7022,7 +7216,7 @@ export class ClubScene extends Phaser.Scene {
     if (patron.servedAtBeerTap && patron.beerServicePref === 'tap') this.patronThink(patron, 'tap_great');
     this.flushPendingPriceThought(patron, payout.tipped);
     this.noteServiceWear(patron);
-    patron.showBubble(payout.tipped ? `¡Propina! +$${payout.earned}` : `+$${payout.earned}`);
+    patron.showBubble(payout.tipped ? `+$${payout.drinkPay} · ¡Propina $${payout.tipAmount}!` : `+$${payout.drinkPay}`);
     patron.served = true;
     patron.waiting = false;
     patron.waitSince = 0;
@@ -7063,6 +7257,7 @@ export class ClubScene extends Phaser.Scene {
     inventoryRecordPrepoured('botanas');
     this.money += price;
     this.nightEarned += price;
+    this.nightSnackPay += price;
     patron.ateSnack = true;
     this.noteConsumptionTrash(patron, 'botanas');
     applyPerceivedExperience(patron, `snack:botanas:${patron.profile.id}`, SNACK_EXPERIENCE.satDelta, 'comfortSens', 'Botanas en la mesa');
@@ -8027,14 +8222,14 @@ export class ClubScene extends Phaser.Scene {
 
   // ── Orders ──
 
-  private onCmdPlaceOrder = (payload: { lines?: Array<{ id?: string; productId?: string; units?: number }> }): void => {
+  private onCmdPlaceOrder = (payload: { lines?: Array<{ id?: string; productId?: string; units?: number }>; quote?: DeliveryQuote | null }): void => {
     const lines = (payload?.lines ?? []).map((l) => ({ productId: String(l.productId ?? l.id ?? ''), units: Number(l.units) || 0 }));
-    const res = this.placeOrder(lines);
+    const res = this.placeOrder(lines, payload?.quote ?? null);
     this.game.events.emit('order-result', res);
   };
 
   /** Player confirmed an order: check funds, pay ONCE, create the pending order. */
-  placeOrder(lines: OrderLine[]): { ok: boolean; reason?: string; message?: string; orderId?: string; cost?: number; eta?: string } {
+  placeOrder(lines: OrderLine[], quote: DeliveryQuote | null = null): { ok: boolean; reason?: string; message?: string; orderId?: string; cost?: number; eta?: string } {
     const clean = lines
       .filter((l) => l && inventoryProductExists(l.productId))
       .map((l) => ({ productId: l.productId, units: normalizeOrderUnits(l.productId, l.units) }))
@@ -8050,13 +8245,16 @@ export class ClubScene extends Phaser.Scene {
     }
     this.deductClubMoney(cost); // paid ONCE, here; the delivery never charges again
     const snap = getShiftSnapshot();
+    // Reuse the window shown in the confirm dialog (computed once when it opened) when still valid.
+    const q = quoteStillValid(quote, getShiftState(), snap.currentDay, snap.gameHour) ? quote : null;
     const order = createOrder(clean, {
       state: getShiftState(),
       day: snap.currentDay,
       clock: formatGameClock(snap.gameHour, snap.gameMinute),
       hour: snap.gameHour,
+      quoteAbs: q && q.sameNight ? q.abs : undefined,
     });
-    const eta = estimateDeliveryText(getShiftState(), snap.gameHour, snap.gameMinute);
+    const eta = q ? q.text : estimateDeliveryText(getShiftState(), snap.gameHour, snap.gameMinute);
     this.persistLayout();
     this.uiToast(`Pedido confirmado (−$${cost}). ${eta}`);
     this.game.events.emit('stats-updated', this.getHudState());
@@ -9272,6 +9470,11 @@ export class ClubScene extends Phaser.Scene {
         staffShiftStartAt: this.staffShiftStartAt,
         repairSeq: this.repairSeq,
         lastSummaryPayload: getShiftState() === 'summary' ? this.lastSummaryPayload : null,
+        moneyAtNightOpen: this.moneyAtNightOpen,
+        nightDrinkPay: this.nightDrinkPay,
+        nightSnackPay: this.nightSnackPay,
+        nightSeatPay: this.nightSeatPay,
+        lastEndedNight: this.lastEndedNight,
       },
       floorDirt: serializeFloorDirt(),
       inventory: exportInventoryLive(),
@@ -9378,6 +9581,15 @@ export class ClubScene extends Phaser.Scene {
     this.staffShiftStartAt = num(c.staffShiftStartAt, 0);
     this.repairSeq = num(c.repairSeq, this.repairSeq);
     this.lastSummaryPayload = c.lastSummaryPayload && typeof c.lastSummaryPayload === 'object' ? c.lastSummaryPayload : null;
+    // Save v1 has no ledger fields: unknown opening cash → the summary just omits the balance line.
+    this.moneyAtNightOpen = typeof c.moneyAtNightOpen === 'number' && Number.isFinite(c.moneyAtNightOpen) ? c.moneyAtNightOpen : null;
+    this.nightDrinkPay = num(c.nightDrinkPay, 0);
+    this.nightSnackPay = num(c.nightSnackPay, 0);
+    this.nightSeatPay = num(c.nightSeatPay, 0);
+    {
+      const sp = this.lastSummaryPayload as { nightNumber?: unknown } | null;
+      this.lastEndedNight = num(c.lastEndedNight, typeof sp?.nightNumber === 'number' ? sp.nightNumber : Math.max(0, this.nightNumber - 1));
+    }
     this.nightTimer = st === 'open' || st === 'closing' ? Number.POSITIVE_INFINITY : 0;
 
     loadFloorDirt(live.floorDirt);
@@ -9586,7 +9798,9 @@ export class ClubScene extends Phaser.Scene {
     else if (st === 'closing') this.game.events.emit('night-closing', this.getHudState());
     else if (st === 'summary') {
       const base = this.lastSummaryPayload ?? { nightNumber: Math.max(1, this.nightNumber - 1), nightEarned: this.nightEarned, servedCount: this.servedCount };
-      this.emitNightSummary({ ...this.getHudState(), ...base, phase: 'summary', money: this.money });
+      const hud = this.getHudState();
+      // Saved payload may carry old HUD fields: keep live staff cards / closed-night number.
+      this.emitNightSummary({ ...hud, ...base, phase: 'summary', money: this.money, staffCards: hud.staffCards, closedNightNumber: hud.closedNightNumber });
     }
     for (const job of this.repairJobs) {
       if (job.stage !== 'verdict') continue;

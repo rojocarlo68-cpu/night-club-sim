@@ -1,6 +1,6 @@
 /**
  * Per-staff tip ledger (Phase 1 of tips / economy).
- * Tips belong to the employee; club money still receives the full serve payout as before.
+ * Tips belong to the employee; the club only receives the drink price (tips go to the wallet).
  */
 
 export interface StaffTips {
@@ -44,7 +44,7 @@ export function getTips(staffId: string): StaffTips {
   return t ? { ...t } : empty();
 }
 
-/** Reset night + day counters for every staff (call when opening a night). */
+/** Reset night + day counters for every staff (called when opening a night and on Dormir / new day). */
 export function resetNightTips(): void {
   for (const id of Object.keys(byStaff)) {
     byStaff[id].tipsNight = 0;

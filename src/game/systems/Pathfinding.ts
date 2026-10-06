@@ -20,6 +20,16 @@ export class Pathfinder {
     private blocked: Set<string>
   ) {}
 
+  /** Clamp a grid position onto the floor grid (in-bounds tiles never move). */
+  clampToGrid(p: GridPos): GridPos {
+    const c = Number.isFinite(p.col) ? Math.round(p.col) : 0;
+    const r = Number.isFinite(p.row) ? Math.round(p.row) : 0;
+    return {
+      col: Math.max(0, Math.min(this.cols - 1, c)),
+      row: Math.max(0, Math.min(this.rows - 1, r)),
+    };
+  }
+
   isWalkable(col: number, row: number): boolean {
     if (col < 0 || row < 0 || col >= this.cols || row >= this.rows) return false;
     return !this.blocked.has(key(col, row));

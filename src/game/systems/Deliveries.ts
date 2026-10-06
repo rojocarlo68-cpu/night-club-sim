@@ -195,6 +195,44 @@ export function estimateDeliveryText(state: ShiftState, hour: number, minute: nu
   return `El club ya cerró: llega mañana, unos minutos después de abrir el club (${o1}–${o2} min).`;
 }
 
+/**
+ * Delivery estimate computed ONCE when the confirm window opens and reused for the window text,
+ * the confirmation toast and the order's real due time (the clock keeps running meanwhile).
+ */
+export interface DeliveryQuote {
+  day: number;
+  hour: number;
+  minute: number;
+  /** Delivery clock (absMinute) when the quote was made. */
+  abs: number;
+  sameNight: boolean;
+  text: string;
+}
+
+export function quoteDelivery(state: ShiftState, day: number, hour: number, minute: number): DeliveryQuote {
+  return {
+    day,
+    hour,
+    minute,
+    abs: absMinute,
+    sameNight: canArriveSameNight(state, hour),
+    text: estimateDeliveryText(state, hour, minute),
+  };
+}
+
+/** A quote still describes reality if it is from today and the same-night rule still gives the same answer. */
+export function quoteStillValid(q: DeliveryQuote | null | undefined, state: ShiftState, day: number, hour: number): q is DeliveryQuote {
+  return (
+    !!q &&
+    typeof q.abs === 'number' &&
+    Number.isFinite(q.abs) &&
+    q.abs <= absMinute &&
+    q.day === day &&
+    typeof q.text === 'string' &&
+    q.sameNight === canArriveSameNight(state, hour)
+  );
+}
+
 function randInt(range: readonly [number, number], rng: () => number): number {
   return range[0] + Math.floor(rng() * (range[1] - range[0] + 1));
 }
@@ -206,7 +244,7 @@ export function getAbsMinute(): number {
 /** Create a pending order (money is handled by the caller, once). */
 export function createOrder(
   lines: OrderLine[],
-  ctx: { state: ShiftState; day: number; clock: string; hour?: number; rng?: () => number }
+  ctx: { state: ShiftState; day: number; clock: string; hour?: number; rng?: () => number; quoteAbs?: number }
 ): PendingOrder {
   const rng = ctx.rng ?? Math.random;
   const clean = lines
@@ -222,7 +260,13 @@ export function createOrder(
     placedDay: ctx.day,
     placedClock: ctx.clock,
     nextDay: !sameNight,
-    dueAbs: lead != null ? absMinute + lead : null,
+    // Lead counts from the quoted moment (same window the player was shown), never in the past.
+    dueAbs:
+      lead != null
+        ? typeof ctx.quoteAbs === 'number' && Number.isFinite(ctx.quoteAbs) && ctx.quoteAbs <= absMinute
+          ? Math.max(absMinute + 1, ctx.quoteAbs + lead)
+          : absMinute + lead
+        : null,
     leadMinutes: lead,
     status: 'in_transit',
   };

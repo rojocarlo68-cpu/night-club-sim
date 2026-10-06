@@ -9,6 +9,8 @@ import { SNACK_LOCKED_HINT } from '../config/snacks';
 import {
   describePackages,
   estimateDeliveryText,
+  quoteDelivery,
+  type DeliveryQuote,
   lineCost,
   normalizeOrderUnits,
   orderUnitStep,
@@ -35,6 +37,10 @@ interface HudState {
   nightTimer: number;
   /** Phase 7: absolute night index (1-based). */
   nightNumber?: number;
+  /** SUMMARY: the night that just closed (nightNumber is already the next night). */
+  closedNightNumber?: number;
+  /** Night summary money block (ClubScene.buildNightLedger). */
+  ledger?: { lines?: string[] } | null;
   /** Prompt B Phase B2: game-time clock from Shift (source of truth). */
   gameHour?: number;
   gameMinute?: number;
@@ -46,6 +52,8 @@ interface HudState {
   isClosing?: boolean;
   bartender: HudBartender | null;
   selectedNpc?: NpcInfo | null;
+  /** Fresh info for every employee (ClubScene.staffNpcInfo). */
+  staffCards?: NpcInfo[];
   nightEarned?: number;
   servedCount?: number;
   buildMode?: boolean;
@@ -211,6 +219,8 @@ export class UIScene extends Phaser.Scene {
   private inventoryFlash: Phaser.GameObjects.Text | null = null;
   /** Supplier order being built in the inventory window (units per product). Nothing is paid yet. */
   private orderDraft = new Map<string, number>();
+  /** Delivery estimate frozen when the confirm dialog opened (see quoteDelivery). */
+  private orderQuote: DeliveryQuote | null = null;
   private orderConfirm!: Phaser.GameObjects.Container;
   private orderConfirmVisible = false;
   private orderConfirmRows: Phaser.GameObjects.GameObject[] = [];
@@ -1816,11 +1826,14 @@ export class UIScene extends Phaser.Scene {
       void tipsNight;
       void tipsTotal;
       const wallet = typeof npc.walletMoney === 'number' ? `\nDinero propio: $${npc.walletMoney}` : '';
-      const cond = npc.condition ? ` (${npc.condition})` : '';
+      // Own line below the portrait: appended to "Estado" it wrapped and the portrait covered
+      // half of it ("Deambulando café)").
+      const cond = npc.condition ? `\nCondición: ${npc.condition}` : '';
       this.panelStats.setText(
-        `Estado: ${estado}${cond}\nHabilidad: ${npc.skill ?? '—'}\n` +
+        `Estado: ${estado}\nHabilidad: ${npc.skill ?? '—'}\n` +
           `Propinas de hoy: $${tipsDay}` +
           wallet +
+          cond +
           salaryLine +
           (npc.performance ? `\nRendimiento: ${npc.performance}` : '') +
           persLine +
@@ -1918,14 +1931,23 @@ export class UIScene extends Phaser.Scene {
     this.phase = s.phase;
     if (typeof s.snacksUnlocked === 'boolean') this.snacksUnlocked = s.snacksUnlocked;
     if (typeof s.money === 'number') this.lastMoney = s.money;
-    if (this.inventoryPanelVisible) this.rebuildInventoryPanel();
-    if (this.orderConfirmVisible) this.rebuildOrderConfirm();
+    // HUD stats arrive every game minute: rebuilding the panel then (new buttons only become
+    // clickable on the next frame) swallowed clicks like the first "+caja". Rebuild only when
+    // something the panel shows actually changed.
+    if (this.inventoryPanelVisible && this.inventoryStatsSig() !== this.lastInventorySig) this.rebuildInventoryPanel();
+    if (this.orderConfirmVisible && this.lastMoney !== this.orderConfirmMoney) this.rebuildOrderConfirm();
     this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
     // Prompt B Phase B2: one visible time source = game clock (hide 75s countdown).
     this.applyClockHud(s);
+    const card = this.freshStaffCard(s);
     if (this.panelVisible && s.selectedNpc) {
       this.selectedNpc = s.selectedNpc;
       this.refreshPanel(s.selectedNpc);
+    } else if (this.panelVisible && card) {
+      // Staff window open but nothing selected in the club: show THIS employee's live card
+      // (the old fallback below used Luna's state + cached tips → stale "Propinas de hoy").
+      this.selectedNpc = card;
+      this.refreshPanel(card);
     } else if (this.panelVisible && this.selectedNpc?.role === 'staff' && s.bartender) {
       this.refreshPanel({
         id: this.selectedNpc.id,
@@ -1966,6 +1988,12 @@ export class UIScene extends Phaser.Scene {
     this.onStats(s);
   };
 
+  /** Live card of the employee shown in the staff window, if ClubScene sent one. */
+  private freshStaffCard(s: HudState): NpcInfo | null {
+    if (this.selectedNpc?.role !== 'staff' || !Array.isArray(s.staffCards)) return null;
+    return s.staffCards.find((c) => c && c.id === this.selectedNpc!.id) ?? null;
+  }
+
   private onSummary = (s: HudState): void => {
     this.phase = s.phase;
     this.openBtn.setVisible(false);
@@ -1975,10 +2003,13 @@ export class UIScene extends Phaser.Scene {
     this.applyClockHud(s);
     this.moneyText.setText(`Dinero: ${formatMoney(s.money)}`);
 
+    // Money block reconciles with the real cash change (see ClubScene.buildNightLedger).
+    // servedCount counts services (drinks served + seat pays), not seated customers.
+    const ledgerLines = s.ledger?.lines?.length ? s.ledger.lines : [`Ganado esta noche: ${formatMoney(s.nightEarned ?? 0)}`];
     const lines: string[] = [
       label,
-      `Ganado esta noche: ${formatMoney(s.nightEarned ?? 0)}`,
-      `Clientes que se sentaron: ${s.servedCount ?? 0}`,
+      ...ledgerLines,
+      `Servicios a clientes (bebidas + asientos cobrados): ${s.servedCount ?? 0}`,
       `Dinero total: ${formatMoney(s.money)}`,
     ];
     // Prompt B Phase B9: apertura / cierre / duración / empleadas.
@@ -1989,7 +2020,8 @@ export class UIScene extends Phaser.Scene {
     if (s.nightSales?.summaryLines?.length) {
       lines.push(...s.nightSales.summaryLines);
     }
-    if (s.payroll && s.payroll.total > 0) {
+    const ledgerShown = !!s.ledger?.lines?.length; // ledger already lists sueldos/servicios with their detail
+    if (!ledgerShown && s.payroll && s.payroll.total > 0) {
       lines.push(`Sueldos semanales: -$${s.payroll.total}`);
       for (const l of s.payroll.lines) {
         lines.push(`  ${l.name}: $${l.amount}`);
@@ -2000,7 +2032,7 @@ export class UIScene extends Phaser.Scene {
     } else if (typeof s.nextPayrollNight === 'number' && s.nextPayrollNight > 0) {
       lines.push(`Próximo pago de sueldos: ${daysLabel(s.nextPayrollNight - (s.nightNumber ?? 0))}`);
     }
-    if (s.utilities && s.utilities.total > 0) {
+    if (!ledgerShown && s.utilities && s.utilities.total > 0) {
       lines.push(`Servicios del mes: -$${s.utilities.total}`);
       for (const l of s.utilities.lines) {
         lines.push(`  ${l.label}: $${l.amount}`);
@@ -2022,6 +2054,10 @@ export class UIScene extends Phaser.Scene {
     // Patrons are cleared — if a patron was selected, close panel
     if (this.selectedNpc?.role === 'patron') {
       this.hidePanel();
+    } else if (this.panelVisible && this.freshStaffCard(s)) {
+      const card = this.freshStaffCard(s)!;
+      this.selectedNpc = card;
+      this.refreshPanel(card);
     } else if (s.bartender && this.panelVisible) {
       this.refreshPanel({
         id: this.selectedNpc?.id ?? 'bartender',
@@ -2289,7 +2325,10 @@ export class UIScene extends Phaser.Scene {
       typeof s.gameClock === 'string' && /^\d{1,2}:\d{2}$/.test(s.gameClock)
         ? s.gameClock
         : `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-    const night = this.nightLabel(s);
+    const night =
+      s.phase === 'summary' && typeof s.closedNightNumber === 'number' && s.closedNightNumber > 0
+        ? `Noche ${s.closedNightNumber}`
+        : this.nightLabel(s);
     const mobile = this.scale.width < 640;
     const closing = !!s.isClosing || s.shiftState === 'closing';
     if (closing) {
@@ -2478,12 +2517,26 @@ export class UIScene extends Phaser.Scene {
     if (this.inventoryPanelVisible) this.rebuildInventoryPanel();
   }
 
+  /**
+   * +caja: one more full crate. From 0 → 6; loose bottles are completed to the next crate
+   * (1 → 6, 6 → 12, 7 → 12) so the order never ends up as "1 caja + 1 botella" by surprise.
+   */
+  private bumpDraftCrate(id: string): void {
+    const crate = Math.max(1, PACKAGING.drinkCrateUnits);
+    const cur = this.orderDraft.get(id) ?? 0;
+    const next = (Math.floor(cur / crate) + 1) * crate;
+    this.bumpDraft(id, next - cur);
+  }
+
   private pressInventoryAccept(): void {
     if (!this.draftLines().length) {
       this.flashInventoryMsg('Agrega productos al pedido.');
       return;
     }
     this.orderConfirmMsg = '';
+    // Delivery window computed ONCE here; the dialog, the toast and the order reuse it.
+    const snap = getShiftSnapshot();
+    this.orderQuote = quoteDelivery(getShiftState(), snap.currentDay, snap.gameHour, snap.gameMinute);
     this.orderConfirmVisible = true;
     this.orderConfirm.setVisible(true);
     this.rebuildOrderConfirm();
@@ -2499,6 +2552,7 @@ export class UIScene extends Phaser.Scene {
     this.orderConfirmVisible = false;
     this.orderConfirm.setVisible(false);
     this.orderConfirmMsg = '';
+    this.orderQuote = null;
   }
 
   private pressOrderConfirm(): void {
@@ -2509,7 +2563,7 @@ export class UIScene extends Phaser.Scene {
       this.rebuildOrderConfirm();
       return;
     }
-    this.game.events.emit('cmd-place-order', { lines });
+    this.game.events.emit('cmd-place-order', { lines, quote: this.orderQuote });
   }
 
   private onOrderResult = (res: { ok: boolean; message?: string }): void => {
@@ -2526,6 +2580,7 @@ export class UIScene extends Phaser.Scene {
   };
 
   private rebuildOrderConfirm(): void {
+    this.orderConfirmMoney = this.lastMoney;
     for (const g of this.orderConfirmRows) g.destroy();
     this.orderConfirmRows = [];
     const cam = this.cameras.main;
@@ -2533,7 +2588,7 @@ export class UIScene extends Phaser.Scene {
     const lines = this.draftLines();
     const total = this.draftTotal();
     const snap = getShiftSnapshot();
-    const eta = estimateDeliveryText(getShiftState(), snap.gameHour, snap.gameMinute);
+    const eta = this.orderQuote?.text ?? estimateDeliveryText(getShiftState(), snap.gameHour, snap.gameMinute);
     const short = this.lastMoney < total;
     const w = Math.min(380, Math.max(290, cam.width - 30));
     const lineH = 20;
@@ -2672,7 +2727,16 @@ export class UIScene extends Phaser.Scene {
     return c;
   }
 
+  private lastInventorySig = '';
+  private orderConfirmMoney: number | null = null;
+
+  /** What the inventory panel shows from HUD stats (money, snacks lock, goods coming / at the door). */
+  private inventoryStatsSig(): string {
+    return JSON.stringify([this.lastMoney, this.snacksUnlocked, unitsInTransit(), unitsAtEntrance()]);
+  }
+
   private rebuildInventoryPanel(): void {
+    this.lastInventorySig = this.inventoryStatsSig();
     if (!this.inventoryPanel) return;
     this.clearInventoryRows();
     if (this.inventoryFlash) {
@@ -2785,7 +2849,7 @@ export class UIScene extends Phaser.Scene {
       if (!isSnack) {
         const boxW = twoRow ? 30 : 46;
         const box = this.makeInvBtn(cols.rest + ob * 2 + qW + 4, rowY2, boxW, btn - 2, twoRow ? `+${PACKAGING.drinkCrateUnits}` : `+caja`, () =>
-          this.bumpDraft(line.id, PACKAGING.drinkCrateUnits)
+          this.bumpDraftCrate(line.id)
         );
         rowObjs.push(box);
       } else {
