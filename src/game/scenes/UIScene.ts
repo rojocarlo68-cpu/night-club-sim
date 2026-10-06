@@ -147,6 +147,22 @@ interface DismissWin {
   close: () => void;
 }
 
+/**
+ * A window that can be moved by its title bar (drag handle). `posKey` groups windows that share a
+ * remembered position (staff/customer/furniture inspectors share 'selection': one slot).
+ */
+interface DragWin {
+  key: string;
+  posKey: string;
+  root: Phaser.GameObjects.Container;
+  bg: () => Phaser.GameObjects.Rectangle | null;
+  handleH: number;
+  /** Room left free at the right end of the bar for the ✕ button. */
+  closeW: number;
+  handle?: Phaser.GameObjects.Rectangle;
+  grip?: Phaser.GameObjects.Text;
+}
+
 export class UIScene extends Phaser.Scene {
   private moneyText!: Phaser.GameObjects.Text;
   private timerText!: Phaser.GameObjects.Text;
@@ -261,6 +277,15 @@ export class UIScene extends Phaser.Scene {
   private summaryBtn!: Phaser.GameObjects.Container;
   /** Persistent Dormir while phase===summary and the summary panel is closed (never trap the player). */
   private sleepHudBtn!: Phaser.GameObjects.Container;
+
+  // ---- Draggable windows (title bar = drag handle; positions remembered for the session) ----
+  private dragWins: DragWin[] = [];
+  private winPos = new Map<string, { x: number; y: number }>();
+  private winDrag: { win: DragWin; pid: number; downTime: number; offX: number; offY: number } | null = null;
+  /** downTime of the last press that dragged a window (ClubScene must never treat it as a world tap). */
+  lastWinDragDownTime = -1;
+  private furnFlipBtn!: Phaser.GameObjects.Container;
+  private furnActionsBtnW = 118;
 
   constructor() {
     super({ key: 'UIScene', active: false });
@@ -461,11 +486,18 @@ export class UIScene extends Phaser.Scene {
       furnDismiss,
     ]);
     // Opens the staff context menu for this item (touch-friendly path to RMB actions).
-    this.furnActionsBtn = this.makeLocalButton(-250, 226, 200, 34, 'Acciones', () => {
+    this.furnActionsBtn = this.makeLocalButton(-250, 226, this.furnActionsBtnW, 34, 'Acciones', () => {
       if (!this.furnSelectedId) return;
       this.game.events.emit('cmd-open-furniture-actions', { furnitureId: this.furnSelectedId });
     });
     this.furnPanel.add(this.furnActionsBtn);
+    // Voltear: normal ↔ mirror (the only two orientations — no rotation control exists).
+    this.furnFlipBtn = this.makeLocalButton(-124, 226, 96, 34, '⇋ Voltear', () => {
+      if (!this.furnSelectedId) return;
+      this.game.events.emit('cmd-flip-furniture', { id: this.furnSelectedId });
+    });
+    this.furnFlipBtn.setName('furnFlip');
+    this.furnPanel.add(this.furnFlipBtn);
 
     const kb = this.input.keyboard;
     if (kb) {
@@ -870,6 +902,7 @@ export class UIScene extends Phaser.Scene {
     });
     this.techPanel.add(hint);
     this.techPanel.setPosition(Math.round((cam.width - w) / 2), Math.round(Math.max(60, (cam.height - h) / 2)));
+    this.applySavedWinPos('techList');
     this.techVisible = true;
     this.techPanel.setVisible(true);
     this.syncModalBackdrop();
@@ -900,7 +933,8 @@ export class UIScene extends Phaser.Scene {
     const body = this.add.text(
       12,
       title.y + title.height + 10,
-      `${p.furnitureName}: ${p.diagnosis}\n\nReparación: $${p.cost}\nUno nuevo en la tienda: $${p.newPrice}\nDinero del club: $${p.money}`,
+      // Only diagnosis + repair cost: no new-item price, no money comparison (the player decides).
+      `${p.furnitureName}: ${p.diagnosis}\n\nReparación: $${p.cost}`,
       { fontSize: '13px', color: '#f0e0ff', lineSpacing: 4, wordWrap: { width: w - 24 } }
     );
     const close = this.makeLocalButton(w - 42, 8, 34, 28, '✕', () => this.dismissVerdict());
@@ -914,6 +948,7 @@ export class UIScene extends Phaser.Scene {
     no.setData('verdict', 'no');
     this.verdictPanel.add([bg, title, body, close, rep, no]);
     this.verdictPanel.setPosition(Math.round((cam.width - w) / 2), Math.round(Math.max(60, (cam.height - h) / 2)));
+    this.applySavedWinPos('repairVerdict');
     this.verdictVisible = true;
     this.verdictPanel.setVisible(true);
     this.syncModalBackdrop();
@@ -1025,6 +1060,7 @@ export class UIScene extends Phaser.Scene {
 
     // Browser context menu off on the canvas so right-click can close windows.
     this.input.mouse?.disableContextMenu();
+    this.setupDraggableWindows();
 
     this.input.on('pointerdown', (p: Phaser.Input.Pointer, over: Phaser.GameObjects.GameObject[]) => {
       this.outsidePress = null;
@@ -1052,6 +1088,173 @@ export class UIScene extends Phaser.Scene {
       top.close();
       this.syncModalBackdrop();
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Draggable windows: press the title bar, drag, release — the window stays there.
+  // Never moves the camera / scene and never selects anything underneath.
+  // ---------------------------------------------------------------------------
+
+  private setupDraggableWindows(): void {
+    const firstRect = (c: Phaser.GameObjects.Container) => () =>
+      (c.list.find((o) => o instanceof Phaser.GameObjects.Rectangle && o.name !== 'dragHandle') as
+        | Phaser.GameObjects.Rectangle
+        | undefined) ?? null;
+    const reg = (key: string, posKey: string, root: Phaser.GameObjects.Container, handleH: number, closeW = 50) => {
+      const w: DragWin = { key, posKey, root, bg: firstRect(root), handleH, closeW };
+      this.dragWins.push(w);
+      this.ensureDragHandle(w);
+    };
+    // Selection windows share one slot ('selection'): Luna → Nova → mesa keep the dragged spot.
+    reg('npc', 'selection', this.panel, 40);
+    reg('furniture', 'selection', this.furnPanel, 40);
+    reg('inventory', 'inventory', this.inventoryPanel, 40);
+    reg('staff', 'staff', this.staffPanel, 44);
+    reg('shop', 'shop', this.shopPanel, 40);
+    reg('summary', 'summary', this.summary, 46);
+    reg('techList', 'techList', this.techPanel, 34);
+    reg('repairVerdict', 'repairVerdict', this.verdictPanel, 34);
+
+    this.input.on('pointermove', (p: Phaser.Input.Pointer) => {
+      const d = this.winDrag;
+      if (!d || d.pid !== p.id) return;
+      if (!p.isDown) {
+        this.endWinDrag(p);
+        return;
+      }
+      d.win.root.setPosition(p.x - d.offX, p.y - d.offY);
+      this.clampWin(d.win);
+    });
+    this.input.on('pointerup', (p: Phaser.Input.Pointer) => this.endWinDrag(p));
+    this.input.on('pointerupoutside', (p: Phaser.Input.Pointer) => this.endWinDrag(p));
+  }
+
+  /** (Re)create the title-bar handle (tech/verdict windows are rebuilt with removeAll). */
+  private ensureDragHandle(w: DragWin): void {
+    if (w.handle && w.handle.active && w.handle.parentContainer === w.root) return;
+    const handle = this.add.rectangle(0, 0, 10, w.handleH, 0x3a2058, 0.9).setOrigin(0, 0);
+    handle.setName('dragHandle');
+    handle.setStrokeStyle(1, 0x6a4a8a, 0.8);
+    handle.setInteractive({ cursor: 'move' });
+    const grip = this.add
+      .text(0, 0, '⋮⋮', { fontSize: '14px', color: '#b090d0', fontStyle: 'bold' })
+      .setOrigin(1, 0.5)
+      .setName('dragGrip');
+    handle.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      if (!this.isPrimaryPress(p)) return;
+      p.event?.stopPropagation?.();
+      this.winDrag = { win: w, pid: p.id, downTime: p.downTime, offX: p.x - w.root.x, offY: p.y - w.root.y };
+      this.lastWinDragDownTime = p.downTime;
+    });
+    // Just above the background: title text / ✕ / content stay on top of the bar.
+    const bgIdx = Math.max(0, w.root.list.indexOf(w.bg() as Phaser.GameObjects.GameObject));
+    w.root.addAt(handle, bgIdx + 1);
+    w.root.addAt(grip, bgIdx + 2);
+    w.handle = handle;
+    w.grip = grip;
+    this.syncDragHandle(w);
+  }
+
+  /** Keep the bar on the window's top edge (windows resize when rebuilt). */
+  private syncDragHandle(w: DragWin): void {
+    const bg = w.bg();
+    const h = w.handle;
+    if (!bg || !h || !h.active) return;
+    const left = bg.x - bg.width * bg.originX;
+    const top = bg.y - bg.height * bg.originY;
+    const width = Math.max(40, bg.width - 4 - w.closeW);
+    if (h.x !== left + 2 || h.y !== top + 2) h.setPosition(left + 2, top + 2);
+    if (h.width !== width) h.setSize(width, w.handleH);
+    const hit = h.input?.hitArea as Phaser.Geom.Rectangle | undefined;
+    if (hit && (hit.width !== width || hit.height !== w.handleH)) hit.setSize(width, w.handleH);
+    // Same for the window background: a resized bg must swallow clicks over its whole area.
+    const bhit = bg.input?.hitArea as Phaser.Geom.Rectangle | undefined;
+    if (bhit && (bhit.width !== bg.width || bhit.height !== bg.height)) bhit.setSize(bg.width, bg.height);
+    w.grip?.setPosition(left + 2 + width - 6, top + 2 + w.handleH / 2);
+  }
+
+  /** Window rect relative to its container origin (from its background rectangle). */
+  private winLocalRect(w: DragWin): { left: number; top: number; right: number; bottom: number } | null {
+    const bg = w.bg();
+    if (!bg) return null;
+    const left = bg.x - bg.width * bg.originX;
+    const top = bg.y - bg.height * bg.originY;
+    return { left, top, right: left + bg.width, bottom: top + bg.height };
+  }
+
+  /** Keep the window on screen (if it is bigger than the screen, keep its title bar reachable). */
+  private clampWin(w: DragWin): void {
+    const r = this.winLocalRect(w);
+    if (!r) return;
+    const cam = this.cameras.main;
+    const ww = r.right - r.left;
+    const wh = r.bottom - r.top;
+    let x = w.root.x;
+    let y = w.root.y;
+    if (ww <= cam.width) x = Phaser.Math.Clamp(x, -r.left, cam.width - r.right);
+    else x = Phaser.Math.Clamp(x, cam.width - r.right, -r.left);
+    if (wh <= cam.height) y = Phaser.Math.Clamp(y, -r.top, cam.height - r.bottom);
+    else y = Phaser.Math.Clamp(y, -r.top - (wh - w.handleH - 8), -r.top);
+    if (x !== w.root.x || y !== w.root.y) w.root.setPosition(x, y);
+  }
+
+  private endWinDrag(p: Phaser.Input.Pointer): void {
+    const d = this.winDrag;
+    if (!d || d.pid !== p.id) return;
+    this.winDrag = null;
+    this.lastWinDragDownTime = d.downTime;
+    this.clampWin(d.win);
+    this.winPos.set(d.win.posKey, { x: d.win.root.x, y: d.win.root.y });
+  }
+
+  /** After a window took its default spot: move it to where the player left it this session. */
+  private applySavedWinPos(key: string): void {
+    const w = this.dragWins.find((x) => x.key === key);
+    if (!w) return;
+    this.ensureDragHandle(w);
+    this.syncDragHandle(w);
+    if (this.winDrag?.win === w) return;
+    const saved = this.winPos.get(w.posKey);
+    if (saved) w.root.setPosition(saved.x, saved.y);
+    this.clampWin(w);
+  }
+
+  /** Screen rect of an open draggable window (null when hidden). */
+  private winScreenRect(key: string): Phaser.Geom.Rectangle | null {
+    const w = this.dragWins.find((x) => x.key === key);
+    if (!w || !w.root.visible) return null;
+    const r = this.winLocalRect(w);
+    if (!r) return null;
+    return new Phaser.Geom.Rectangle(w.root.x + r.left, w.root.y + r.top, r.right - r.left, r.bottom - r.top);
+  }
+
+  /** Playwright/debug: window positions + drag-handle rects in screen px. */
+  getWindowDebug() {
+    const out: Record<string, unknown> = {};
+    for (const w of this.dragWins) {
+      const r = this.winScreenRect(w.key);
+      const h = w.handle;
+      out[w.key] = {
+        visible: w.root.visible,
+        x: w.root.x,
+        y: w.root.y,
+        rect: r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null,
+        handle:
+          h && h.active && w.root.visible
+            ? { x: w.root.x + h.x, y: w.root.y + h.y, w: h.width, h: h.height }
+            : null,
+        saved: this.winPos.get(w.posKey) ?? null,
+      };
+    }
+    return {
+      wins: out,
+      dragging: this.winDrag?.win.key ?? null,
+      npcOpen: this.panelVisible,
+      furnOpen: this.furnPanelVisible,
+      npcName: this.selectedNpc?.name ?? null,
+      furnId: this.furnSelectedId,
+      furnName: this.inspectedFurniture?.name ?? null,
+    };
   }
 
   /** Empty space around a modal: the shared backdrop, the delete dim or the HUD bar. */
@@ -1122,6 +1325,11 @@ export class UIScene extends Phaser.Scene {
 
   update(): void {
     this.syncModalBackdrop();
+    for (const w of this.dragWins) {
+      if (!w.root.visible) continue;
+      this.ensureDragHandle(w);
+      this.syncDragHandle(w);
+    }
   }
 
   /** Hide the night summary without sleeping; HUD "Ver resumen" brings it back. */
@@ -1143,45 +1351,21 @@ export class UIScene extends Phaser.Scene {
   }
 
   isPointerOnUi(p: Phaser.Input.Pointer): boolean {
-    const w = this.cameras.main.width;
     const h = this.cameras.main.height;
+    // A window drag owns the gesture from press to release (never a world tap / pan / zoom).
+    if (this.winDrag) return true;
+    if (p.downTime === this.lastWinDragDownTime && p.downTime > 0) return true;
     // Full-screen modal: block all ClubScene gestures underneath
     if (this.deleteConfirmVisible) return true;
     if (this.modalBackdrop?.visible) return true;
     if (p.y < 56) return true;
     if (p.x < 350 && p.y > h - 60) return true;
-    if (this.panelVisible) {
-      const panelTop = h - PANEL_BOTTOM_MARGIN - PANEL_H;
-      const panelBottom = h - PANEL_BOTTOM_MARGIN + 8;
-      if (p.x > w - PANEL_W - 24 && p.y > panelTop - 8 && p.y < panelBottom) return true;
-    }
-    if (this.furnPanelVisible) {
-      const furnH = 280;
-      const panelTop = h - PANEL_BOTTOM_MARGIN - furnH;
-      const panelBottom = h - PANEL_BOTTOM_MARGIN + 8;
-      if (p.x > w - PANEL_W - 24 && p.y > panelTop - 8 && p.y < panelBottom) return true;
-    }
-    if (this.staffPanelVisible) {
-      const cx = w / 2;
-      const cy = h / 2;
-      if (Math.abs(p.x - cx) < 210 && Math.abs(p.y - cy) < 250) return true;
-    }
-    if (this.inventoryPanelVisible) {
-      const cx = w / 2;
-      const cy = h / 2;
-      if (Math.abs(p.x - cx) < 200 && Math.abs(p.y - cy) < 250) return true;
-    }
-    if (this.shopPanelVisible) {
-      const cx = w / 2;
-      const cy = h / 2;
-      if (Math.abs(p.x - cx) < 230 && Math.abs(p.y - cy) < 260) return true;
+    // Windows can be dragged anywhere: hit-test their real on-screen rectangles.
+    for (const key of ['npc', 'furniture', 'staff', 'inventory', 'shop', 'summary', 'techList', 'repairVerdict']) {
+      const r = this.winScreenRect(key);
+      if (r && Phaser.Geom.Rectangle.Inflate(Phaser.Geom.Rectangle.Clone(r), 4, 4).contains(p.x, p.y)) return true;
     }
     if (this.buildMode && p.x < 260 && p.y > h - 60) return true;
-    if (this.summary.visible) {
-      const cx = w / 2;
-      const cy = h / 2;
-      if (Math.abs(p.x - cx) < 200 && Math.abs(p.y - cy) < 140) return true;
-    }
     return false;
   }
 
@@ -1204,9 +1388,15 @@ export class UIScene extends Phaser.Scene {
     if (this.buildMode) return;
     this.hidePanel();
     this.inspectedFurniture = payload;
+    const wasOpen = this.furnPanelVisible;
     this.furnPanelVisible = true;
-    const cam = this.cameras.main;
-    this.furnPanel.setPosition(cam.width - 20, cam.height - PANEL_BOTTOM_MARGIN - 280);
+    if (!wasOpen) {
+      // Newly shown (or replacing the staff/customer window): default spot, then the shared
+      // 'selection' position the player dragged to. Re-emits while open never move it.
+      const cam = this.cameras.main;
+      this.furnPanel.setPosition(cam.width - 20, cam.height - PANEL_BOTTOM_MARGIN - 280);
+      this.applySavedWinPos('furniture');
+    }
     this.furnPanel.setVisible(true);
     this.refreshFurnPanel(payload);
   };
@@ -1218,6 +1408,12 @@ export class UIScene extends Phaser.Scene {
   private refreshFurnPanel(f: FurnitureInspectPayload): void {
     this.furnName.setText(f.name);
     this.furnSelectedId = f.id;
+    if (this.furnFlipBtn) {
+      const canFlip = f.flippable !== false;
+      this.furnFlipBtn.setVisible(canFlip);
+      // Flipping is done with the club closed (no one is using the piece mid-service).
+      this.furnFlipBtn.setAlpha(this.phase === 'open' ? 0.45 : 1);
+    }
     this.furnCondition.setText(
       `Condición: ${f.condition}` +
         (f.repairStatus ? `\n${f.repairStatus}` : f.repairCount ? ` · Reparado ×${f.repairCount}` : '')
@@ -1252,8 +1448,13 @@ export class UIScene extends Phaser.Scene {
     if (this.buildMode) return;
     this.hideFurnPanel();
     this.selectedNpc = npc;
+    const wasOpen = this.panelVisible;
     this.panelVisible = true;
-    this.layoutNpcPanel(this.cameras.main.width, this.cameras.main.height);
+    if (!wasOpen) {
+      // Luna → Nova keeps the window where it is; a fresh open uses the remembered spot.
+      this.layoutNpcPanel(this.cameras.main.width, this.cameras.main.height);
+      this.applySavedWinPos('npc');
+    }
     this.panel.setVisible(true);
     this.refreshPanel(npc);
   };
@@ -1751,6 +1952,7 @@ export class UIScene extends Phaser.Scene {
     this.summaryClose.setPosition(closeX, closeY);
 
     this.summary.setPosition(cam.width / 2, cam.height / 2);
+    this.applySavedWinPos('summary');
   }
 
   /**
@@ -1838,6 +2040,13 @@ export class UIScene extends Phaser.Scene {
     this.staffPanel.setPosition(w / 2, h / 2);
     if (this.shopPanel) this.shopPanel.setPosition(w / 2, h / 2);
     this.layoutDeleteConfirm(w, h);
+    for (const dw of this.dragWins) {
+      if (dw.key === 'techList' || dw.key === 'repairVerdict') {
+        this.clampWin(dw);
+        continue;
+      }
+      this.applySavedWinPos(dw.key);
+    }
   };
 
   private onInventoryUpdated = (): void => {
@@ -1927,6 +2136,7 @@ export class UIScene extends Phaser.Scene {
     this.inventoryPanelVisible = true;
     this.inventoryPanel.setVisible(true);
     this.rebuildInventoryPanel();
+    this.applySavedWinPos('inventory');
   }
 
   /** Closing the window (✕ / outside / right-click / CANCELAR) discards the unconfirmed order. */
@@ -2377,6 +2587,7 @@ export class UIScene extends Phaser.Scene {
     this.staffPanel.setVisible(true);
     this.game.events.emit('cmd-request-staff-roster');
     this.rebuildStaffPanel();
+    this.applySavedWinPos('staff');
   }
 
   private hideStaffPanel(): void {
@@ -2771,6 +2982,7 @@ export class UIScene extends Phaser.Scene {
     this.shopPanel.setVisible(true);
     this.game.events.emit('cmd-request-shop-catalog');
     this.rebuildShopPanel();
+    this.applySavedWinPos('shop');
   }
 
   private hideShopPanel(): void {

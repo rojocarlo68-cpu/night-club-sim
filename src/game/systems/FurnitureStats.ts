@@ -200,6 +200,9 @@ export interface FurnitureInspectPayload {
   /** Technician job stage, e.g. 'Técnico en camino'. */
   repairStatus?: string;
   repairCount?: number;
+  /** Voltear available for this piece (two orientations: normal / mirror). */
+  flippable?: boolean;
+  flipX?: boolean;
 }
 
 /**

@@ -52,6 +52,15 @@ export interface ShopFurnitureItem {
   requires?: string[];
   /** Hex color for procedural placeholder when sprite art is missing. */
   placeholderColor?: number;
+  /** Horizontal mirror (Voltear) allowed. Default true; set false for art that must never mirror. */
+  flippable?: boolean;
+  /**
+   * Optional dedicated art for the mirror orientation (texture key). When loaded it replaces the
+   * automatic flipX mirror without changing any logic — the piece stays ONE object.
+   */
+  mirrorSprite?: string;
+  /** Base vertex (2x art px) of `mirrorSprite`; default = mirrored `baseVertex`. */
+  mirrorBaseVertex?: [number, number];
 }
 
 export interface ShopFurnitureFile {

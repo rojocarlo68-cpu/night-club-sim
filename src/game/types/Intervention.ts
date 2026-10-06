@@ -2,7 +2,8 @@
 
 export type CtxTarget =
   | { kind: 'furniture'; id: string }
-  | { kind: 'floor'; id: string }
+  /** Floor zone; col/row = the clicked tile (enables "Caminar aquí"). */
+  | { kind: 'floor'; id: string; col?: number; row?: number }
   /** A package (crate / bottle / sack) waiting at the entrance. */
   | { kind: 'goods'; id: string }
   /** One piece of trash on the floor. */
@@ -44,8 +45,9 @@ export interface RepairVerdictPayload {
   techName: string;
   furnitureName: string;
   diagnosis: string;
+  /** Repair quote. The verdict deliberately carries NO new-item price: the player compares on their own. */
   cost: number;
-  newPrice: number;
+  /** Only used to enable/disable REPARAR (never shown as a comparison). */
   money: number;
   canAfford: boolean;
 }

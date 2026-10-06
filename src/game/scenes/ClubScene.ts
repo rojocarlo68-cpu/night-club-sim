@@ -519,6 +519,9 @@ interface FurnitureDef {
   type: string;
   sprite: string;
   facing?: IsoFacing;
+  /** Horizontal mirror (the only alternative orientation; no rotation). Non-square footprints are
+   *  stored already swapped ([w,h] → [h,w]) while mirrored, since an iso mirror swaps the axes. */
+  flipX?: boolean;
   /** Texture key of the (only) art. */
   sprites?: { sw?: string };
   tile: [number, number];
@@ -768,6 +771,8 @@ export class ClubScene extends Phaser.Scene {
   /** True while UIScene delete-confirm modal is open (blocks Club input). */
   private deleteConfirmOpen = false;
   private buildHint!: Phaser.GameObjects.Text;
+  /** Build-mode selection HUD: Voltear (normal ↔ mirror). */
+  private flipBtn!: Phaser.GameObjects.Container;
 
   // Camera pan
   private panActive = false;
@@ -957,6 +962,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.on('cmd-restock-drink', this.onCmdRestockDrink, this);
     this.game.events.on('cmd-set-drink-price', this.onCmdSetDrinkPrice, this);
     this.game.events.on('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
+    this.game.events.on('cmd-flip-furniture', this.onCmdFlipFurniture, this);
     this.game.events.on('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
     this.game.events.on('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
     this.registerInterventionEvents();
@@ -1064,6 +1070,8 @@ export class ClubScene extends Phaser.Scene {
     const target = id ? this.findStaffById(id) : this.bartender;
     if (!target) return;
     this.clearFurnitureSelection();
+    // Replacing the furniture window: drop its inspect state so a later re-emit can't reopen it.
+    this.closeFurnitureInspect();
     this.patrons.forEach((p) => p.setSelected(false));
     this.bartender.setSelected(target === this.bartender);
     this.extraStaff.forEach((s) => s.setSelected(s === target));
@@ -1083,6 +1091,7 @@ export class ClubScene extends Phaser.Scene {
 
   private selectNpcPatron(patron: Patron): void {
     this.clearFurnitureSelection();
+    this.closeFurnitureInspect();
     this.bartender.setSelected(false);
     this.extraStaff.forEach((s) => s.setSelected(false));
     this.patrons.forEach((p) => p.setSelected(p === patron));
@@ -1180,10 +1189,16 @@ export class ClubScene extends Phaser.Scene {
         // Old saves: rotated pieces / other footprints (the old sofa was 1x2) / mirror flags are forced
         // to the one fixed pose; the saved tile is kept (clamped to the map) and
         // ensureAllFurnitureInsideFloor() nudges it to the nearest valid tile.
+        // Mirror (horizontal flip) is the one allowed alternative orientation: restore it, and with it
+        // the swapped footprint of non-square pieces (catalog footprint is always the normal pose).
+        def.flipX = false;
+        if (item.flipX === true && this.isFurnitureFlippable(def)) {
+          def.flipX = true;
+          def.footprint = this.mirroredFootprint(def.footprint);
+        }
         const savedFp = Array.isArray(item.footprint) ? item.footprint : null;
         if (
           (item.facing && item.facing !== FIXED_FACING) ||
-          item.flipX ||
           (savedFp && (savedFp[0] !== def.footprint[0] || savedFp[1] !== def.footprint[1]))
         ) {
           this.layoutMigrated = true;
@@ -1241,6 +1256,7 @@ export class ClubScene extends Phaser.Scene {
         tile: [...f.tile] as [number, number],
         facing: FIXED_FACING,
         catalogId: f.catalogId,
+        flipX: f.flipX === true ? true : undefined,
         footprint: [...f.footprint] as [number, number],
         price: f.price,
         durability: f.durability,
@@ -1368,11 +1384,19 @@ export class ClubScene extends Phaser.Scene {
   ): { x: number; y: number } {
     const { x, y } = tileToScreen(col, row, this.iso);
     const cat = this.shopCatalogById.get(def?.catalogId ?? kind) ?? this.shopCatalogById.get(kind);
-    const bv = def?.baseVertex ?? cat?.baseVertex;
-    if (def && bv) {
+    const bv0 = def?.baseVertex ?? cat?.baseVertex;
+    if (def && bv0) {
       // Exact tile snapping: the sprite's measured base vertex (2x art px) is pinned to the footprint's
       // bottom vertex, so the art's ground contact lands on the footprint diamond.
-      const frame = this.textures.getFrame(this.furnitureTextureKey(kind, def));
+      const art = this.furnitureArt(def);
+      const frame = this.textures.getFrame(art.key);
+      // Mirror: the bottom vertex stays the bottom vertex, mirrored in x (or the dedicated mirror
+      // art's own measured vertex). def.footprint is already the swapped one.
+      let bv: [number, number] = [bv0[0], bv0[1]];
+      if (def.flipX) {
+        if (art.dedicated && cat?.mirrorBaseVertex) bv = [cat.mirrorBaseVertex[0], cat.mirrorBaseVertex[1]];
+        else bv = [frame.realWidth - bv0[0], bv0[1]];
+      }
       const size = this.furnitureDisplaySize(kind, def);
       const sx = size.w / frame.realWidth;
       const sy = size.h / frame.realHeight;
@@ -1937,10 +1961,35 @@ export class ClubScene extends Phaser.Scene {
   private buildSelectionHud(x: number, y: number): void {
     this.selectionHud = this.add.container(x, y - 70).setDepth(9000).setVisible(false);
 
-    this.selectionHudBg = this.add.rectangle(0, 0, 108, 40, 0x1a0e28, 0.92);
+    this.selectionHudBg = this.add.rectangle(0, 0, 196, 40, 0x1a0e28, 0.92);
     this.selectionHudBg.setStrokeStyle(1, 0xff3ca0);
 
-    const c = this.add.container(0, 0);
+    // Voltear (horizontal mirror). Two orientations only — there is no rotate control.
+    const fc = this.add.container(46, 0);
+    const fb = this.add.rectangle(0, 0, 84, 28, 0x2a4a8a, 1);
+    fb.setStrokeStyle(1, 0x6aa8ff);
+    fb.setInteractive({ useHandCursor: true });
+    const ft = this.add
+      .text(0, 0, '⇋ Voltear', { fontSize: '12px', color: '#ffffff', fontStyle: 'bold' })
+      .setOrigin(0.5);
+    fb.on('pointerover', () => fb.setFillStyle(0x3a5aa8));
+    fb.on('pointerout', () => fb.setFillStyle(0x2a4a8a));
+    fb.on('pointerdown', (p: Phaser.Input.Pointer) => {
+      p.event.stopPropagation();
+      if (this.deleteConfirmOpen || !this.selectedFurniture) return;
+      if (!p.wasTouch && p.button !== 0) return;
+      this.blockPanGesture = true;
+      this.panActive = false;
+      this.skipNextTap = true;
+      this.time.delayedCall(0, () => {
+        this.skipNextTap = false;
+      });
+      this.onCmdFlipFurniture({ id: this.selectedFurniture });
+    });
+    fc.add([fb, ft]);
+    this.flipBtn = fc;
+
+    const c = this.add.container(-46, 0);
     const b = this.add.rectangle(0, 0, 84, 28, 0x8a2048, 1);
     b.setStrokeStyle(1, 0xff6a9a);
     b.setInteractive({ useHandCursor: true });
@@ -1958,7 +2007,7 @@ export class ClubScene extends Phaser.Scene {
     });
     c.add([b, t]);
     this.deleteBtn = c;
-    this.selectionHud.add([this.selectionHudBg, this.deleteBtn]);
+    this.selectionHud.add([this.selectionHudBg, this.deleteBtn, this.flipBtn]);
   }
 
   private requestDeleteSelected(): void {
@@ -2099,10 +2148,11 @@ export class ClubScene extends Phaser.Scene {
     this.selectedFurniture = def.id;
     img.setTint(0xffd8a8);
     this.selectionHud.setVisible(true);
+    this.flipBtn?.setVisible(this.isFurnitureFlippable(def));
     const pos = this.furnitureWorldPos(def.type, def.tile[0], def.tile[1], def);
     this.selectionHud.setPosition(pos.x, pos.y - 78);
     const name = this.furnitureDisplayName(def).toLowerCase();
-    this.buildHint.setText(`Arrastra ${name} · Eliminar`).setVisible(true);
+    this.buildHint.setText(`Arrastra ${name} · Voltear · Eliminar`).setVisible(true);
   }
 
   private clearFurnitureSelection(): void {
@@ -2499,8 +2549,8 @@ export class ClubScene extends Phaser.Scene {
       if (!patron.active || this.phase !== 'open') return;
       patron.seated = true;
       patron.waiting = false;
-      // Face the sofa (the tile behind the standing spot is the footprint's front row).
-      patron.faceToward({ col: seat.col, row: seat.row - 1 });
+      // Face the seat (nearest footprint tile: respects the mirrored orientation).
+      patron.faceToward(this.faceTileFor(seat, this.getFurnitureDef(seat.furnitureId)));
       patron.refreshStatusLabel();
       // (No text / emoji over the head here: what they think about the seat is logged as a thought.)
       // Prompt A Phase 2: perceive the seat actually used (comfort + cleanliness), once.
@@ -2790,7 +2840,7 @@ export class ClubScene extends Phaser.Scene {
       patron.waiting = true;
       patron.seated = false;
       const tap = this.beerTapSpots()?.tap;
-      if (tap) patron.faceToward({ col: spot.col, row: spot.row - 1 });
+      if (tap) patron.faceToward(this.faceTileFor(spot, tap));
       const used = this.activeBeerTap();
       if (used) this.perceiveUsedFurniture(patron, used.id, false);
       patron.refreshStatusLabel();
@@ -2866,7 +2916,7 @@ export class ClubScene extends Phaser.Scene {
       patron.waiting = true;
       patron.seated = false;
       const bar = this.barSpots()?.bar;
-      if (bar) patron.faceToward({ col: spot.col, row: spot.row - 1 });
+      if (bar) patron.faceToward(this.faceTileFor(spot, bar));
       // Prompt A Phase 2: the bar is used (cleanliness only; patrons stand there).
       const usedBar = this.activeBar();
       if (usedBar) this.perceiveUsedFurniture(patron, usedBar.id, false);
@@ -3082,8 +3132,35 @@ export class ClubScene extends Phaser.Scene {
     const fw = Math.max(1, def.footprint[0]);
     const fh = Math.max(1, def.footprint[1]);
     const out: Array<{ col: number; row: number }> = [];
+    // Mirrored piece faces +col (lower-right) instead of +row: its front is the column past the
+    // (already swapped) footprint. Same number of front tiles = same seat / service capacity.
+    if (def.flipX) {
+      for (let j = 0; j < fh; j++) out.push({ col: def.tile[0] + fw, row: def.tile[1] + j });
+      return out;
+    }
     for (let i = 0; i < fw; i++) out.push({ col: def.tile[0] + i, row: def.tile[1] + fh });
     return out;
+  }
+
+  /** Footprint tile closest to a standing spot (what a person at that spot should face). */
+  private faceTileFor(spot: { col: number; row: number }, def: FurnitureDef | null | undefined): { col: number; row: number } {
+    if (!def) return { col: spot.col, row: spot.row - 1 };
+    const fw = Math.max(1, def.footprint[0]);
+    const fh = Math.max(1, def.footprint[1]);
+    let best = { col: def.tile[0], row: def.tile[1] };
+    let bestD = Infinity;
+    for (let dc = 0; dc < fw; dc++) {
+      for (let dr = 0; dr < fh; dr++) {
+        const c = def.tile[0] + dc;
+        const r = def.tile[1] + dr;
+        const d = Math.max(Math.abs(c - spot.col), Math.abs(r - spot.row)) * 10 + Math.abs(c - spot.col) + Math.abs(r - spot.row);
+        if (d < bestD) {
+          bestD = d;
+          best = { col: c, row: r };
+        }
+      }
+    }
+    return best;
   }
 
   /** Walkable seat tiles for a seatable piece (the sofa: its front row). */
@@ -3541,27 +3618,43 @@ export class ClubScene extends Phaser.Scene {
 
     const furnId = this.furnitureIdAtPointer(p);
 
-    if (staff) {
-      // Furniture → inspect panel (no walk-through); empty floor → walk there
-      if (furnId) {
-        this.openFurnitureInspect(furnId);
-        return;
+    // Furniture → its window replaces whatever selection window was open (one at a time).
+    if (furnId) {
+      this.openFurnitureInspect(furnId);
+      return;
+    }
+
+    // Black void around the stage (no floor tile): close the selection window + deselect.
+    if (!this.isPointerOnFloor(p)) {
+      this.closeFurnitureInspect();
+      if (this.selectedNpcId) {
+        this.deselectNpc();
+        this.game.events.emit('npc-deselected');
       }
+      return;
+    }
+
+    if (staff) {
+      // Unchanged: staff selected + tap/click on the floor → she walks there (PC and mobile).
       this.closeFurnitureInspect();
       this.moveSelectedStaffToPointer(p, staff);
       return;
     }
 
-    // No staff selected: tap furniture → inspect panel; empty → deselect
-    if (furnId) {
-      this.openFurnitureInspect(furnId);
-      return;
-    }
+    // No staff selected: empty floor closes the customer / furniture window (existing behaviour).
     this.closeFurnitureInspect();
     if (this.selectedNpcId) {
       this.deselectNpc();
       this.game.events.emit('npc-deselected');
     }
+  }
+
+  /** True when the pointer is over a tile of the floor diamond (false = the black void around it). */
+  isPointerOnFloor(p: { x: number; y: number }): boolean {
+    const world = this.cameras.main.getWorldPoint(p.x, p.y);
+    const tile = screenToTile(world.x, world.y, this.iso);
+    const { cols, rows } = this.scenario.map;
+    return tile.col >= 0 && tile.row >= 0 && tile.col < cols && tile.row < rows;
   }
 
   private moveSelectedStaffToPointer(p: Phaser.Input.Pointer, staff: Bartender): void {
@@ -3589,6 +3682,20 @@ export class ClubScene extends Phaser.Scene {
       return;
     }
     this.issueStaffWalk(staff, { col: tile.col, row: tile.row });
+  }
+
+  /** "Caminar aquí" order (compliance already rolled by issuePlayerOrder). Snaps to the nearest reachable tile. */
+  private walkStaffToTile(staff: Bartender, tile: { col: number; row: number }): boolean {
+    if (staff.state === 'resting') return false;
+    let goal = tile;
+    if (!this.pathfinder.isWalkable(tile.col, tile.row)) {
+      const path = this.pathfinder.findPath(staff.grid, tile);
+      if (!path.length) return false;
+      goal = path[path.length - 1];
+    }
+    if (staff.grid.col === goal.col && staff.grid.row === goal.row) return false;
+    this.issueStaffWalk(staff, { col: goal.col, row: goal.row });
+    return staff.state === 'walking';
   }
 
   private issueStaffWalk(
@@ -4723,8 +4830,8 @@ export class ClubScene extends Phaser.Scene {
         release();
         return;
       }
-      // Face the bar (one tile back = the bar's front row)
-      staff.faceToward({ col: staff.grid.col, row: staff.grid.row - 1 });
+      // Face the bar / tap (nearest footprint tile: respects the mirrored orientation)
+      staff.faceToward(this.faceTileFor(staff.grid, atTap ? tapSpots?.tap : barSpots?.bar));
       staff.setServeLabel(drink.id === 'cerveza' ? 'Sirviendo cerveza' : 'Sirviendo bebida');
       this.game.events.emit('stats-updated', this.getHudState());
       this.emitStaffRoster();
@@ -5488,6 +5595,128 @@ export class ClubScene extends Phaser.Scene {
     return this.shopImages.get(id) ?? null;
   }
 
+  // ─── Horizontal flip (normal / mirror — the only two orientations; no rotation) ──────────
+
+  private catalogFor(def: FurnitureDef): ShopFurnitureItem | undefined {
+    return this.shopCatalogById.get(def.catalogId ?? def.type) ?? this.shopCatalogById.get(def.type);
+  }
+
+  /** Every piece can be mirrored unless its catalog entry says `flippable: false`. */
+  private isFurnitureFlippable(def: FurnitureDef): boolean {
+    return this.catalogFor(def)?.flippable !== false;
+  }
+
+  /** An iso horizontal mirror swaps the two ground axes: [w,h] → [h,w] (square pieces unchanged). */
+  private mirroredFootprint(fp: [number, number]): [number, number] {
+    return [fp[1], fp[0]];
+  }
+
+  /**
+   * Art for the current orientation. Asset hook: a catalog `mirrorSprite` (loaded texture) is used
+   * as-is for the mirror pose; otherwise the normal art is drawn with flipX. Still ONE object.
+   */
+  private furnitureArt(def: FurnitureDef): { key: string; flipX: boolean; dedicated: boolean } {
+    const key = this.furnitureTextureKey(def.type, def);
+    if (!def.flipX) return { key, flipX: false, dedicated: false };
+    const mirror = this.catalogFor(def)?.mirrorSprite;
+    if (mirror && this.textures.exists(mirror)) return { key: mirror, flipX: false, dedicated: true };
+    return { key, flipX: true, dedicated: false };
+  }
+
+  private applyFurnitureOrientation(def: FurnitureDef, img?: Phaser.GameObjects.Image | null): void {
+    const im = img ?? this.shopImages.get(def.id);
+    if (!im) return;
+    const art = this.furnitureArt(def);
+    if (im.texture.key !== art.key) im.setTexture(art.key);
+    const size = this.furnitureDisplaySize(def.type, def);
+    im.setDisplaySize(size.w, size.h);
+    im.setFlipX(art.flipX);
+  }
+
+  /**
+   * Voltear: normal ↔ mirror. Visual only (price, wear, comfort, function, capacity, identity, tile
+   * are untouched). Non-square pieces swap their footprint like the iso art implies, so the flip
+   * is refused when the swapped footprint would not fit on the same anchor tile.
+   */
+  toggleFurnitureFlip(id: string): { ok: boolean; reason?: string; flipX?: boolean } {
+    const def = this.getFurnitureDef(id);
+    if (!def) return { ok: false, reason: 'missing' };
+    if (!this.isFurnitureFlippable(def)) return { ok: false, reason: 'Este objeto no se puede voltear.' };
+    if (this.phase === 'open' && !this.buildMode) {
+      return { ok: false, reason: 'Voltea los muebles con el club cerrado.' };
+    }
+    const prevFp: [number, number] = [def.footprint[0], def.footprint[1]];
+    const nextFp = this.mirroredFootprint(prevFp);
+    if (nextFp[0] !== prevFp[0]) {
+      def.footprint = nextFp;
+      const fits = this.poseAllowed(def, def.tile[0], def.tile[1]);
+      if (!fits) {
+        def.footprint = prevFp;
+        return { ok: false, reason: 'No hay espacio para voltearlo aquí.' };
+      }
+    }
+    def.flipX = !def.flipX;
+    this.applyFurnitureOrientation(def);
+    this.repositionFurnitureVisual(def.id);
+    this.rebuildPathfinder();
+    this.syncBartenderBarDepth();
+    // Anyone seated / standing at it keeps facing it in its new orientation.
+    for (const p of this.patrons) {
+      if (p.active && p.seatedFurnitureId === def.id && p.seated) p.faceToward(this.faceTileFor(p.grid, def));
+    }
+    this.refreshServedVisuals();
+    this.persistLayout();
+    this.reemitFurnitureInspectIf(def.id);
+    return { ok: true, flipX: def.flipX };
+  }
+
+  private onCmdFlipFurniture = (payload?: { id?: string }): void => {
+    const id = payload?.id ?? this.selectedFurniture ?? this.inspectedFurnitureId ?? '';
+    if (!id) return;
+    const r = this.toggleFurnitureFlip(id);
+    if (!r.ok && r.reason && r.reason !== 'missing') {
+      if (this.buildMode) this.buildHint.setText(r.reason).setVisible(true);
+      else this.uiToast(r.reason);
+    }
+  };
+
+  /** Playwright/debug: orientation + everything a flip must NOT change. */
+  getFurnitureOrientationDebug(id: string) {
+    const def = this.getFurnitureDef(id);
+    if (!def) return null;
+    this.ensureFurnitureStats(def);
+    const st = this.statsOf(def);
+    const img = this.shopImages.get(def.id);
+    return {
+      id: def.id,
+      catalogId: def.catalogId ?? def.type,
+      flipX: !!def.flipX,
+      imgFlipX: !!img?.flipX,
+      texture: img?.texture.key ?? null,
+      angle: img?.angle ?? 0,
+      rotation: img?.rotation ?? 0,
+      scaleX: img?.scaleX ?? 0,
+      scaleY: img?.scaleY ?? 0,
+      displayW: img?.displayWidth ?? 0,
+      displayH: img?.displayHeight ?? 0,
+      x: img?.x ?? 0,
+      y: img?.y ?? 0,
+      tile: [...def.tile],
+      footprint: [...def.footprint],
+      price: this.purchasePriceOf(def),
+      durability: st.durability,
+      maxDurability: st.maxDurability,
+      comfort: st.comfort,
+      maxComfort: st.maxComfort,
+      cleanliness: st.cleanliness,
+      maxCleanliness: st.maxCleanliness,
+      repairCount: def.repairCount ?? 0,
+      front: this.frontTiles(def),
+      seats: this.seatSlotsForFurniture(def).length,
+      count: this.scenario.furniture.length,
+    };
+  }
+
   private spawnShopFurnitureVisual(def: FurnitureDef): void {
     const key = this.furnitureTextureKey(def.type, def);
     this.requireTexture(key);
@@ -5495,6 +5724,7 @@ export class ClubScene extends Phaser.Scene {
     const size = this.furnitureDisplaySize(def.type, def);
     const img = this.add.image(pos.x, pos.y, key);
     img.setDisplaySize(size.w, size.h);
+    this.applyFurnitureOrientation(def, img);
     img.setDepth(depthForFurniture(def.tile[0], def.tile[1], def.footprint));
     img.setInteractive({ useHandCursor: true });
     const instanceId = def.id;
@@ -5798,6 +6028,8 @@ export class ClubScene extends Phaser.Scene {
         return job ? this.repairStageLabel(job) : undefined;
       })(),
       repairCount: def.repairCount ?? 0,
+      flippable: this.isFurnitureFlippable(def),
+      flipX: !!def.flipX,
     };
   }
 
@@ -6005,7 +6237,7 @@ export class ClubScene extends Phaser.Scene {
     const world = this.cameras.main.getWorldPoint(p.x, p.y);
     const tile = screenToTile(world.x, world.y, this.iso);
     const z = zoneContaining(tile.col, tile.row);
-    if (z) this.openContextMenu(staff, { kind: 'floor', id: z.id }, p.x, p.y);
+    if (z) this.openContextMenu(staff, { kind: 'floor', id: z.id, col: tile.col, row: tile.row }, p.x, p.y);
   }
 
   private startLongPress(p: Phaser.Input.Pointer): void {
@@ -6120,6 +6352,9 @@ export class ClubScene extends Phaser.Scene {
     if (target.kind === 'floor') {
       const z = getFloorZoneById(target.id);
       if (!z) return null;
+      // Extra way to move her from the floor menu (left-click / tap on the floor still walks directly).
+      const hasTile = typeof target.col === 'number' && typeof target.row === 'number';
+      if (hasTile) add(`walk:${target.col},${target.row}`, 'Caminar aquí');
       if (z.dryDirt >= 8) add(`sweep:${z.id}`, 'Barrer');
       if (z.grime >= 8) add(`mop:${z.id}`, 'Trapear');
       {
@@ -6129,7 +6364,7 @@ export class ClubScene extends Phaser.Scene {
           add(`pick_trash:${here[0].id}`, 'Limpiar basura', !why, why ?? undefined);
         }
       }
-      if (!actions.length) add('noop', 'Barrer', false, 'El piso está limpio');
+      if (!actions.some((a) => a.id !== `walk:${target.col},${target.row}`)) add('noop', 'Barrer', false, 'El piso está limpio');
       const flies = this.flyZones.get(z.id)?.active;
       const band = floorDirtBand(z);
       const bandEs: Record<string, string> = { clean: 'Limpio', slight: 'Algo sucio', dirty: 'Sucio', very_dirty: 'Muy sucio' };
@@ -6333,6 +6568,11 @@ export class ClubScene extends Phaser.Scene {
       case 'collect':
         if (def) started = this.beginCollectServed(staff, def);
         break;
+      case 'walk': {
+        const [wc, wr] = (arg ?? '').split(',').map((n) => Number(n));
+        if (Number.isFinite(wc) && Number.isFinite(wr)) started = this.walkStaffToTile(staff, { col: wc, row: wr });
+        break;
+      }
       case 'haul':
       case 'pick_trash':
       case 'take_out_trash':
@@ -6582,7 +6822,7 @@ export class ClubScene extends Phaser.Scene {
       if (staff.jobToken !== tok) return;
       if (staff === this.bartender) this.syncBartenderBarDepth();
       staff.stopBob();
-      staff.faceToward({ col: staff.grid.col, row: staff.grid.row - 1 });
+      staff.faceToward(this.faceTileFor(staff.grid, def));
       if (!staff.playServeBeerAnim()) staff.startBob();
       const ms = (this.resolveServeDrink(BEER_TAP_DRINK_ID)?.serveTimeMs ?? 2000) * slowServeFactor(staff.profile.id);
       this.time.delayedCall(ms, () => {
@@ -6770,7 +7010,9 @@ export class ClubScene extends Phaser.Scene {
       const s = tileToScreen(it.col, it.row, this.iso);
       return { x: s.x + idx * 9 - 9, y: s.y - 18 };
     }
-    return { x: img.x - 12 + idx * 10, y: img.y - img.displayHeight * 0.32 };
+    // Mirrored counter: mugs sit on the mirrored side of the art.
+    const dir = img.flipX || this.getFurnitureDef(fid ?? '')?.flipX ? -1 : 1;
+    return { x: img.x + dir * (-12 + idx * 10), y: img.y - img.displayHeight * 0.32 };
   }
 
   private refreshServedVisuals(): void {
@@ -7070,7 +7312,6 @@ export class ClubScene extends Phaser.Scene {
       furnitureName: this.furnitureDisplayName(def),
       diagnosis: job.diagnosis,
       cost: job.quote,
-      newPrice: price,
       money: this.money,
       canAfford: this.money >= job.quote,
     } as RepairVerdictPayload);
@@ -7887,9 +8128,16 @@ export class ClubScene extends Phaser.Scene {
     const c0 = bar.tile[0];
     const r0 = bar.tile[1];
     const cands: Array<{ col: number; row: number }> = [];
-    for (let c = c0; c < c0 + fw; c++) cands.push({ col: c, row: r0 - 1 });
-    cands.push({ col: c0 - 1, row: r0 - 1 }, { col: c0 + fw, row: r0 - 1 });
-    for (let r = r0; r < r0 + fh; r++) cands.push({ col: c0 + fw, row: r }, { col: c0 - 1, row: r });
+    if (bar.flipX) {
+      // Mirrored bar faces +col → its back is the column before it.
+      for (let r = r0; r < r0 + fh; r++) cands.push({ col: c0 - 1, row: r });
+      cands.push({ col: c0 - 1, row: r0 - 1 }, { col: c0 - 1, row: r0 + fh });
+      for (let c = c0; c < c0 + fw; c++) cands.push({ col: c, row: r0 + fh }, { col: c, row: r0 - 1 });
+    } else {
+      for (let c = c0; c < c0 + fw; c++) cands.push({ col: c, row: r0 - 1 });
+      cands.push({ col: c0 - 1, row: r0 - 1 }, { col: c0 + fw, row: r0 - 1 });
+      for (let r = r0; r < r0 + fh; r++) cands.push({ col: c0 + fw, row: r }, { col: c0 - 1, row: r });
+    }
     const front = this.frontTiles(bar);
     if (front[1]) cands.push(front[1]);
     if (front[0]) cands.push(front[0]);
@@ -8804,6 +9052,7 @@ export class ClubScene extends Phaser.Scene {
     this.game.events.off('cmd-restock-drink', this.onCmdRestockDrink, this);
     this.game.events.off('cmd-set-drink-price', this.onCmdSetDrinkPrice, this);
     this.game.events.off('cmd-deselect-furniture', this.onCmdDeselectFurniture, this);
+    this.game.events.off('cmd-flip-furniture', this.onCmdFlipFurniture, this);
     this.game.events.off('cmd-confirm-delete-furniture', this.onCmdConfirmDeleteFurniture, this);
     this.game.events.off('cmd-cancel-delete-furniture', this.onCmdCancelDeleteFurniture, this);
   }
