@@ -63,6 +63,9 @@ export function maxStatsForPrice(price: number): {
   };
 }
 
+/** Wear rates were designed for 75 s nights; nights now last ~480 s, so time-based wear is scaled by 75/480. */
+export const DECAY_TIME_SCALE = 75 / 480;
+
 export function decayScaleForPrice(price: number): number {
   return STARTER_FURNITURE_PRICE / Math.max(20, price);
 }
@@ -96,7 +99,7 @@ export function applyDecay(
   price: number
 ): void {
   if (dtSec <= 0) return;
-  const scale = decayScaleForPrice(price);
+  const scale = decayScaleForPrice(price) * DECAY_TIME_SCALE;
   stats.durability = clampStat(
     stats.durability - DECAY_PER_SEC.durability * scale * dtSec,
     stats.maxDurability
@@ -129,7 +132,7 @@ export function applyUsageWear(
   opts: { occupiedSec?: number; serves?: number }
 ): void {
   const scale = decayScaleForPrice(price);
-  const occ = Math.max(0, opts.occupiedSec ?? 0) * USAGE_WEAR.occupiedExtra * scale;
+  const occ = Math.max(0, opts.occupiedSec ?? 0) * USAGE_WEAR.occupiedExtra * scale * DECAY_TIME_SCALE;
   const hit = Math.max(0, opts.serves ?? 0) * USAGE_WEAR.perServe * scale;
   stats.durability = clampStat(stats.durability - DECAY_PER_SEC.durability * occ - hit, stats.maxDurability);
   stats.comfort = clampStat(stats.comfort - DECAY_PER_SEC.comfort * occ, stats.maxComfort);
